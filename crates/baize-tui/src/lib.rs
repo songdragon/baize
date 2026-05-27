@@ -12,16 +12,21 @@ use serde_json::{json, Value};
 use std::io::{stdout, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread::sleep;
 use std::time::Duration;
 
 const DAEMON_HOST: &str = "127.0.0.1";
 const DAEMON_PORT: u16 = 7878;
 const PROMPT_TIMEOUT_SECONDS: u64 = 10;
+const DAEMON_START_ATTEMPTS: usize = 20;
+const DAEMON_START_POLL_MS: u64 = 100;
 
 #[derive(Debug, Clone)]
 pub struct TuiState {
     pub workspace: String,
     pub session: String,
+    pub daemon_status: String,
     pub providers: Vec<String>,
     pub selected_provider_index: usize,
     pub active_provider: Option<String>,
@@ -35,8 +40,9 @@ impl Default for TuiState {
     fn default() -> Self {
         Self {
             workspace: "Baize MVP TUI".to_string(),
-            session: "Type a prompt and press Enter.\nEsc or Ctrl-C quits.\n\nRequires baize daemon at 127.0.0.1:7878."
+            session: "Type a prompt and press Enter.\nEsc or Ctrl-C quits.\n\nBaize starts the local daemon automatically when possible."
                 .to_string(),
+            daemon_status: "daemon: not checked".to_string(),
             providers: vec![
                 "codex".to_string(),
                 "gemini".to_string(),
@@ -54,12 +60,15 @@ impl Default for TuiState {
 }
 
 pub fn run() -> Result<()> {
+    let daemon_status =
+        ensure_daemon_running().unwrap_or_else(|error| format!("daemon: unavailable ({error:#})"));
+
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal);
+    let result = run_app(&mut terminal, daemon_status);
 
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -68,8 +77,12 @@ pub fn run() -> Result<()> {
     result
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    daemon_status: String,
+) -> Result<()> {
     let mut state = TuiState::default();
+    state.daemon_status = daemon_status;
     loop {
         terminal.draw(|frame| render(frame, &state))?;
 
@@ -103,7 +116,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(5),
+            Constraint::Length(6),
         ])
         .split(frame.area());
 
@@ -119,7 +132,8 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "Providers: {}\nRoute: {}\n> {}",
+            "{}\nProviders: {}\nRoute: {}\n> {}",
+            state.daemon_status,
             state.provider_status(),
             state.route_status(),
             state.input
@@ -127,6 +141,57 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .block(Block::default().title("Status").borders(Borders::ALL)),
         chunks[2],
     );
+}
+
+fn ensure_daemon_running() -> Result<String> {
+    if daemon_healthy() {
+        return Ok(daemon_connected_message());
+    }
+
+    start_daemon_process()?;
+    for _ in 0..DAEMON_START_ATTEMPTS {
+        if daemon_healthy() {
+            return Ok(format!("{} (auto-started)", daemon_connected_message()));
+        }
+        sleep(Duration::from_millis(DAEMON_START_POLL_MS));
+    }
+
+    Err(anyhow!(
+        "started daemon process, but health check did not pass at http://{DAEMON_HOST}:{DAEMON_PORT}/health"
+    ))
+}
+
+fn daemon_healthy() -> bool {
+    get_json("/health")
+        .ok()
+        .and_then(|response| {
+            response
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some("ok")
+}
+
+fn start_daemon_process() -> Result<()> {
+    let executable = std::env::current_exe().context("resolve current executable")?;
+    Command::new(executable)
+        .args(daemon_start_args())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start baize daemon")?;
+    Ok(())
+}
+
+fn daemon_start_args() -> [&'static str; 1] {
+    ["daemon"]
+}
+
+fn daemon_connected_message() -> String {
+    format!("daemon: connected at {DAEMON_HOST}:{DAEMON_PORT}")
 }
 
 fn submit_prompt(state: &mut TuiState) -> Result<()> {
@@ -407,7 +472,7 @@ mod tests {
 
     #[test]
     fn renders_mvp_dashboard_text() {
-        let backend = TestBackend::new(80, 12);
+        let backend = TestBackend::new(80, 14);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState::default();
 
@@ -416,6 +481,7 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("Baize MVP TUI"));
+        assert!(rendered.contains("daemon: not checked"));
         assert!(rendered.contains("Providers: [codex], gemini, copilot, opencode"));
     }
 
@@ -439,7 +505,7 @@ mod tests {
 
     #[test]
     fn renders_prompt_input() {
-        let backend = TestBackend::new(80, 14);
+        let backend = TestBackend::new(80, 15);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
             input: "hello baize".to_string(),
@@ -474,5 +540,18 @@ mod tests {
 
         assert_eq!(state.selected_provider(), "codex");
         assert!(state.session.contains("provider locked"));
+    }
+
+    #[test]
+    fn daemon_start_command_uses_daemon_subcommand() {
+        assert_eq!(daemon_start_args(), ["daemon"]);
+    }
+
+    #[test]
+    fn daemon_connected_message_uses_local_endpoint() {
+        assert_eq!(
+            daemon_connected_message(),
+            "daemon: connected at 127.0.0.1:7878"
+        );
     }
 }
