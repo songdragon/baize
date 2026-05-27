@@ -65,5 +65,49 @@ pub fn load_or_default() -> Result<BaizeConfig> {
 
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read config at {}", path.display()))?;
-    toml::from_str(&raw).with_context(|| format!("failed to parse config at {}", path.display()))
+    parse_config(&raw).with_context(|| format!("failed to parse config at {}", path.display()))
+}
+
+pub fn parse_config(raw: &str) -> Result<BaizeConfig> {
+    toml::from_str(raw).context("failed to parse config")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_uses_codex_gemini_first() {
+        let config = BaizeConfig::default();
+
+        assert_eq!(config.daemon.host, "127.0.0.1");
+        assert_eq!(config.daemon.port, 7878);
+        assert_eq!(config.providers.order[0], "codex");
+        assert_eq!(config.providers.order[1], "gemini");
+        assert_eq!(config.workspace.command_policy, "ask");
+    }
+
+    #[test]
+    fn parses_toml_config() {
+        let config = parse_config(
+            r#"
+            [daemon]
+            host = "0.0.0.0"
+            port = 9000
+
+            [workspace]
+            command_policy = "allow_project"
+            checkpoint_policy = "off"
+
+            [providers]
+            order = ["gemini", "codex"]
+            "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.daemon.host, "0.0.0.0");
+        assert_eq!(config.daemon.port, 9000);
+        assert_eq!(config.workspace.command_policy, "allow_project");
+        assert_eq!(config.providers.order, vec!["gemini", "codex"]);
+    }
 }

@@ -65,6 +65,15 @@ impl EventStore {
         )?;
         Ok(())
     }
+
+    pub fn event_count(&self) -> Result<u64> {
+        let count = self
+            .conn
+            .query_row("select count(*) from events", [], |row| {
+                row.get::<_, u64>(0)
+            })?;
+        Ok(count)
+    }
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -75,4 +84,26 @@ pub fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("baize")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baize_core::BaizeEvent;
+    use serde_json::json;
+
+    #[test]
+    fn creates_database_and_appends_events() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("baize.db");
+        let store = EventStore::open(&db_path).expect("store should open");
+
+        assert_eq!(store.event_count().expect("count"), 0);
+
+        let event = BaizeEvent::new("test.event", json!({ "ok": true }));
+        store.append_event(&event).expect("append should work");
+
+        assert_eq!(store.event_count().expect("count"), 1);
+        assert!(db_path.exists());
+    }
 }

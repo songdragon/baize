@@ -57,3 +57,23 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_plain_directory_without_git() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let status = inspect(temp.path()).expect("inspect should work");
+
+        assert_eq!(
+            status.root,
+            temp.path().canonicalize().expect("canonical path")
+        );
+        assert!(status.git_root.is_none());
+        assert!(status.branch.is_none());
+        assert!(!status.dirty);
+        assert!(status.changed_files.is_empty());
+    }
+}

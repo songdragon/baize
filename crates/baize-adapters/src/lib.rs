@@ -129,3 +129,43 @@ fn unavailable(
         checked_at: Utc::now(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baize_core::ProviderTransport;
+
+    #[test]
+    fn default_profiles_prioritize_codex_and_gemini() {
+        let profiles = default_provider_profiles();
+
+        assert_eq!(profiles[0].id.0, "codex");
+        assert_eq!(profiles[1].id.0, "gemini");
+        assert_eq!(profiles[2].id.0, "copilot");
+        assert_eq!(profiles[3].id.0, "opencode");
+    }
+
+    #[test]
+    fn copilot_and_opencode_expose_acp_transports() {
+        let profiles = default_provider_profiles();
+        let copilot = profiles
+            .iter()
+            .find(|profile| profile.id.0 == "copilot")
+            .expect("copilot profile");
+        let opencode = profiles
+            .iter()
+            .find(|profile| profile.id.0 == "opencode")
+            .expect("opencode profile");
+
+        assert!(copilot.capabilities.acp);
+        assert!(opencode.capabilities.acp);
+        assert!(matches!(
+            copilot.transports[0],
+            ProviderTransport::Acp { .. }
+        ));
+        assert!(matches!(
+            opencode.transports[0],
+            ProviderTransport::Acp { .. }
+        ));
+    }
+}

@@ -8,3 +8,6 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

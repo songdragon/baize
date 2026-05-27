@@ -11,3 +11,6 @@ baize-core = { path = "../baize-core" }
 dirs.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

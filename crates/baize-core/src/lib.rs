@@ -207,3 +207,29 @@ impl BaizeEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn generated_ids_have_expected_prefixes() {
+        assert!(WorkspaceId::new().0.starts_with("ws_"));
+        assert!(ProjectId::new().0.starts_with("prj_"));
+        assert!(TaskSessionId::new().0.starts_with("task_"));
+        assert!(EventId::new().0.starts_with("evt_"));
+    }
+
+    #[test]
+    fn event_constructor_sets_required_fields() {
+        let event = BaizeEvent::new("session.created", json!({ "objective": "test" }));
+
+        assert_eq!(event.event_type, "session.created");
+        assert!(event.id.0.starts_with("evt_"));
+        assert_eq!(event.payload["objective"], "test");
+        assert!(event.workspace_id.is_none());
+        assert!(event.session_id.is_none());
+        assert!(event.provider_id.is_none());
+    }
+}

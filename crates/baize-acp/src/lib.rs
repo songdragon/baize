@@ -36,3 +36,19 @@ pub fn request(id: impl Into<Value>, method: impl Into<String>, params: Value) -
         params,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn builds_json_rpc_request() {
+        let request = request(1, "initialize", json!({ "client": "baize" }));
+
+        assert_eq!(request.jsonrpc, "2.0");
+        assert_eq!(request.id, json!(1));
+        assert_eq!(request.method, "initialize");
+        assert_eq!(request.params["client"], "baize");
+    }
+}
