@@ -4,7 +4,7 @@ Status: implemented
 
 ## Scope
 
-This MVP implements the review-passed technical spec as a local Rust daemon plus TUI shell. Real agent execution is intentionally not enabled yet; prompt handling records events and returns an accepted MVP response while adapter validation focuses on provider discovery and health.
+This MVP implements the review-passed technical spec as a local Rust daemon plus TUI shell. Gemini and Codex prompt execution paths are wired through CLI adapters; tests use fake executors and parser fixtures so CI does not spend model quota.
 
 ## Implemented Work
 
@@ -41,6 +41,8 @@ This MVP implements the review-passed technical spec as a local Rust daemon plus
 - structured validation for Codex/Gemini/Copilot/OpenCode;
 - detected capabilities and capability gap reporting;
 - daemon endpoints for provider validation.
+- Gemini `--prompt --output-format stream-json` execution path;
+- Codex `exec --json` execution path.
 
 ### 5. Daemon API
 
@@ -105,11 +107,13 @@ This MVP implements the review-passed technical spec as a local Rust daemon plus
 - adapter provider priority and ACP transport metadata;
 - daemon workspace/session/prompt/events flow;
 - daemon handoff creation;
+- Gemini/Codex command construction;
+- stream-json/JSONL parser behavior;
+- daemon prompt flow with fake executor;
 - TUI dashboard rendering.
 
 ## Out Of MVP
 
-- real provider prompt execution;
 - ACP session lifecycle implementation beyond message primitives;
 - quota extraction from providers;
 - multi-workspace TUI switching;

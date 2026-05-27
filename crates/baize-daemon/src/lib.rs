@@ -4,8 +4,10 @@ use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use baize_adapters::{
-    check_provider, default_provider_profiles, validate_all_providers, validate_provider,
+    check_provider, default_provider_profiles, run_agent_prompt, validate_all_providers,
+    validate_provider,
 };
+use baize_adapters::{AgentExecutionEventKind, AgentPromptRequest, AgentRunResult};
 use baize_config::BaizeConfig;
 use baize_core::{
     BaizeEvent, HandoffFacts, HandoffId, HandoffStatus, HandoffSummary, PermissionId,
@@ -32,6 +34,20 @@ pub struct AppState {
     config: BaizeConfig,
     store: Arc<Mutex<EventStore>>,
     events: broadcast::Sender<BaizeEvent>,
+    executor: Arc<dyn AgentExecutor>,
+}
+
+pub trait AgentExecutor: Send + Sync {
+    fn run_prompt(&self, request: AgentPromptRequest) -> Result<AgentRunResult>;
+}
+
+#[derive(Clone)]
+struct RealAgentExecutor;
+
+impl AgentExecutor for RealAgentExecutor {
+    fn run_prompt(&self, request: AgentPromptRequest) -> Result<AgentRunResult> {
+        run_agent_prompt(request)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,11 +99,20 @@ pub async fn run(config: BaizeConfig) -> Result<()> {
 
 impl AppState {
     pub fn new(config: BaizeConfig, store: EventStore) -> Self {
+        Self::with_executor(config, store, Arc::new(RealAgentExecutor))
+    }
+
+    pub fn with_executor(
+        config: BaizeConfig,
+        store: EventStore,
+        executor: Arc<dyn AgentExecutor>,
+    ) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             config,
             store: Arc::new(Mutex::new(store)),
             events,
+            executor,
         }
     }
 
@@ -354,30 +379,96 @@ async fn prompt_session(
         .active_provider_id
         .clone()
         .unwrap_or_else(|| ProviderId("codex".to_string()));
+    let workspace = match with_store(&state, |store| store.get_workspace(&session.workspace_id)) {
+        Ok(Some(workspace)) => workspace,
+        _ => return Json(json!({ "error": "workspace not found" })),
+    };
+    let project = match with_store(&state, |store| store.get_primary_project(&workspace)) {
+        Ok(Some(project)) => project,
+        _ => return Json(json!({ "error": "project not found" })),
+    };
 
-    for (event_type, payload) in [
-        (
-            "session.agent.started",
-            json!({ "prompt": request.prompt, "provider_id": provider_id.0 }),
-        ),
-        (
-            "session.agent.output",
-            json!({ "text": "MVP prompt accepted; real provider execution is not enabled yet." }),
-        ),
-        ("session.agent.completed", json!({ "status": "completed" })),
-    ] {
-        let mut event = BaizeEvent::new(event_type, payload);
-        event.workspace_id = Some(session.workspace_id.clone());
-        event.session_id = Some(session.id.clone());
-        event.provider_id = Some(provider_id.clone());
-        state.record_event(event);
+    let mut started = BaizeEvent::new(
+        "session.agent.started",
+        json!({ "prompt": request.prompt, "provider_id": provider_id.0 }),
+    );
+    started.workspace_id = Some(session.workspace_id.clone());
+    started.session_id = Some(session.id.clone());
+    started.provider_id = Some(provider_id.clone());
+    state.record_event(started);
+
+    let run = state.executor.run_prompt(AgentPromptRequest {
+        provider_id: provider_id.clone(),
+        prompt: request.prompt,
+        cwd: project.root,
+        session_id: None,
+    });
+
+    match run {
+        Ok(result) => {
+            for adapter_event in &result.events {
+                let event_type = match adapter_event.kind {
+                    AgentExecutionEventKind::Output | AgentExecutionEventKind::Raw => {
+                        "session.agent.output"
+                    }
+                    AgentExecutionEventKind::ToolCall => "session.agent.tool_call",
+                };
+                let mut event = BaizeEvent::new(
+                    event_type,
+                    json!({
+                        "text": adapter_event.text,
+                        "raw": adapter_event.raw,
+                    }),
+                );
+                event.workspace_id = Some(session.workspace_id.clone());
+                event.session_id = Some(session.id.clone());
+                event.provider_id = Some(provider_id.clone());
+                state.record_event(event);
+            }
+
+            let final_event_type = if result.success {
+                "session.agent.completed"
+            } else {
+                "session.agent.failed"
+            };
+            let mut final_event = BaizeEvent::new(
+                final_event_type,
+                json!({
+                    "success": result.success,
+                    "exit_code": result.exit_code,
+                    "stderr": result.stderr,
+                }),
+            );
+            final_event.workspace_id = Some(session.workspace_id.clone());
+            final_event.session_id = Some(session.id.clone());
+            final_event.provider_id = Some(provider_id.clone());
+            state.record_event(final_event);
+
+            Json(json!({
+                "status": if result.success { "completed" } else { "failed" },
+                "provider_id": provider_id,
+                "events": result.events,
+                "exit_code": result.exit_code,
+                "stderr": result.stderr,
+            }))
+        }
+        Err(error) => {
+            let mut failed = BaizeEvent::new(
+                "session.agent.failed",
+                json!({ "error": error.to_string() }),
+            );
+            failed.workspace_id = Some(session.workspace_id.clone());
+            failed.session_id = Some(session.id.clone());
+            failed.provider_id = Some(provider_id.clone());
+            state.record_event(failed);
+
+            Json(json!({
+                "status": "failed",
+                "provider_id": provider_id,
+                "error": error.to_string(),
+            }))
+        }
     }
-
-    Json(json!({
-        "status": "accepted",
-        "provider_id": provider_id,
-        "message": "MVP prompt accepted; real provider execution is not enabled yet."
-    }))
 }
 
 async fn cancel_session(
@@ -632,11 +723,38 @@ mod tests {
     use axum::http::{Method, Request, StatusCode};
     use tower::ServiceExt;
 
+    #[derive(Clone)]
+    struct FakeAgentExecutor {
+        result: AgentRunResult,
+    }
+
+    impl AgentExecutor for FakeAgentExecutor {
+        fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+            Ok(self.result.clone())
+        }
+    }
+
     fn test_app() -> (Router, tempfile::TempDir, tempfile::TempDir) {
         let data_dir = tempfile::tempdir().expect("data dir");
         let project_dir = tempfile::tempdir().expect("project dir");
         let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
-        let state = AppState::new(BaizeConfig::default(), store);
+        let state = AppState::with_executor(
+            BaizeConfig::default(),
+            store,
+            Arc::new(FakeAgentExecutor {
+                result: AgentRunResult {
+                    provider_id: ProviderId("codex".to_string()),
+                    success: true,
+                    exit_code: Some(0),
+                    events: vec![baize_adapters::AgentExecutionEvent {
+                        kind: AgentExecutionEventKind::Output,
+                        text: Some("fake output".to_string()),
+                        raw: None,
+                    }],
+                    stderr: String::new(),
+                },
+            }),
+        );
         (router(state), data_dir, project_dir)
     }
 
@@ -695,7 +813,7 @@ mod tests {
                 .expect("request"),
         )
         .await;
-        assert_eq!(prompt["status"], "accepted");
+        assert_eq!(prompt["status"], "completed");
 
         let events = json_response(
             app,
@@ -710,6 +828,12 @@ mod tests {
             .expect("events")
             .iter()
             .any(|event| event["event_type"] == "session.agent.completed"));
+        assert!(events["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .any(|event| event["event_type"] == "session.agent.output"
+                && event["payload"]["text"] == "fake output"));
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ This repository currently contains the first Rust MVP skeleton:
 - ACP JSON-RPC message primitives;
 - provider registry and health probing stubs;
 - local daemon with HTTP + SSE workspace/session/handoff/permission APIs;
+- Gemini `stream-json` and Codex `exec --json` prompt execution paths;
 - ratatui TUI shell;
 - `baize` CLI entrypoint.
 
@@ -64,4 +65,4 @@ GET  /events
 
 ## Notes
 
-The first adapter validation path is Codex/Gemini. If their ACP or session-control capability is insufficient, the adapter layer will record the gap and fall back to native/server/CLI integration.
+The first adapter execution paths are Gemini `--prompt --output-format stream-json` and Codex `exec --json`. Tests use fake executors and parser fixtures so they do not spend model quota.

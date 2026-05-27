@@ -1,9 +1,12 @@
+use anyhow::{Context, Result};
 use baize_core::{
     HealthStatus, ProviderCapabilities, ProviderHealth, ProviderId, ProviderKind, ProviderProfile,
     ProviderTransport,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
@@ -24,6 +27,37 @@ pub struct DetectedCapabilities {
     pub session_resume: bool,
     pub mcp_server: bool,
     pub app_server: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPromptRequest {
+    pub provider_id: ProviderId,
+    pub prompt: String,
+    pub cwd: PathBuf,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRunResult {
+    pub provider_id: ProviderId,
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub events: Vec<AgentExecutionEvent>,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentExecutionEvent {
+    pub kind: AgentExecutionEventKind,
+    pub text: Option<String>,
+    pub raw: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentExecutionEventKind {
+    Output,
+    ToolCall,
+    Raw,
 }
 
 pub fn default_provider_profiles() -> Vec<ProviderProfile> {
@@ -189,6 +223,108 @@ pub fn validate_all_providers() -> Vec<ProviderValidation> {
         .collect()
 }
 
+pub fn run_agent_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
+    match request.provider_id.0.as_str() {
+        "gemini" => run_gemini_prompt(request),
+        "codex" => run_codex_prompt(request),
+        other => anyhow::bail!("provider execution is not implemented for {other}"),
+    }
+}
+
+pub fn build_gemini_args(request: &AgentPromptRequest) -> Vec<String> {
+    let mut args = vec![
+        "--prompt".to_string(),
+        request.prompt.clone(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--approval-mode".to_string(),
+        "plan".to_string(),
+        "--skip-trust".to_string(),
+    ];
+    if let Some(session_id) = &request.session_id {
+        args.push("--session-id".to_string());
+        args.push(session_id.clone());
+    }
+    args
+}
+
+pub fn build_codex_args(request: &AgentPromptRequest) -> Vec<String> {
+    let mut args = vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "--sandbox".to_string(),
+        "read-only".to_string(),
+        "--ask-for-approval".to_string(),
+        "never".to_string(),
+        "--cd".to_string(),
+        request.cwd.to_string_lossy().to_string(),
+    ];
+    if let Some(session_id) = &request.session_id {
+        args.push("resume".to_string());
+        args.push(session_id.clone());
+    }
+    args.push(request.prompt.clone());
+    args
+}
+
+pub fn parse_stream_json_lines(raw: &str) -> Vec<AgentExecutionEvent> {
+    raw.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let value = serde_json::from_str::<Value>(line).ok()?;
+            let kind = if looks_like_tool_call(&value) {
+                AgentExecutionEventKind::ToolCall
+            } else if find_text(&value).is_some() {
+                AgentExecutionEventKind::Output
+            } else {
+                AgentExecutionEventKind::Raw
+            };
+            Some(AgentExecutionEvent {
+                text: find_text(&value),
+                kind,
+                raw: Some(value),
+            })
+        })
+        .collect()
+}
+
+fn run_gemini_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
+    let output = Command::new("gemini")
+        .args(build_gemini_args(&request))
+        .current_dir(&request.cwd)
+        .output()
+        .with_context(|| "failed to run gemini prompt")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(AgentRunResult {
+        provider_id: request.provider_id,
+        success: output.status.success(),
+        exit_code: output.status.code(),
+        events: parse_stream_json_lines(&stdout),
+        stderr,
+    })
+}
+
+fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
+    let output = Command::new("codex")
+        .args(build_codex_args(&request))
+        .current_dir(&request.cwd)
+        .output()
+        .with_context(|| "failed to run codex prompt")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(AgentRunResult {
+        provider_id: request.provider_id,
+        success: output.status.success(),
+        exit_code: output.status.code(),
+        events: parse_stream_json_lines(&stdout),
+        stderr,
+    })
+}
+
 fn detect_capabilities(
     profile: &ProviderProfile,
     help: Option<&str>,
@@ -229,6 +365,38 @@ fn detect_capabilities(
             ..DetectedCapabilities::default()
         },
         ProviderKind::Other(_) => DetectedCapabilities::default(),
+    }
+}
+
+fn looks_like_tool_call(value: &Value) -> bool {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|ty| ty.contains("tool") || ty.contains("call"))
+        .unwrap_or(false)
+        || value.get("tool").is_some()
+        || value.get("tool_call").is_some()
+}
+
+fn find_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.clone())
+            }
+        }
+        Value::Array(values) => values.iter().find_map(find_text),
+        Value::Object(map) => {
+            for key in ["text", "content", "message", "delta"] {
+                if let Some(text) = map.get(key).and_then(find_text) {
+                    return Some(text);
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -383,5 +551,67 @@ mod tests {
         );
 
         assert_eq!(version, "codex-cli 0.133.0");
+    }
+
+    #[test]
+    fn builds_safe_gemini_stream_json_command() {
+        let request = AgentPromptRequest {
+            provider_id: ProviderId("gemini".to_string()),
+            prompt: "hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: Some("session-1".to_string()),
+        };
+
+        let args = build_gemini_args(&request);
+
+        assert!(args.windows(2).any(|pair| pair == ["--prompt", "hello"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "stream-json"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--approval-mode", "plan"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-id", "session-1"]));
+    }
+
+    #[test]
+    fn builds_safe_codex_json_command() {
+        let request = AgentPromptRequest {
+            provider_id: ProviderId("codex".to_string()),
+            prompt: "hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: None,
+        };
+
+        let args = build_codex_args(&request);
+
+        assert_eq!(args[0], "exec");
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--ask-for-approval", "never"]));
+        assert_eq!(args.last().expect("prompt"), "hello");
+    }
+
+    #[test]
+    fn parses_stream_json_output_and_tool_events() {
+        let raw = r#"
+        {"type":"message","message":{"content":[{"text":"hello"}]}}
+        {"type":"tool_call","tool":"read_file","args":{"path":"README.md"}}
+        {"type":"unknown","value":123}
+        "#;
+
+        let events = parse_stream_json_lines(raw);
+
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0].kind, AgentExecutionEventKind::Output));
+        assert_eq!(events[0].text.as_deref(), Some("hello"));
+        assert!(matches!(events[1].kind, AgentExecutionEventKind::ToolCall));
+        assert!(matches!(events[2].kind, AgentExecutionEventKind::Raw));
     }
 }
