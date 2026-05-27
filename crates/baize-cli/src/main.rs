@@ -20,6 +20,9 @@ enum Command {
     },
     Doctor,
     Providers,
+    Validate {
+        provider: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -52,6 +55,21 @@ async fn main() -> Result<()> {
         Command::Providers => {
             let providers = baize_adapters::default_provider_profiles();
             println!("{}", serde_json::to_string_pretty(&providers)?);
+            Ok(())
+        }
+        Command::Validate { provider } => {
+            let providers = baize_adapters::default_provider_profiles();
+            if let Some(provider) = provider {
+                let Some(profile) = providers.iter().find(|profile| profile.id.0 == provider)
+                else {
+                    anyhow::bail!("unknown provider: {provider}");
+                };
+                let validation = baize_adapters::validate_provider(profile);
+                println!("{}", serde_json::to_string_pretty(&validation)?);
+            } else {
+                let validations = baize_adapters::validate_all_providers();
+                println!("{}", serde_json::to_string_pretty(&validations)?);
+            }
             Ok(())
         }
     }

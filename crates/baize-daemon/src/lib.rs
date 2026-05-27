@@ -3,7 +3,9 @@ use axum::extract::{Path as AxumPath, State};
 use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use baize_adapters::{check_provider, default_provider_profiles};
+use baize_adapters::{
+    check_provider, default_provider_profiles, validate_all_providers, validate_provider,
+};
 use baize_config::BaizeConfig;
 use baize_core::{
     BaizeEvent, HandoffFacts, HandoffId, HandoffStatus, HandoffSummary, PermissionId,
@@ -104,7 +106,9 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/:id/status", get(workspace_status_by_id))
         .route("/providers", get(providers))
         .route("/providers/:id/health", get(provider_health))
+        .route("/providers/:id/validate", get(provider_validate))
         .route("/providers/check", post(check_providers))
+        .route("/providers/validate", post(validate_providers))
         .route("/workspaces/status", get(workspace_status))
         .route("/sessions", get(sessions).post(create_session))
         .route("/sessions/:id", get(session))
@@ -144,12 +148,30 @@ async fn provider_health(AxumPath(id): AxumPath<String>) -> Json<serde_json::Val
     Json(json!({ "health": check_provider(&provider) }))
 }
 
+async fn provider_validate(AxumPath(id): AxumPath<String>) -> Json<serde_json::Value> {
+    let providers = default_provider_profiles();
+    let Some(provider) = providers.into_iter().find(|provider| provider.id.0 == id) else {
+        return Json(json!({ "error": "provider not found" }));
+    };
+    Json(json!({ "validation": validate_provider(&provider) }))
+}
+
 async fn check_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
     let providers = default_provider_profiles();
     let health = providers.iter().map(check_provider).collect::<Vec<_>>();
     let event = BaizeEvent::new("provider.health.changed", json!({ "health": health }));
     state.record_event(event);
     Json(json!({ "health": health }))
+}
+
+async fn validate_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let validations = validate_all_providers();
+    let event = BaizeEvent::new(
+        "provider.validation.completed",
+        json!({ "validations": validations }),
+    );
+    state.record_event(event);
+    Json(json!({ "validations": validations }))
 }
 
 async fn workspaces(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -748,5 +770,21 @@ mod tests {
             handoff["handoff"]["mechanical_facts"]["user_constraints"][0],
             "do not change public API"
         );
+    }
+
+    #[tokio::test]
+    async fn validates_known_provider() {
+        let (app, _data_dir, _project_dir) = test_app();
+        let validation = json_response(
+            app,
+            Request::builder()
+                .uri("/providers/gemini/validate")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        assert_eq!(validation["validation"]["provider_id"], "gemini");
+        assert!(validation["validation"]["detected"].is_object());
     }
 }

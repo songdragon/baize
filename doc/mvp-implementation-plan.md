@@ -38,6 +38,9 @@ This MVP implements the review-passed technical spec as a local Rust daemon plus
 - provider transport registry;
 - health probing via provider command `--version`;
 - ACP transport metadata for Copilot and OpenCode.
+- structured validation for Codex/Gemini/Copilot/OpenCode;
+- detected capabilities and capability gap reporting;
+- daemon endpoints for provider validation.
 
 ### 5. Daemon API
 

@@ -146,6 +146,8 @@ pub struct ProviderCapabilities {
     pub structured_output: bool,
     pub usage_telemetry: bool,
     pub acp: bool,
+    pub session_resume: bool,
+    pub mcp_server: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

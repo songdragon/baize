@@ -25,6 +25,8 @@ Once Rust is installed:
 cargo run -p baize-cli -- status .
 cargo run -p baize-cli -- providers
 cargo run -p baize-cli -- doctor
+cargo run -p baize-cli -- validate
+cargo run -p baize-cli -- validate gemini
 cargo run -p baize-cli -- daemon
 cargo run -p baize-cli -- tui
 ```
@@ -40,7 +42,9 @@ Useful daemon endpoints:
 ```text
 GET  /health
 GET  /providers
+GET  /providers/:id/validate
 POST /providers/check
+POST /providers/validate
 GET  /workspaces
 POST /workspaces
 GET  /workspaces/:id/status
