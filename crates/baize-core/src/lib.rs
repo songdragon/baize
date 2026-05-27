@@ -19,6 +19,15 @@ pub struct ProviderId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EventId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RouteDecisionId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HandoffId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PermissionId(pub String);
+
 impl WorkspaceId {
     pub fn new() -> Self {
         Self(format!("ws_{}", Uuid::new_v4()))
@@ -40,6 +49,24 @@ impl TaskSessionId {
 impl EventId {
     pub fn new() -> Self {
         Self(format!("evt_{}", Uuid::new_v4()))
+    }
+}
+
+impl RouteDecisionId {
+    pub fn new() -> Self {
+        Self(format!("route_{}", Uuid::new_v4()))
+    }
+}
+
+impl HandoffId {
+    pub fn new() -> Self {
+        Self(format!("handoff_{}", Uuid::new_v4()))
+    }
+}
+
+impl PermissionId {
+    pub fn new() -> Self {
+        Self(format!("perm_{}", Uuid::new_v4()))
     }
 }
 
@@ -184,6 +211,74 @@ pub enum TaskSessionStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteDecision {
+    pub id: RouteDecisionId,
+    pub session_id: TaskSessionId,
+    pub selected_provider_id: ProviderId,
+    pub previous_provider_id: Option<ProviderId>,
+    pub reason: String,
+    pub confidence: f32,
+    pub mode: RoutingMode,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RoutingMode {
+    Manual,
+    Assisted,
+    Autopilot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffSummary {
+    pub id: HandoffId,
+    pub session_id: TaskSessionId,
+    pub from_provider_id: ProviderId,
+    pub to_provider_id: ProviderId,
+    pub summary_markdown: String,
+    pub mechanical_facts: HandoffFacts,
+    pub status: HandoffStatus,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandoffFacts {
+    pub changed_files: Vec<String>,
+    pub commands_run: Vec<String>,
+    pub test_result: Option<String>,
+    pub route_history: Vec<String>,
+    pub provider_errors: Vec<String>,
+    pub checkpoint_refs: Vec<String>,
+    pub user_constraints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HandoffStatus {
+    Draft,
+    Accepted,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionRequest {
+    pub id: PermissionId,
+    pub workspace_id: Option<WorkspaceId>,
+    pub session_id: Option<TaskSessionId>,
+    pub command: String,
+    pub reason: String,
+    pub status: PermissionStatus,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PermissionStatus {
+    Pending,
+    Approved,
+    Denied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaizeEvent {
     pub id: EventId,
     pub event_type: String,
@@ -219,6 +314,9 @@ mod tests {
         assert!(ProjectId::new().0.starts_with("prj_"));
         assert!(TaskSessionId::new().0.starts_with("task_"));
         assert!(EventId::new().0.starts_with("evt_"));
+        assert!(RouteDecisionId::new().0.starts_with("route_"));
+        assert!(HandoffId::new().0.starts_with("handoff_"));
+        assert!(PermissionId::new().0.starts_with("perm_"));
     }
 
     #[test]

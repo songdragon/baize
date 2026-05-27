@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
-use baize_core::BaizeEvent;
+use baize_core::{
+    BaizeEvent, HandoffId, HandoffSummary, PermissionId, PermissionRequest, Project, ProjectId,
+    RouteDecision, RouteDecisionId, TaskSession, TaskSessionId, Workspace, WorkspaceId,
+};
 use rusqlite::{params, Connection};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +46,35 @@ impl EventStore {
             );
             create index if not exists events_timestamp_idx on events(timestamp);
             create index if not exists events_type_idx on events(event_type);
+
+            create table if not exists workspaces (
+                id text primary key,
+                json text not null
+            );
+            create table if not exists projects (
+                id text primary key,
+                workspace_id text not null,
+                json text not null
+            );
+            create table if not exists task_sessions (
+                id text primary key,
+                workspace_id text not null,
+                json text not null
+            );
+            create table if not exists route_decisions (
+                id text primary key,
+                session_id text not null,
+                json text not null
+            );
+            create table if not exists handoffs (
+                id text primary key,
+                session_id text not null,
+                json text not null
+            );
+            create table if not exists permissions (
+                id text primary key,
+                json text not null
+            );
             "#,
         )?;
         Ok(())
@@ -74,6 +108,175 @@ impl EventStore {
             })?;
         Ok(count)
     }
+
+    pub fn list_events_for_session(&self, session_id: &TaskSessionId) -> Result<Vec<BaizeEvent>> {
+        let mut stmt = self
+            .conn
+            .prepare("select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where session_id = ?1 order by timestamp")?;
+        let rows = stmt.query_map(params![&session_id.0], |row| {
+            let timestamp: String = row.get(2)?;
+            let payload: String = row.get(6)?;
+            Ok(BaizeEvent {
+                id: baize_core::EventId(row.get(0)?),
+                event_type: row.get(1)?,
+                timestamp: chrono::DateTime::parse_from_rfc3339(&timestamp)
+                    .map(|ts| ts.with_timezone(&chrono::Utc))
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                workspace_id: row.get::<_, Option<String>>(3)?.map(WorkspaceId),
+                session_id: row.get::<_, Option<String>>(4)?.map(TaskSessionId),
+                provider_id: row.get::<_, Option<String>>(5)?.map(baize_core::ProviderId),
+                payload: serde_json::from_str(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    pub fn upsert_workspace(&self, workspace: &Workspace) -> Result<()> {
+        self.upsert_json("workspaces", &workspace.id.0, workspace)
+    }
+
+    pub fn list_workspaces(&self) -> Result<Vec<Workspace>> {
+        self.list_json("workspaces")
+    }
+
+    pub fn get_workspace(&self, id: &WorkspaceId) -> Result<Option<Workspace>> {
+        self.get_json("workspaces", &id.0)
+    }
+
+    pub fn upsert_project(&self, project: &Project) -> Result<()> {
+        self.conn.execute(
+            r#"
+            insert into projects (id, workspace_id, json)
+            values (?1, ?2, ?3)
+            on conflict(id) do update set workspace_id = excluded.workspace_id, json = excluded.json
+            "#,
+            params![
+                &project.id.0,
+                &project.workspace_id.0,
+                serde_json::to_string(project)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_project(&self, id: &ProjectId) -> Result<Option<Project>> {
+        self.get_json("projects", &id.0)
+    }
+
+    pub fn get_primary_project(&self, workspace: &Workspace) -> Result<Option<Project>> {
+        self.get_project(&workspace.primary_project_id)
+    }
+
+    pub fn upsert_task_session(&self, session: &TaskSession) -> Result<()> {
+        self.conn.execute(
+            r#"
+            insert into task_sessions (id, workspace_id, json)
+            values (?1, ?2, ?3)
+            on conflict(id) do update set workspace_id = excluded.workspace_id, json = excluded.json
+            "#,
+            params![
+                &session.id.0,
+                &session.workspace_id.0,
+                serde_json::to_string(session)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_task_sessions(&self) -> Result<Vec<TaskSession>> {
+        self.list_json("task_sessions")
+    }
+
+    pub fn get_task_session(&self, id: &TaskSessionId) -> Result<Option<TaskSession>> {
+        self.get_json("task_sessions", &id.0)
+    }
+
+    pub fn insert_route_decision(&self, decision: &RouteDecision) -> Result<()> {
+        self.conn.execute(
+            "insert into route_decisions (id, session_id, json) values (?1, ?2, ?3)",
+            params![
+                &decision.id.0,
+                &decision.session_id.0,
+                serde_json::to_string(decision)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_route_decision(&self, id: &RouteDecisionId) -> Result<Option<RouteDecision>> {
+        self.get_json("route_decisions", &id.0)
+    }
+
+    pub fn insert_handoff(&self, handoff: &HandoffSummary) -> Result<()> {
+        self.conn.execute(
+            "insert into handoffs (id, session_id, json) values (?1, ?2, ?3)",
+            params![
+                &handoff.id.0,
+                &handoff.session_id.0,
+                serde_json::to_string(handoff)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_handoff(&self, id: &HandoffId) -> Result<Option<HandoffSummary>> {
+        self.get_json("handoffs", &id.0)
+    }
+
+    pub fn upsert_permission(&self, permission: &PermissionRequest) -> Result<()> {
+        self.upsert_json("permissions", &permission.id.0, permission)
+    }
+
+    pub fn get_permission(&self, id: &PermissionId) -> Result<Option<PermissionRequest>> {
+        self.get_json("permissions", &id.0)
+    }
+
+    fn upsert_json<T: Serialize>(&self, table: &str, id: &str, value: &T) -> Result<()> {
+        let sql = format!(
+            "insert into {table} (id, json) values (?1, ?2) on conflict(id) do update set json = excluded.json"
+        );
+        self.conn
+            .execute(&sql, params![id, serde_json::to_string(value)?])?;
+        Ok(())
+    }
+
+    fn get_json<T: DeserializeOwned>(&self, table: &str, id: &str) -> Result<Option<T>> {
+        let sql = format!("select json from {table} where id = ?1");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let raw: String = row.get(0)?;
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+
+    fn list_json<T: DeserializeOwned>(&self, table: &str) -> Result<Vec<T>> {
+        let sql = format!("select json from {table} order by rowid");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut values = Vec::new();
+        for row in rows {
+            values.push(serde_json::from_str(&row?)?);
+        }
+        Ok(values)
+    }
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -89,7 +292,10 @@ pub fn default_data_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use baize_core::BaizeEvent;
+    use baize_core::{
+        BaizeEvent, ProjectKind, TaskSessionStatus, TrustLevel, VcsKind, WorkspaceId,
+    };
+    use chrono::Utc;
     use serde_json::json;
 
     #[test]
@@ -105,5 +311,81 @@ mod tests {
 
         assert_eq!(store.event_count().expect("count"), 1);
         assert!(db_path.exists());
+    }
+
+    #[test]
+    fn lists_events_for_session() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let session_id = TaskSessionId::new();
+        let mut event = BaizeEvent::new("session.agent.completed", json!({ "status": "ok" }));
+        event.session_id = Some(session_id.clone());
+
+        store.append_event(&event).expect("append should work");
+        let events = store
+            .list_events_for_session(&session_id)
+            .expect("events should load");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "session.agent.completed");
+        assert_eq!(events[0].payload["status"], "ok");
+    }
+
+    #[test]
+    fn stores_workspace_project_and_session_records() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let workspace_id = WorkspaceId::new();
+        let project_id = ProjectId::new();
+        let now = Utc::now();
+        let workspace = Workspace {
+            id: workspace_id.clone(),
+            name: "test".to_string(),
+            primary_project_id: project_id.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let project = Project {
+            id: project_id,
+            workspace_id: workspace_id.clone(),
+            root: temp.path().to_path_buf(),
+            kind: ProjectKind::Directory,
+            vcs: VcsKind::None,
+            active_branch: None,
+            trust_level: TrustLevel::Trusted,
+            created_at: now,
+            updated_at: now,
+        };
+        let session = TaskSession {
+            id: TaskSessionId::new(),
+            workspace_id,
+            objective: "test objective".to_string(),
+            active_provider_id: None,
+            status: TaskSessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+        };
+
+        store.upsert_workspace(&workspace).expect("workspace");
+        store.upsert_project(&project).expect("project");
+        store.upsert_task_session(&session).expect("session");
+
+        assert_eq!(store.list_workspaces().expect("workspaces").len(), 1);
+        assert_eq!(
+            store
+                .get_primary_project(&workspace)
+                .expect("project lookup")
+                .expect("project exists")
+                .root,
+            temp.path()
+        );
+        assert_eq!(
+            store
+                .get_task_session(&session.id)
+                .expect("session lookup")
+                .expect("session exists")
+                .objective,
+            "test objective"
+        );
     }
 }

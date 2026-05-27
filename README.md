@@ -9,11 +9,11 @@ This repository currently contains the first Rust MVP skeleton:
 - Rust workspace crates;
 - core domain types;
 - TOML config loader;
-- SQLite append-only event log;
+- SQLite append-only event log and MVP query tables;
 - git workspace status inspection;
 - ACP JSON-RPC message primitives;
 - provider registry and health probing stubs;
-- local daemon with HTTP + SSE basics;
+- local daemon with HTTP + SSE workspace/session/handoff/permission APIs;
 - ratatui TUI shell;
 - `baize` CLI entrypoint.
 
@@ -33,6 +33,29 @@ For local sandboxed development, keep Baize data inside the repository:
 
 ```sh
 BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- daemon
+```
+
+Useful daemon endpoints:
+
+```text
+GET  /health
+GET  /providers
+POST /providers/check
+GET  /workspaces
+POST /workspaces
+GET  /workspaces/:id/status
+GET  /sessions
+POST /sessions
+GET  /sessions/:id
+POST /sessions/:id/prompt
+POST /sessions/:id/cancel
+POST /sessions/:id/handoff
+GET  /sessions/:id/events
+GET  /sessions/:id/diff
+POST /permissions
+POST /permissions/:id/approve
+POST /permissions/:id/deny
+GET  /events
 ```
 
 ## Notes
