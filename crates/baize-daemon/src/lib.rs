@@ -141,6 +141,10 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:id/prompt", post(prompt_session))
         .route("/sessions/:id/cancel", post(cancel_session))
         .route("/sessions/:id/handoff", post(create_handoff))
+        .route(
+            "/sessions/:id/handoff/:handoff_id/accept",
+            post(accept_handoff),
+        )
         .route("/sessions/:id/events", get(session_events))
         .route("/sessions/:id/diff", get(session_diff))
         .route("/sessions/:id/handoff/:handoff_id", get(handoff))
@@ -560,6 +564,83 @@ async fn create_handoff(
     Json(json!({ "handoff": handoff }))
 }
 
+async fn accept_handoff(
+    State(state): State<AppState>,
+    AxumPath((id, handoff_id)): AxumPath<(String, String)>,
+) -> Json<serde_json::Value> {
+    let session_id = TaskSessionId(id);
+    let mut handoff = match with_store(&state, |store| store.get_handoff(&HandoffId(handoff_id))) {
+        Ok(Some(handoff)) => handoff,
+        Ok(None) => return Json(json!({ "error": "handoff not found" })),
+        Err(error) => return Json(json!({ "error": error.to_string() })),
+    };
+    if handoff.session_id != session_id {
+        return Json(json!({ "error": "handoff does not belong to session" }));
+    }
+
+    let mut session = match with_store(&state, |store| store.get_task_session(&session_id)) {
+        Ok(Some(session)) => session,
+        Ok(None) => return Json(json!({ "error": "session not found" })),
+        Err(error) => return Json(json!({ "error": error.to_string() })),
+    };
+
+    let previous_provider_id = session.active_provider_id.clone();
+    let selected_provider_id = handoff.to_provider_id.clone();
+    let now = Utc::now();
+    session.active_provider_id = Some(selected_provider_id.clone());
+    session.updated_at = now;
+    handoff.status = HandoffStatus::Accepted;
+
+    let decision = RouteDecision {
+        id: RouteDecisionId::new(),
+        session_id: session.id.clone(),
+        selected_provider_id: selected_provider_id.clone(),
+        previous_provider_id,
+        reason: format!(
+            "Accepted handoff {} to {}.",
+            handoff.id.0, selected_provider_id.0
+        ),
+        confidence: 0.9,
+        mode: RoutingMode::Assisted,
+        created_at: now,
+    };
+
+    let save = with_store(&state, |store| {
+        store.upsert_task_session(&session)?;
+        store.insert_handoff(&handoff)?;
+        store.insert_route_decision(&decision)?;
+        Ok(())
+    });
+    if let Err(error) = save {
+        return Json(json!({ "error": error.to_string() }));
+    }
+
+    let mut accepted = BaizeEvent::new(
+        "handoff.accepted",
+        json!({
+            "handoff": handoff,
+            "session": session,
+            "route_decision": decision,
+        }),
+    );
+    accepted.workspace_id = Some(session.workspace_id.clone());
+    accepted.session_id = Some(session.id.clone());
+    accepted.provider_id = Some(selected_provider_id.clone());
+    state.record_event(accepted);
+
+    let mut routed = BaizeEvent::new("session.route.decided", json!({ "decision": decision }));
+    routed.workspace_id = Some(session.workspace_id.clone());
+    routed.session_id = Some(session.id.clone());
+    routed.provider_id = Some(selected_provider_id);
+    state.record_event(routed);
+
+    Json(json!({
+        "handoff": handoff,
+        "session": session,
+        "route_decision": decision,
+    }))
+}
+
 async fn handoff(
     State(state): State<AppState>,
     AxumPath((_session_id, handoff_id)): AxumPath<(String, String)>,
@@ -949,7 +1030,7 @@ mod tests {
         let session_id = session["session"]["id"].as_str().expect("session id");
 
         let handoff = json_response(
-            app,
+            app.clone(),
             Request::builder()
                 .method(Method::POST)
                 .uri(format!("/sessions/{session_id}/handoff"))
@@ -971,6 +1052,47 @@ mod tests {
             handoff["handoff"]["mechanical_facts"]["user_constraints"][0],
             "do not change public API"
         );
+
+        let handoff_id = handoff["handoff"]["id"].as_str().expect("handoff id");
+        let accepted = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/sessions/{session_id}/handoff/{handoff_id}/accept"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(accepted["handoff"]["status"], "Accepted");
+        assert_eq!(accepted["session"]["active_provider_id"], "codex");
+        assert_eq!(accepted["route_decision"]["previous_provider_id"], "gemini");
+        assert_eq!(accepted["route_decision"]["selected_provider_id"], "codex");
+
+        let session = json_response(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/sessions/{session_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(session["session"]["active_provider_id"], "codex");
+
+        let events = json_response(
+            app,
+            Request::builder()
+                .uri(format!("/sessions/{session_id}/events"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert!(events["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .any(|event| event["event_type"] == "handoff.accepted"));
     }
 
     #[tokio::test]

@@ -91,6 +91,11 @@ fn run_app(
                 match key.code {
                     KeyCode::Esc => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = request_handoff(&mut state) {
+                            state.push_message(format!("handoff error: {error:#}"));
+                        }
+                    }
                     KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
@@ -217,6 +222,72 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
     append_recent_events(state, &events);
     state.input.clear();
     Ok(())
+}
+
+fn request_handoff(state: &mut TuiState) -> Result<()> {
+    let Some(session_id) = state.session_id.clone() else {
+        state.push_message("start a session before requesting handoff");
+        return Ok(());
+    };
+    let target_provider = state.selected_provider().to_string();
+    if state.active_provider.as_deref() == Some(target_provider.as_str()) {
+        state.push_message("choose a different provider before handoff");
+        return Ok(());
+    }
+
+    let handoff = post_json(
+        &format!("/sessions/{session_id}/handoff"),
+        json!({
+            "to_provider_id": target_provider,
+            "user_constraints": ["requested from TUI"]
+        }),
+    )?;
+    let handoff_id = handoff
+        .get("handoff")
+        .and_then(|handoff| handoff.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| response_error("handoff.id", &handoff))?
+        .to_string();
+    let accepted = post_json(
+        &format!("/sessions/{session_id}/handoff/{handoff_id}/accept"),
+        json!({}),
+    )?;
+    append_handoff_response(state, &accepted);
+    Ok(())
+}
+
+fn append_handoff_response(state: &mut TuiState, response: &Value) {
+    let handoff = response.get("handoff").unwrap_or(&Value::Null);
+    let from_provider = handoff
+        .get("from_provider_id")
+        .and_then(provider_id)
+        .unwrap_or("unknown");
+    let to_provider = handoff
+        .get("to_provider_id")
+        .and_then(provider_id)
+        .unwrap_or("unknown");
+    let status = handoff
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    state.push_message(format!(
+        "handoff {status}: {from_provider} -> {to_provider}"
+    ));
+
+    if let Some(session) = response.get("session") {
+        state.active_provider = session
+            .get("active_provider_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+    }
+    if let Some(reason) = response
+        .get("route_decision")
+        .and_then(|decision| decision.get("reason"))
+        .and_then(Value::as_str)
+    {
+        state.route_reason = Some(reason.to_string());
+        state.push_message(format!("route: {reason}"));
+    }
 }
 
 fn ensure_workspace(state: &mut TuiState) -> Result<String> {
@@ -355,10 +426,6 @@ impl TuiState {
     }
 
     fn cycle_provider(&mut self) {
-        if self.session_id.is_some() {
-            self.push_message("provider locked for current session; create a handoff to switch");
-            return;
-        }
         if self.providers.is_empty() {
             return;
         }
@@ -370,10 +437,12 @@ impl TuiState {
         self.providers
             .iter()
             .map(|provider| {
-                if provider == selected {
-                    format!("[{provider}]")
-                } else {
-                    provider.to_string()
+                let active = self.active_provider.as_deref() == Some(provider.as_str());
+                match (provider == selected, active) {
+                    (true, true) => format!("[{provider}*]"),
+                    (true, false) => format!("[{provider}]"),
+                    (false, true) => format!("{provider}*"),
+                    (false, false) => provider.to_string(),
                 }
             })
             .collect::<Vec<_>>()
@@ -382,8 +451,14 @@ impl TuiState {
 
     fn route_status(&self) -> String {
         match (&self.active_provider, &self.route_reason) {
-            (Some(provider), Some(reason)) => format!("{provider} - {reason}"),
-            (Some(provider), None) => format!("{provider} - active session"),
+            (Some(provider), Some(reason)) => format!(
+                "{provider} active; target {} with Ctrl-H - {reason}",
+                self.selected_provider()
+            ),
+            (Some(provider), None) => format!(
+                "{provider} active; target {} with Ctrl-H",
+                self.selected_provider()
+            ),
             (None, _) => format!(
                 "{} selected; Tab switches before first prompt",
                 self.selected_provider()
@@ -530,16 +605,42 @@ mod tests {
     }
 
     #[test]
-    fn keeps_provider_sticky_after_session_exists() {
+    fn cycles_handoff_target_after_session_exists() {
         let mut state = TuiState {
             session_id: Some("task_1".to_string()),
+            active_provider: Some("codex".to_string()),
             ..TuiState::default()
         };
 
         state.cycle_provider();
 
-        assert_eq!(state.selected_provider(), "codex");
-        assert!(state.session.contains("provider locked"));
+        assert_eq!(state.selected_provider(), "gemini");
+        assert!(state.route_status().contains("codex active"));
+        assert!(state.route_status().contains("target gemini"));
+    }
+
+    #[test]
+    fn appends_handoff_response_and_updates_active_provider() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "handoff": {
+                "from_provider_id": "codex",
+                "to_provider_id": "gemini",
+                "status": "Accepted"
+            },
+            "session": {
+                "active_provider_id": "gemini"
+            },
+            "route_decision": {
+                "reason": "Accepted handoff handoff_1 to gemini."
+            }
+        });
+
+        append_handoff_response(&mut state, &response);
+
+        assert_eq!(state.active_provider.as_deref(), Some("gemini"));
+        assert!(state.session.contains("handoff Accepted: codex -> gemini"));
+        assert!(state.session.contains("Accepted handoff handoff_1"));
     }
 
     #[test]

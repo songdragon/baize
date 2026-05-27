@@ -225,7 +225,11 @@ impl EventStore {
 
     pub fn insert_handoff(&self, handoff: &HandoffSummary) -> Result<()> {
         self.conn.execute(
-            "insert into handoffs (id, session_id, json) values (?1, ?2, ?3)",
+            r#"
+            insert into handoffs (id, session_id, json)
+            values (?1, ?2, ?3)
+            on conflict(id) do update set session_id = excluded.session_id, json = excluded.json
+            "#,
             params![
                 &handoff.id.0,
                 &handoff.session_id.0,
