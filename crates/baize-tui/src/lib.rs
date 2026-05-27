@@ -23,6 +23,9 @@ pub struct TuiState {
     pub workspace: String,
     pub session: String,
     pub providers: Vec<String>,
+    pub selected_provider_index: usize,
+    pub active_provider: Option<String>,
+    pub route_reason: Option<String>,
     pub input: String,
     pub workspace_id: Option<String>,
     pub session_id: Option<String>,
@@ -40,6 +43,9 @@ impl Default for TuiState {
                 "copilot".to_string(),
                 "opencode".to_string(),
             ],
+            selected_provider_index: 0,
+            active_provider: None,
+            route_reason: None,
             input: String::new(),
             workspace_id: None,
             session_id: None,
@@ -72,6 +78,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result
                 match key.code {
                     KeyCode::Esc => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
                         state.input.pop();
@@ -96,7 +103,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(4),
+            Constraint::Length(5),
         ])
         .split(frame.area());
 
@@ -112,8 +119,9 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "Providers: {}\n> {}",
-            state.providers.join(", "),
+            "Providers: {}\nRoute: {}\n> {}",
+            state.provider_status(),
+            state.route_status(),
             state.input
         ))
         .block(Block::default().title("Status").borders(Borders::ALL)),
@@ -188,6 +196,7 @@ fn ensure_session(state: &mut TuiState, workspace_id: &str, prompt: &str) -> Res
         json!({
             "workspace_id": workspace_id,
             "objective": prompt,
+            "provider_id": state.selected_provider(),
         }),
     )?;
     let session = response
@@ -202,8 +211,17 @@ fn ensure_session(state: &mut TuiState, workspace_id: &str, prompt: &str) -> Res
         .get("active_provider_id")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let route_reason = response
+        .get("route_decision")
+        .and_then(|decision| decision.get("reason"))
+        .and_then(Value::as_str);
 
     state.push_message(format!("session: {id} ({provider})"));
+    if let Some(reason) = route_reason {
+        state.push_message(format!("route: {reason}"));
+        state.route_reason = Some(reason.to_string());
+    }
+    state.active_provider = Some(provider.to_string());
     state.session_id = Some(id.clone());
     Ok(id)
 }
@@ -264,6 +282,50 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
 }
 
 impl TuiState {
+    fn selected_provider(&self) -> &str {
+        self.providers
+            .get(self.selected_provider_index)
+            .map(String::as_str)
+            .unwrap_or("codex")
+    }
+
+    fn cycle_provider(&mut self) {
+        if self.session_id.is_some() {
+            self.push_message("provider locked for current session; create a handoff to switch");
+            return;
+        }
+        if self.providers.is_empty() {
+            return;
+        }
+        self.selected_provider_index = (self.selected_provider_index + 1) % self.providers.len();
+    }
+
+    fn provider_status(&self) -> String {
+        let selected = self.selected_provider();
+        self.providers
+            .iter()
+            .map(|provider| {
+                if provider == selected {
+                    format!("[{provider}]")
+                } else {
+                    provider.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn route_status(&self) -> String {
+        match (&self.active_provider, &self.route_reason) {
+            (Some(provider), Some(reason)) => format!("{provider} - {reason}"),
+            (Some(provider), None) => format!("{provider} - active session"),
+            (None, _) => format!(
+                "{} selected; Tab switches before first prompt",
+                self.selected_provider()
+            ),
+        }
+    }
+
     fn push_message(&mut self, message: impl Into<String>) {
         let mut lines = self
             .session
@@ -354,7 +416,7 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("Baize MVP TUI"));
-        assert!(rendered.contains("Providers: codex, gemini, copilot, opencode"));
+        assert!(rendered.contains("Providers: [codex], gemini, copilot, opencode"));
     }
 
     #[test]
@@ -377,7 +439,7 @@ mod tests {
 
     #[test]
     fn renders_prompt_input() {
-        let backend = TestBackend::new(80, 12);
+        let backend = TestBackend::new(80, 14);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
             input: "hello baize".to_string(),
@@ -389,5 +451,28 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("> hello baize"));
+    }
+
+    #[test]
+    fn cycles_selected_provider_before_session_exists() {
+        let mut state = TuiState::default();
+
+        assert_eq!(state.selected_provider(), "codex");
+        state.cycle_provider();
+
+        assert_eq!(state.selected_provider(), "gemini");
+    }
+
+    #[test]
+    fn keeps_provider_sticky_after_session_exists() {
+        let mut state = TuiState {
+            session_id: Some("task_1".to_string()),
+            ..TuiState::default()
+        };
+
+        state.cycle_provider();
+
+        assert_eq!(state.selected_provider(), "codex");
+        assert!(state.session.contains("provider locked"));
     }
 }
