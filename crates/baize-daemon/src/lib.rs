@@ -71,6 +71,7 @@ struct CreateSessionRequest {
 #[derive(Debug, Deserialize)]
 struct PromptRequest {
     prompt: String,
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +403,7 @@ async fn prompt_session(
         prompt: request.prompt,
         cwd: project.root,
         session_id: None,
+        timeout_seconds: request.timeout_seconds.or(Some(120)),
     });
 
     match run {
@@ -453,10 +455,8 @@ async fn prompt_session(
             }))
         }
         Err(error) => {
-            let mut failed = BaizeEvent::new(
-                "session.agent.failed",
-                json!({ "error": error.to_string() }),
-            );
+            let error = format_error_chain(error.as_ref());
+            let mut failed = BaizeEvent::new("session.agent.failed", json!({ "error": error }));
             failed.workspace_id = Some(session.workspace_id.clone());
             failed.session_id = Some(session.id.clone());
             failed.provider_id = Some(provider_id.clone());
@@ -465,7 +465,7 @@ async fn prompt_session(
             Json(json!({
                 "status": "failed",
                 "provider_id": provider_id,
-                "error": error.to_string(),
+                "error": error,
             }))
         }
     }
@@ -716,6 +716,16 @@ fn json_result<T: Serialize>(key: &str, result: Result<T>) -> Json<serde_json::V
     }
 }
 
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(error) = source {
+        parts.push(error.to_string());
+        source = error.source();
+    }
+    parts.join(": ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,6 +741,15 @@ mod tests {
     impl AgentExecutor for FakeAgentExecutor {
         fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
             Ok(self.result.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailingAgentExecutor;
+
+    impl AgentExecutor for FailingAgentExecutor {
+        fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+            Err(anyhow::anyhow!("inner failure").context("outer failure"))
         }
     }
 
@@ -834,6 +853,64 @@ mod tests {
             .iter()
             .any(|event| event["event_type"] == "session.agent.output"
                 && event["payload"]["text"] == "fake output"));
+    }
+
+    #[tokio::test]
+    async fn prompt_failure_returns_error_chain() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let project_dir = tempfile::tempdir().expect("project dir");
+        let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+        let state = AppState::with_executor(
+            BaizeConfig::default(),
+            store,
+            Arc::new(FailingAgentExecutor),
+        );
+        let app = router(state);
+
+        let workspace = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/workspaces")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "path": project_dir.path() }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+        let session = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "workspace_id": workspace_id,
+                        "objective": "failure path"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        let session_id = session["session"]["id"].as_str().expect("session id");
+
+        let prompt = json_response(
+            app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "fail" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+
+        assert_eq!(prompt["status"], "failed");
+        assert_eq!(prompt["error"], "outer failure: inner failure");
     }
 
     #[tokio::test]

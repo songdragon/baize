@@ -43,6 +43,7 @@ This MVP implements the review-passed technical spec as a local Rust daemon plus
 - daemon endpoints for provider validation.
 - Gemini `--prompt --output-format stream-json` execution path;
 - Codex `exec --json` execution path.
+- prompt execution timeout to prevent hanging on provider authentication or interactive prompts.
 
 ### 5. Daemon API
 

@@ -7,8 +7,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Command, Output};
+use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderValidation {
@@ -35,6 +36,7 @@ pub struct AgentPromptRequest {
     pub prompt: String,
     pub cwd: PathBuf,
     pub session_id: Option<String>,
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,11 +294,13 @@ pub fn parse_stream_json_lines(raw: &str) -> Vec<AgentExecutionEvent> {
 }
 
 fn run_gemini_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
-    let output = Command::new("gemini")
-        .args(build_gemini_args(&request))
-        .current_dir(&request.cwd)
-        .output()
-        .with_context(|| "failed to run gemini prompt")?;
+    let output = run_command_with_timeout(
+        "gemini",
+        &build_gemini_args(&request),
+        &request.cwd,
+        timeout_for(&request),
+    )
+    .with_context(|| "failed to run gemini prompt")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     Ok(AgentRunResult {
@@ -309,11 +313,13 @@ fn run_gemini_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
 }
 
 fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
-    let output = Command::new("codex")
-        .args(build_codex_args(&request))
-        .current_dir(&request.cwd)
-        .output()
-        .with_context(|| "failed to run codex prompt")?;
+    let output = run_command_with_timeout(
+        "codex",
+        &build_codex_args(&request),
+        &request.cwd,
+        timeout_for(&request),
+    )
+    .with_context(|| "failed to run codex prompt")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     Ok(AgentRunResult {
@@ -323,6 +329,40 @@ fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
         events: parse_stream_json_lines(&stdout),
         stderr,
     })
+}
+
+fn timeout_for(request: &AgentPromptRequest) -> Duration {
+    Duration::from_secs(request.timeout_seconds.unwrap_or(120))
+}
+
+fn run_command_with_timeout(
+    command: &str,
+    args: &[String],
+    cwd: &PathBuf,
+    timeout: Duration,
+) -> Result<Output> {
+    let mut child = Command::new(command)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to spawn {command}"))?;
+
+    if child.wait_timeout(timeout)?.is_none() {
+        let _ = child.kill();
+        let output = child.wait_with_output()?;
+        anyhow::bail!(
+            "{command} timed out after {} seconds. stdout: {} stderr: {}",
+            timeout.as_secs(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    child
+        .wait_with_output()
+        .with_context(|| format!("failed to collect {command} output"))
 }
 
 fn detect_capabilities(
@@ -560,6 +600,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("session-1".to_string()),
+            timeout_seconds: None,
         };
 
         let args = build_gemini_args(&request);
@@ -583,6 +624,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: None,
+            timeout_seconds: None,
         };
 
         let args = build_codex_args(&request);
@@ -613,5 +655,18 @@ mod tests {
         assert_eq!(events[0].text.as_deref(), Some("hello"));
         assert!(matches!(events[1].kind, AgentExecutionEventKind::ToolCall));
         assert!(matches!(events[2].kind, AgentExecutionEventKind::Raw));
+    }
+
+    #[test]
+    fn command_timeout_prevents_hanging_processes() {
+        let error = run_command_with_timeout(
+            "sleep",
+            &["2".to_string()],
+            &PathBuf::from("."),
+            Duration::from_millis(10),
+        )
+        .expect_err("sleep should time out");
+
+        assert!(error.to_string().contains("timed out"));
     }
 }

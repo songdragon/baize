@@ -63,6 +63,8 @@ POST /permissions/:id/deny
 GET  /events
 ```
 
+`POST /sessions/:id/prompt` accepts an optional `timeout_seconds` field. Use a short timeout for smoke tests when a provider might be waiting for authentication.
+
 ## Notes
 
 The first adapter execution paths are Gemini `--prompt --output-format stream-json` and Codex `exec --json`. Tests use fake executors and parser fixtures so they do not spend model quota.
