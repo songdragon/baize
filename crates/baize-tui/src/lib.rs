@@ -254,6 +254,7 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
 
     let events = get_json(&format!("/sessions/{session_id}/events"))?;
     append_recent_events(state, &events);
+    refresh_route_history(state)?;
     state.input.clear();
     Ok(())
 }
@@ -287,6 +288,7 @@ fn request_handoff(state: &mut TuiState) -> Result<()> {
         json!({}),
     )?;
     append_handoff_response(state, &accepted);
+    refresh_route_history(state)?;
     Ok(())
 }
 
@@ -393,7 +395,51 @@ fn ensure_session(state: &mut TuiState, workspace_id: &str, prompt: &str) -> Res
     }
     state.active_provider = Some(provider.to_string());
     state.session_id = Some(id.clone());
+    refresh_route_history(state)?;
     Ok(id)
+}
+
+fn refresh_route_history(state: &mut TuiState) -> Result<()> {
+    let Some(session_id) = state.session_id.clone() else {
+        return Ok(());
+    };
+    let response = get_json(&format!("/sessions/{session_id}/routes"))?;
+    append_route_history(state, &response);
+    Ok(())
+}
+
+fn append_route_history(state: &mut TuiState, response: &Value) {
+    let Some(routes) = response.get("routes").and_then(Value::as_array) else {
+        return;
+    };
+    if routes.is_empty() {
+        return;
+    }
+
+    state.push_message("routes:");
+    for route in routes
+        .iter()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        let selected = route
+            .get("selected_provider_id")
+            .and_then(provider_id)
+            .unwrap_or("unknown");
+        let previous = route
+            .get("previous_provider_id")
+            .and_then(provider_id)
+            .unwrap_or("none");
+        let reason = route
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(one_line)
+            .unwrap_or_default();
+        state.push_message(format!("  {previous} -> {selected}: {reason}"));
+    }
 }
 
 fn append_prompt_response(state: &mut TuiState, response: &Value) {
@@ -675,6 +721,31 @@ mod tests {
         assert_eq!(state.active_provider.as_deref(), Some("gemini"));
         assert!(state.session.contains("handoff Accepted: codex -> gemini"));
         assert!(state.session.contains("Accepted handoff handoff_1"));
+    }
+
+    #[test]
+    fn appends_recent_route_history() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "routes": [
+                {
+                    "selected_provider_id": "codex",
+                    "previous_provider_id": null,
+                    "reason": "Selected codex."
+                },
+                {
+                    "selected_provider_id": "gemini",
+                    "previous_provider_id": "codex",
+                    "reason": "Accepted handoff."
+                }
+            ]
+        });
+
+        append_route_history(&mut state, &response);
+
+        assert!(state.session.contains("routes:"));
+        assert!(state.session.contains("none -> codex: Selected codex."));
+        assert!(state.session.contains("codex -> gemini: Accepted handoff."));
     }
 
     #[test]

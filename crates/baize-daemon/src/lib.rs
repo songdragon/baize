@@ -140,6 +140,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:id", get(session))
         .route("/sessions/:id/prompt", post(prompt_session))
         .route("/sessions/:id/cancel", post(cancel_session))
+        .route("/sessions/:id/routes", get(session_routes))
         .route("/sessions/:id/handoff", post(create_handoff))
         .route(
             "/sessions/:id/handoff/:handoff_id/accept",
@@ -313,6 +314,16 @@ async fn session(
 ) -> Json<serde_json::Value> {
     let session = with_store(&state, |store| store.get_task_session(&TaskSessionId(id)));
     json_result("session", session)
+}
+
+async fn session_routes(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    let routes = with_store(&state, |store| {
+        store.list_route_decisions_for_session(&TaskSessionId(id))
+    });
+    json_result("routes", routes)
 }
 
 async fn create_session(
@@ -939,7 +950,7 @@ mod tests {
         assert_eq!(prompt["status"], "completed");
 
         let events = json_response(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!("/sessions/{session_id}/events"))
                 .body(Body::empty())
@@ -957,6 +968,16 @@ mod tests {
             .iter()
             .any(|event| event["event_type"] == "session.agent.output"
                 && event["payload"]["text"] == "fake output"));
+
+        let routes = json_response(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/sessions/{session_id}/routes"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(routes["routes"][0]["selected_provider_id"], "codex");
     }
 
     #[tokio::test]

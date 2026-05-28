@@ -223,6 +223,21 @@ impl EventStore {
         self.get_json("route_decisions", &id.0)
     }
 
+    pub fn list_route_decisions_for_session(
+        &self,
+        session_id: &TaskSessionId,
+    ) -> Result<Vec<RouteDecision>> {
+        let mut stmt = self
+            .conn
+            .prepare("select json from route_decisions where session_id = ?1 order by rowid")?;
+        let rows = stmt.query_map(params![&session_id.0], |row| row.get::<_, String>(0))?;
+        let mut decisions = Vec::new();
+        for row in rows {
+            decisions.push(serde_json::from_str(&row?)?);
+        }
+        Ok(decisions)
+    }
+
     pub fn insert_handoff(&self, handoff: &HandoffSummary) -> Result<()> {
         self.conn.execute(
             r#"
@@ -297,7 +312,8 @@ pub fn default_data_dir() -> PathBuf {
 mod tests {
     use super::*;
     use baize_core::{
-        BaizeEvent, ProjectKind, TaskSessionStatus, TrustLevel, VcsKind, WorkspaceId,
+        BaizeEvent, ProjectKind, ProviderId, RoutingMode, TaskSessionStatus, TrustLevel, VcsKind,
+        WorkspaceId,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -333,6 +349,57 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "session.agent.completed");
         assert_eq!(events[0].payload["status"], "ok");
+    }
+
+    #[test]
+    fn lists_route_decisions_for_session() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let session_id = TaskSessionId::new();
+        let other_session_id = TaskSessionId::new();
+        let now = Utc::now();
+        let first = RouteDecision {
+            id: RouteDecisionId::new(),
+            session_id: session_id.clone(),
+            selected_provider_id: ProviderId("codex".to_string()),
+            previous_provider_id: None,
+            reason: "initial".to_string(),
+            confidence: 0.75,
+            mode: RoutingMode::Assisted,
+            created_at: now,
+        };
+        let second = RouteDecision {
+            id: RouteDecisionId::new(),
+            session_id: session_id.clone(),
+            selected_provider_id: ProviderId("gemini".to_string()),
+            previous_provider_id: Some(ProviderId("codex".to_string())),
+            reason: "handoff".to_string(),
+            confidence: 0.9,
+            mode: RoutingMode::Assisted,
+            created_at: now,
+        };
+        let other = RouteDecision {
+            id: RouteDecisionId::new(),
+            session_id: other_session_id,
+            selected_provider_id: ProviderId("opencode".to_string()),
+            previous_provider_id: None,
+            reason: "other".to_string(),
+            confidence: 0.5,
+            mode: RoutingMode::Assisted,
+            created_at: now,
+        };
+
+        store.insert_route_decision(&first).expect("first");
+        store.insert_route_decision(&second).expect("second");
+        store.insert_route_decision(&other).expect("other");
+
+        let decisions = store
+            .list_route_decisions_for_session(&session_id)
+            .expect("decisions");
+
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0].selected_provider_id.0, "codex");
+        assert_eq!(decisions[1].selected_provider_id.0, "gemini");
     }
 
     #[test]
