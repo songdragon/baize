@@ -255,6 +255,7 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
     let events = get_json(&format!("/sessions/{session_id}/events"))?;
     append_recent_events(state, &events);
     refresh_route_history(state)?;
+    refresh_session_diff(state)?;
     state.input.clear();
     Ok(())
 }
@@ -289,6 +290,7 @@ fn request_handoff(state: &mut TuiState) -> Result<()> {
     )?;
     append_handoff_response(state, &accepted);
     refresh_route_history(state)?;
+    refresh_session_diff(state)?;
     Ok(())
 }
 
@@ -440,6 +442,55 @@ fn append_route_history(state: &mut TuiState, response: &Value) {
             .unwrap_or_default();
         state.push_message(format!("  {previous} -> {selected}: {reason}"));
     }
+}
+
+fn refresh_session_diff(state: &mut TuiState) -> Result<()> {
+    let Some(session_id) = state.session_id.clone() else {
+        return Ok(());
+    };
+    let response = get_json(&format!("/sessions/{session_id}/diff"))?;
+    append_session_diff(state, &response);
+    Ok(())
+}
+
+fn append_session_diff(state: &mut TuiState, response: &Value) {
+    let Some(diff) = response.get("diff") else {
+        return;
+    };
+    let dirty = diff.get("dirty").and_then(Value::as_bool).unwrap_or(false);
+    let changed_files = diff
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if !dirty {
+        state.push_message("workspace clean");
+        return;
+    }
+
+    let shown = changed_files.iter().take(5).cloned().collect::<Vec<_>>();
+    let suffix = changed_files
+        .len()
+        .checked_sub(shown.len())
+        .filter(|remaining| *remaining > 0)
+        .map(|remaining| format!(" (+{remaining} more)"))
+        .unwrap_or_default();
+    state.push_message(format!(
+        "workspace dirty: {}{}",
+        if shown.is_empty() {
+            "changed files unknown".to_string()
+        } else {
+            shown.join(", ")
+        },
+        suffix
+    ));
 }
 
 fn append_prompt_response(state: &mut TuiState, response: &Value) {
@@ -746,6 +797,45 @@ mod tests {
         assert!(state.session.contains("routes:"));
         assert!(state.session.contains("none -> codex: Selected codex."));
         assert!(state.session.contains("codex -> gemini: Accepted handoff."));
+    }
+
+    #[test]
+    fn appends_clean_session_diff() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "diff": {
+                "dirty": false,
+                "changed_files": []
+            }
+        });
+
+        append_session_diff(&mut state, &response);
+
+        assert!(state.session.contains("workspace clean"));
+    }
+
+    #[test]
+    fn appends_dirty_session_diff_with_file_limit() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "diff": {
+                "dirty": true,
+                "changed_files": [
+                    "a.rs",
+                    "b.rs",
+                    "c.rs",
+                    "d.rs",
+                    "e.rs",
+                    "f.rs"
+                ]
+            }
+        });
+
+        append_session_diff(&mut state, &response);
+
+        assert!(state
+            .session
+            .contains("workspace dirty: a.rs, b.rs, c.rs, d.rs, e.rs (+1 more)"));
     }
 
     #[test]
