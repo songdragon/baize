@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaizeConfig {
@@ -72,6 +72,29 @@ pub fn parse_config(raw: &str) -> Result<BaizeConfig> {
     toml::from_str(raw).context("failed to parse config")
 }
 
+pub fn default_config_toml() -> Result<String> {
+    toml::to_string_pretty(&BaizeConfig::default()).context("failed to serialize default config")
+}
+
+pub fn init_default_config(force: bool) -> Result<PathBuf> {
+    let path = default_config_path();
+    write_default_config(path, force)
+}
+
+pub fn write_default_config(path: impl AsRef<Path>, force: bool) -> Result<PathBuf> {
+    let path = path.as_ref();
+    if path.exists() && !force {
+        bail!("config already exists at {}", path.display());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(path, default_config_toml()?)
+        .with_context(|| format!("failed to write config at {}", path.display()))?;
+    Ok(path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +132,38 @@ mod tests {
         assert_eq!(config.daemon.port, 9000);
         assert_eq!(config.workspace.command_policy, "allow_project");
         assert_eq!(config.providers.order, vec!["gemini", "codex"]);
+    }
+
+    #[test]
+    fn default_config_toml_round_trips() {
+        let raw = default_config_toml().expect("toml");
+        let config = parse_config(&raw).expect("parse");
+
+        assert_eq!(config.daemon.host, "127.0.0.1");
+        assert_eq!(config.providers.order[0], "codex");
+        assert!(raw.contains("[providers]"));
+    }
+
+    #[test]
+    fn write_default_config_refuses_to_overwrite_without_force() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        write_default_config(&path, false).expect("write");
+        let error = write_default_config(&path, false).expect_err("overwrite should fail");
+
+        assert!(error.to_string().contains("config already exists"));
+    }
+
+    #[test]
+    fn write_default_config_overwrites_with_force() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "not toml").expect("seed");
+
+        write_default_config(&path, true).expect("overwrite");
+
+        let config = parse_config(&fs::read_to_string(path).expect("read")).expect("parse");
+        assert_eq!(config.daemon.port, 7878);
     }
 }

@@ -14,6 +14,10 @@ struct Cli {
 enum Command {
     Tui,
     Daemon,
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     Status {
         #[arg(default_value = ".")]
         path: String,
@@ -22,6 +26,16 @@ enum Command {
     Providers,
     Validate {
         provider: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Path,
+    Show,
+    Init {
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -35,6 +49,7 @@ async fn main() -> Result<()> {
             let config = baize_config::load_or_default()?;
             baize_daemon::run(config).await
         }
+        Command::Config { command } => handle_config(command),
         Command::Status { path } => {
             let status = baize_workspace::inspect(path)?;
             println!("{}", serde_json::to_string_pretty(&status)?);
@@ -70,6 +85,25 @@ async fn main() -> Result<()> {
                 let validations = baize_adapters::validate_all_providers();
                 println!("{}", serde_json::to_string_pretty(&validations)?);
             }
+            Ok(())
+        }
+    }
+}
+
+fn handle_config(command: ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Path => {
+            println!("{}", baize_config::default_config_path().display());
+            Ok(())
+        }
+        ConfigCommand::Show => {
+            let config = baize_config::load_or_default()?;
+            println!("{}", toml::to_string_pretty(&config)?);
+            Ok(())
+        }
+        ConfigCommand::Init { force } => {
+            let path = baize_config::init_default_config(force)?;
+            println!("created {}", path.display());
             Ok(())
         }
     }
