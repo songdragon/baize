@@ -62,13 +62,14 @@ impl Default for TuiState {
 pub fn run() -> Result<()> {
     let daemon_status =
         ensure_daemon_running().unwrap_or_else(|error| format!("daemon: unavailable ({error:#})"));
+    let provider_load = load_provider_ids();
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, daemon_status);
+    let result = run_app(&mut terminal, daemon_status, provider_load);
 
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -80,9 +81,18 @@ pub fn run() -> Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     daemon_status: String,
+    provider_load: Result<Vec<String>>,
 ) -> Result<()> {
     let mut state = TuiState::default();
     state.daemon_status = daemon_status;
+    match provider_load {
+        Ok(providers) if !providers.is_empty() => {
+            state.providers = providers;
+            state.selected_provider_index = 0;
+        }
+        Ok(_) => state.push_message("daemon returned no enabled providers; using defaults"),
+        Err(error) => state.push_message(format!("provider load failed: {error:#}")),
+    }
     loop {
         terminal.draw(|frame| render(frame, &state))?;
 
@@ -197,6 +207,30 @@ fn daemon_start_args() -> [&'static str; 1] {
 
 fn daemon_connected_message() -> String {
     format!("daemon: connected at {DAEMON_HOST}:{DAEMON_PORT}")
+}
+
+fn load_provider_ids() -> Result<Vec<String>> {
+    let response = get_json("/providers")?;
+    parse_provider_ids(&response)
+}
+
+fn parse_provider_ids(response: &Value) -> Result<Vec<String>> {
+    let providers = response
+        .get("providers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| response_error("providers", response))?;
+
+    Ok(providers
+        .iter()
+        .filter(|provider| {
+            provider
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        })
+        .filter_map(|provider| provider.get("id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 fn submit_prompt(state: &mut TuiState) -> Result<()> {
@@ -654,5 +688,20 @@ mod tests {
             daemon_connected_message(),
             "daemon: connected at 127.0.0.1:7878"
         );
+    }
+
+    #[test]
+    fn parses_provider_ids_from_daemon_response() {
+        let response = json!({
+            "providers": [
+                { "id": "gemini", "enabled": true },
+                { "id": "codex", "enabled": true },
+                { "id": "disabled", "enabled": false }
+            ]
+        });
+
+        let providers = parse_provider_ids(&response).expect("providers");
+
+        assert_eq!(providers, vec!["gemini", "codex"]);
     }
 }

@@ -166,8 +166,8 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-async fn providers() -> Json<serde_json::Value> {
-    Json(json!({ "providers": default_provider_profiles() }))
+async fn providers(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({ "providers": ordered_provider_profiles(&state.config) }))
 }
 
 async fn provider_health(AxumPath(id): AxumPath<String>) -> Json<serde_json::Value> {
@@ -782,6 +782,29 @@ fn select_provider(state: &AppState, requested: Option<String>) -> ProviderId {
         .unwrap_or_else(|| ProviderId("codex".to_string()))
 }
 
+fn ordered_provider_profiles(config: &BaizeConfig) -> Vec<baize_core::ProviderProfile> {
+    let providers = default_provider_profiles();
+    let mut ordered = config
+        .providers
+        .order
+        .iter()
+        .filter_map(|id| {
+            providers
+                .iter()
+                .find(|provider| provider.id.0 == *id && provider.enabled)
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+
+    for provider in providers {
+        if provider.enabled && !ordered.iter().any(|existing| existing.id == provider.id) {
+            ordered.push(provider);
+        }
+    }
+
+    ordered
+}
+
 fn with_store<T>(state: &AppState, f: impl FnOnce(&EventStore) -> Result<T>) -> Result<T> {
     let store = state
         .store
@@ -1109,5 +1132,40 @@ mod tests {
 
         assert_eq!(validation["validation"]["provider_id"], "gemini");
         assert!(validation["validation"]["detected"].is_object());
+    }
+
+    #[tokio::test]
+    async fn providers_follow_configured_order() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+        let mut config = BaizeConfig::default();
+        config.providers.order = vec!["gemini".to_string(), "codex".to_string()];
+        let app = router(AppState::with_executor(
+            config,
+            store,
+            Arc::new(FakeAgentExecutor {
+                result: AgentRunResult {
+                    provider_id: ProviderId("codex".to_string()),
+                    success: true,
+                    exit_code: Some(0),
+                    events: Vec::new(),
+                    stderr: String::new(),
+                },
+            }),
+        ));
+
+        let providers = json_response(
+            app,
+            Request::builder()
+                .uri("/providers")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        assert_eq!(providers["providers"][0]["id"], "gemini");
+        assert_eq!(providers["providers"][1]["id"], "codex");
+        assert_eq!(providers["providers"][2]["id"], "copilot");
+        assert_eq!(providers["providers"][3]["id"], "opencode");
     }
 }
