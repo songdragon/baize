@@ -188,7 +188,7 @@ async fn provider_validate(AxumPath(id): AxumPath<String>) -> Json<serde_json::V
 }
 
 async fn check_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let providers = default_provider_profiles();
+    let providers = ordered_provider_profiles(&state.config);
     let health = providers.iter().map(check_provider).collect::<Vec<_>>();
     let event = BaizeEvent::new("provider.health.changed", json!({ "health": health }));
     state.record_event(event);
@@ -1188,5 +1188,39 @@ mod tests {
         assert_eq!(providers["providers"][1]["id"], "codex");
         assert_eq!(providers["providers"][2]["id"], "copilot");
         assert_eq!(providers["providers"][3]["id"], "opencode");
+    }
+
+    #[tokio::test]
+    async fn provider_health_check_follows_configured_order() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+        let mut config = BaizeConfig::default();
+        config.providers.order = vec!["gemini".to_string(), "codex".to_string()];
+        let app = router(AppState::with_executor(
+            config,
+            store,
+            Arc::new(FakeAgentExecutor {
+                result: AgentRunResult {
+                    provider_id: ProviderId("codex".to_string()),
+                    success: true,
+                    exit_code: Some(0),
+                    events: Vec::new(),
+                    stderr: String::new(),
+                },
+            }),
+        ));
+
+        let health = json_response(
+            app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/providers/check")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        assert_eq!(health["health"][0]["provider_id"], "gemini");
+        assert_eq!(health["health"][1]["provider_id"], "codex");
     }
 }

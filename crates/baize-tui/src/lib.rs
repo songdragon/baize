@@ -28,12 +28,20 @@ pub struct TuiState {
     pub session: String,
     pub daemon_status: String,
     pub providers: Vec<String>,
+    pub provider_health: Vec<ProviderHealthView>,
     pub selected_provider_index: usize,
     pub active_provider: Option<String>,
     pub route_reason: Option<String>,
     pub input: String,
     pub workspace_id: Option<String>,
     pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderHealthView {
+    pub provider_id: String,
+    pub status: String,
+    pub last_error: Option<String>,
 }
 
 impl Default for TuiState {
@@ -49,6 +57,7 @@ impl Default for TuiState {
                 "copilot".to_string(),
                 "opencode".to_string(),
             ],
+            provider_health: Vec::new(),
             selected_provider_index: 0,
             active_provider: None,
             route_reason: None,
@@ -63,13 +72,14 @@ pub fn run() -> Result<()> {
     let daemon_status =
         ensure_daemon_running().unwrap_or_else(|error| format!("daemon: unavailable ({error:#})"));
     let provider_load = load_provider_ids();
+    let health_load = load_provider_health();
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, daemon_status, provider_load);
+    let result = run_app(&mut terminal, daemon_status, provider_load, health_load);
 
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -82,6 +92,7 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     daemon_status: String,
     provider_load: Result<Vec<String>>,
+    health_load: Result<Vec<ProviderHealthView>>,
 ) -> Result<()> {
     let mut state = TuiState::default();
     state.daemon_status = daemon_status;
@@ -92,6 +103,10 @@ fn run_app(
         }
         Ok(_) => state.push_message("daemon returned no enabled providers; using defaults"),
         Err(error) => state.push_message(format!("provider load failed: {error:#}")),
+    }
+    match health_load {
+        Ok(health) => state.provider_health = health,
+        Err(error) => state.push_message(format!("provider health failed: {error:#}")),
     }
     loop {
         terminal.draw(|frame| render(frame, &state))?;
@@ -214,6 +229,11 @@ fn load_provider_ids() -> Result<Vec<String>> {
     parse_provider_ids(&response)
 }
 
+fn load_provider_health() -> Result<Vec<ProviderHealthView>> {
+    let response = post_json("/providers/check", json!({}))?;
+    parse_provider_health(&response)
+}
+
 fn parse_provider_ids(response: &Value) -> Result<Vec<String>> {
     let providers = response
         .get("providers")
@@ -231,6 +251,36 @@ fn parse_provider_ids(response: &Value) -> Result<Vec<String>> {
         .filter_map(|provider| provider.get("id").and_then(Value::as_str))
         .map(ToOwned::to_owned)
         .collect())
+}
+
+fn parse_provider_health(response: &Value) -> Result<Vec<ProviderHealthView>> {
+    let health = response
+        .get("health")
+        .and_then(Value::as_array)
+        .ok_or_else(|| response_error("health", response))?;
+
+    Ok(health
+        .iter()
+        .filter_map(|entry| {
+            let provider_id = entry.get("provider_id").and_then(provider_id)?;
+            let status = entry.get("status").and_then(Value::as_str)?;
+            Some(ProviderHealthView {
+                provider_id: provider_id.to_string(),
+                status: status.to_string(),
+                last_error: entry
+                    .get("last_error")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            })
+        })
+        .collect())
+}
+
+fn health_status_for<'a>(health: &'a [ProviderHealthView], provider_id: &str) -> Option<&'a str> {
+    health
+        .iter()
+        .find(|entry| entry.provider_id == provider_id)
+        .map(|entry| entry.status.as_str())
 }
 
 fn submit_prompt(state: &mut TuiState) -> Result<()> {
@@ -569,11 +619,15 @@ impl TuiState {
             .iter()
             .map(|provider| {
                 let active = self.active_provider.as_deref() == Some(provider.as_str());
+                let health = health_status_for(&self.provider_health, provider)
+                    .map(short_health_status)
+                    .unwrap_or("?");
+                let label = format!("{provider}:{health}");
                 match (provider == selected, active) {
-                    (true, true) => format!("[{provider}*]"),
-                    (true, false) => format!("[{provider}]"),
-                    (false, true) => format!("{provider}*"),
-                    (false, false) => provider.to_string(),
+                    (true, true) => format!("[{label}*]"),
+                    (true, false) => format!("[{label}]"),
+                    (false, true) => format!("{label}*"),
+                    (false, false) => label,
                 }
             })
             .collect::<Vec<_>>()
@@ -606,6 +660,16 @@ impl TuiState {
         lines.push(message.into());
         let keep_from = lines.len().saturating_sub(30);
         self.session = lines.split_off(keep_from).join("\n");
+    }
+}
+
+fn short_health_status(status: &str) -> &str {
+    match status {
+        "Healthy" => "ok",
+        "Degraded" => "warn",
+        "Unavailable" => "down",
+        "Unknown" => "?",
+        _ => "?",
     }
 }
 
@@ -688,7 +752,7 @@ mod tests {
 
         assert!(rendered.contains("Baize MVP TUI"));
         assert!(rendered.contains("daemon: not checked"));
-        assert!(rendered.contains("Providers: [codex], gemini, copilot, opencode"));
+        assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
     }
 
     #[test]
@@ -864,5 +928,63 @@ mod tests {
         let providers = parse_provider_ids(&response).expect("providers");
 
         assert_eq!(providers, vec!["gemini", "codex"]);
+    }
+
+    #[test]
+    fn parses_provider_health_from_daemon_response() {
+        let response = json!({
+            "health": [
+                {
+                    "provider_id": "gemini",
+                    "status": "Healthy",
+                    "last_error": null
+                },
+                {
+                    "provider_id": "codex",
+                    "status": "Unavailable",
+                    "last_error": "missing command"
+                }
+            ]
+        });
+
+        let health = parse_provider_health(&response).expect("health");
+
+        assert_eq!(
+            health,
+            vec![
+                ProviderHealthView {
+                    provider_id: "gemini".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: Some("missing command".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_status_includes_health() {
+        let state = TuiState {
+            provider_health: vec![
+                ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "gemini".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: Some("missing".to_string()),
+                },
+            ],
+            ..TuiState::default()
+        };
+
+        assert!(state.provider_status().contains("[codex:ok]"));
+        assert!(state.provider_status().contains("gemini:down"));
     }
 }
