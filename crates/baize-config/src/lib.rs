@@ -1,7 +1,12 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const KNOWN_PROVIDERS: &[&str] = &["codex", "gemini", "copilot", "opencode"];
+const COMMAND_POLICIES: &[&str] = &["ask", "allow_project", "deny"];
+const CHECKPOINT_POLICIES: &[&str] = &["before_handoff", "off"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaizeConfig {
@@ -25,6 +30,13 @@ pub struct WorkspaceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub order: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigValidation {
+    pub valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 impl Default for BaizeConfig {
@@ -93,6 +105,50 @@ pub fn write_default_config(path: impl AsRef<Path>, force: bool) -> Result<PathB
     fs::write(path, default_config_toml()?)
         .with_context(|| format!("failed to write config at {}", path.display()))?;
     Ok(path.to_path_buf())
+}
+
+pub fn validate_config(config: &BaizeConfig) -> ConfigValidation {
+    let mut errors = Vec::new();
+    let warnings = Vec::new();
+
+    if config.daemon.host.trim().is_empty() {
+        errors.push("daemon.host must not be empty".to_string());
+    }
+    if !COMMAND_POLICIES.contains(&config.workspace.command_policy.as_str()) {
+        errors.push(format!(
+            "workspace.command_policy must be one of: {}",
+            COMMAND_POLICIES.join(", ")
+        ));
+    }
+    if !CHECKPOINT_POLICIES.contains(&config.workspace.checkpoint_policy.as_str()) {
+        errors.push(format!(
+            "workspace.checkpoint_policy must be one of: {}",
+            CHECKPOINT_POLICIES.join(", ")
+        ));
+    }
+    if config.providers.order.is_empty() {
+        errors.push("providers.order must not be empty".to_string());
+    }
+
+    let mut seen = HashSet::new();
+    for provider in &config.providers.order {
+        if !seen.insert(provider.as_str()) {
+            errors.push(format!(
+                "providers.order contains duplicate provider: {provider}"
+            ));
+        }
+        if !KNOWN_PROVIDERS.contains(&provider.as_str()) {
+            errors.push(format!(
+                "providers.order contains unknown provider: {provider}"
+            ));
+        }
+    }
+
+    ConfigValidation {
+        valid: errors.is_empty(),
+        errors,
+        warnings,
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +221,42 @@ mod tests {
 
         let config = parse_config(&fs::read_to_string(path).expect("read")).expect("parse");
         assert_eq!(config.daemon.port, 7878);
+    }
+
+    #[test]
+    fn validates_default_config() {
+        let validation = validate_config(&BaizeConfig::default());
+
+        assert!(validation.valid);
+        assert!(validation.errors.is_empty());
+    }
+
+    #[test]
+    fn validation_reports_invalid_values() {
+        let mut config = BaizeConfig::default();
+        config.daemon.host = " ".to_string();
+        config.workspace.command_policy = "always".to_string();
+        config.workspace.checkpoint_policy = "sometimes".to_string();
+        config.providers.order = vec![
+            "codex".to_string(),
+            "codex".to_string(),
+            "unknown".to_string(),
+        ];
+
+        let validation = validate_config(&config);
+
+        assert!(!validation.valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("daemon.host")));
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate provider: codex")));
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("unknown provider: unknown")));
     }
 }

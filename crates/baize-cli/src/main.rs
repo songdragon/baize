@@ -37,6 +37,7 @@ enum ConfigCommand {
         #[arg(long)]
         force: bool,
     },
+    Validate,
 }
 
 #[tokio::main]
@@ -104,6 +105,15 @@ fn handle_config(command: ConfigCommand) -> Result<()> {
         ConfigCommand::Init { force } => {
             let path = baize_config::init_default_config(force)?;
             println!("created {}", path.display());
+            Ok(())
+        }
+        ConfigCommand::Validate => {
+            let config = baize_config::load_or_default()?;
+            let validation = baize_config::validate_config(&config);
+            println!("{}", serde_json::to_string_pretty(&validation)?);
+            if !validation.valid {
+                anyhow::bail!("config validation failed");
+            }
             Ok(())
         }
     }
