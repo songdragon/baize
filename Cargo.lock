@@ -204,6 +204,7 @@ dependencies = [
  "baize-workspace",
  "clap",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing-subscriber",
