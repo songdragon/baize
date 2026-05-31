@@ -121,6 +121,12 @@ fn run_app(
                             state.push_message(format!("handoff error: {error:#}"));
                         }
                     }
+                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = refresh_provider_health(&mut state) {
+                            state
+                                .push_message(format!("provider health refresh failed: {error:#}"));
+                        }
+                    }
                     KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
@@ -235,6 +241,14 @@ fn load_provider_health() -> Result<Vec<ProviderHealthView>> {
     parse_provider_health(&response)
 }
 
+fn refresh_provider_health(state: &mut TuiState) -> Result<()> {
+    let health = load_provider_health()?;
+    let summary = summarize_provider_health(&health);
+    state.provider_health = health;
+    state.push_message(format!("provider health refreshed: {summary}"));
+    Ok(())
+}
+
 fn parse_provider_ids(response: &Value) -> Result<Vec<String>> {
     let providers = response
         .get("providers")
@@ -282,6 +296,23 @@ fn health_status_for<'a>(health: &'a [ProviderHealthView], provider_id: &str) ->
         .iter()
         .find(|entry| entry.provider_id == provider_id)
         .map(|entry| entry.status.as_str())
+}
+
+fn summarize_provider_health(health: &[ProviderHealthView]) -> String {
+    if health.is_empty() {
+        return "none".to_string();
+    }
+    health
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}:{}",
+                entry.provider_id,
+                short_health_status(&entry.status)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn submit_prompt(state: &mut TuiState) -> Result<()> {
@@ -653,7 +684,7 @@ impl TuiState {
     }
 
     fn help_text(&self) -> &'static str {
-        "Enter send | Tab provider/target | Ctrl-H handoff | Esc quit"
+        "Enter send | Tab target | Ctrl-H handoff | Ctrl-R health | Esc quit"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -758,9 +789,8 @@ mod tests {
         assert!(rendered.contains("Baize MVP TUI"));
         assert!(rendered.contains("daemon: not checked"));
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
-        assert!(
-            rendered.contains("Help: Enter send | Tab provider/target | Ctrl-H handoff | Esc quit")
-        );
+        assert!(rendered
+            .contains("Help: Enter send | Tab target | Ctrl-H handoff | Ctrl-R health | Esc quit"));
     }
 
     #[test]
@@ -994,5 +1024,23 @@ mod tests {
 
         assert!(state.provider_status().contains("[codex:ok]"));
         assert!(state.provider_status().contains("gemini:down"));
+    }
+
+    #[test]
+    fn summarizes_provider_health() {
+        let health = vec![
+            ProviderHealthView {
+                provider_id: "codex".to_string(),
+                status: "Healthy".to_string(),
+                last_error: None,
+            },
+            ProviderHealthView {
+                provider_id: "gemini".to_string(),
+                status: "Unavailable".to_string(),
+                last_error: Some("missing".to_string()),
+            },
+        ];
+
+        assert_eq!(summarize_provider_health(&health), "codex:ok, gemini:down");
     }
 }
