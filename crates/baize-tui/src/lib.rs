@@ -30,6 +30,8 @@ pub struct TuiState {
     pub activity_status: String,
     pub providers: Vec<String>,
     pub provider_health: Vec<ProviderHealthView>,
+    pub pending_permissions: Vec<PermissionView>,
+    pub selected_permission_index: usize,
     pub selected_provider_index: usize,
     pub active_provider: Option<String>,
     pub route_reason: Option<String>,
@@ -43,6 +45,15 @@ pub struct ProviderHealthView {
     pub provider_id: String,
     pub status: String,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionView {
+    pub id: String,
+    pub session_id: Option<String>,
+    pub command: String,
+    pub reason: String,
+    pub status: String,
 }
 
 impl Default for TuiState {
@@ -60,6 +71,8 @@ impl Default for TuiState {
                 "opencode".to_string(),
             ],
             provider_health: Vec::new(),
+            pending_permissions: Vec::new(),
+            selected_permission_index: 0,
             selected_provider_index: 0,
             active_provider: None,
             route_reason: None,
@@ -75,13 +88,20 @@ pub fn run() -> Result<()> {
         ensure_daemon_running().unwrap_or_else(|error| format!("daemon: unavailable ({error:#})"));
     let provider_load = load_provider_ids();
     let health_load = load_provider_health();
+    let permission_load = load_pending_permissions();
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, daemon_status, provider_load, health_load);
+    let result = run_app(
+        &mut terminal,
+        daemon_status,
+        provider_load,
+        health_load,
+        permission_load,
+    );
 
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -95,6 +115,7 @@ fn run_app(
     daemon_status: String,
     provider_load: Result<Vec<String>>,
     health_load: Result<Vec<ProviderHealthView>>,
+    permission_load: Result<Vec<PermissionView>>,
 ) -> Result<()> {
     let mut state = TuiState::default();
     state.daemon_status = daemon_status;
@@ -109,6 +130,10 @@ fn run_app(
     match health_load {
         Ok(health) => state.provider_health = health,
         Err(error) => state.push_message(format!("provider health failed: {error:#}")),
+    }
+    match permission_load {
+        Ok(permissions) => state.pending_permissions = permissions,
+        Err(error) => state.push_message(format!("permission load failed: {error:#}")),
     }
     loop {
         terminal.draw(|frame| render(frame, &state))?;
@@ -129,6 +154,24 @@ fn run_app(
                             state.activity_status = "failed".to_string();
                             state
                                 .push_message(format!("provider health refresh failed: {error:#}"));
+                        }
+                    }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = refresh_permissions(&mut state) {
+                            state.activity_status = "failed".to_string();
+                            state.push_message(format!("permission refresh failed: {error:#}"));
+                        }
+                    }
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = resolve_selected_permission(&mut state, true) {
+                            state.activity_status = "failed".to_string();
+                            state.push_message(format!("permission approve failed: {error:#}"));
+                        }
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = resolve_selected_permission(&mut state, false) {
+                            state.activity_status = "failed".to_string();
+                            state.push_message(format!("permission deny failed: {error:#}"));
                         }
                     }
                     KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -166,7 +209,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(8),
+            Constraint::Length(9),
         ])
         .split(frame.area());
 
@@ -182,11 +225,12 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{}\nStatus: {}\nProviders: {}\nRoute: {}\nHelp: {}\n> {}",
+            "{}\nStatus: {}\nProviders: {}\nRoute: {}\nPerms: {}\nHelp: {}\n> {}",
             state.daemon_status,
             state.activity_status,
             state.provider_status(),
             state.route_status(),
+            state.permission_status(),
             state.help_text(),
             state.input
         ))
@@ -256,6 +300,11 @@ fn load_provider_health() -> Result<Vec<ProviderHealthView>> {
     parse_provider_health(&response)
 }
 
+fn load_pending_permissions() -> Result<Vec<PermissionView>> {
+    let response = get_json("/permissions?status=pending")?;
+    parse_permissions(&response)
+}
+
 fn refresh_provider_health(state: &mut TuiState) -> Result<()> {
     state.activity_status = "refreshing provider health".to_string();
     let health = load_provider_health()?;
@@ -263,6 +312,18 @@ fn refresh_provider_health(state: &mut TuiState) -> Result<()> {
     state.provider_health = health;
     state.activity_status = "idle".to_string();
     state.push_message(format!("provider health refreshed: {summary}"));
+    Ok(())
+}
+
+fn refresh_permissions(state: &mut TuiState) -> Result<()> {
+    state.activity_status = "refreshing permissions".to_string();
+    let permissions = load_pending_permissions()?;
+    state.set_pending_permissions(permissions);
+    state.activity_status = "idle".to_string();
+    state.push_message(format!(
+        "permissions refreshed: {} pending",
+        state.pending_permissions.len()
+    ));
     Ok(())
 }
 
@@ -282,6 +343,39 @@ fn parse_provider_ids(response: &Value) -> Result<Vec<String>> {
         })
         .filter_map(|provider| provider.get("id").and_then(Value::as_str))
         .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn parse_permissions(response: &Value) -> Result<Vec<PermissionView>> {
+    let permissions = response
+        .get("permissions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| response_error("permissions", response))?;
+
+    Ok(permissions
+        .iter()
+        .filter_map(|permission| {
+            let id = permission.get("id").and_then(permission_id)?;
+            let command = permission.get("command").and_then(Value::as_str)?;
+            let reason = permission
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let status = permission
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("Pending");
+            Some(PermissionView {
+                id: id.to_string(),
+                session_id: permission
+                    .get("session_id")
+                    .and_then(task_session_id)
+                    .map(ToOwned::to_owned),
+                command: command.to_string(),
+                reason: reason.to_string(),
+                status: status.to_string(),
+            })
+        })
         .collect())
 }
 
@@ -490,6 +584,45 @@ fn append_handoff_response(state: &mut TuiState, response: &Value) {
     {
         state.route_reason = Some(reason.to_string());
         state.push_message(format!("route: {reason}"));
+    }
+}
+
+fn resolve_selected_permission(state: &mut TuiState, approve: bool) -> Result<()> {
+    let Some(permission) = state.selected_permission().cloned() else {
+        state.push_message("no pending permission selected");
+        return Ok(());
+    };
+    let action = if approve { "approve" } else { "deny" };
+    state.activity_status = format!("{action} permission");
+    let response = post_json(
+        &format!("/permissions/{}/{action}", permission.id),
+        json!({}),
+    )?;
+    append_permission_resolution(state, &response);
+    refresh_permissions(state)?;
+    Ok(())
+}
+
+fn append_permission_resolution(state: &mut TuiState, response: &Value) {
+    let permission = response.get("permission").unwrap_or(&Value::Null);
+    let id = permission
+        .get("id")
+        .and_then(permission_id)
+        .unwrap_or("unknown");
+    let status = permission
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let command = permission
+        .get("command")
+        .and_then(Value::as_str)
+        .map(one_line)
+        .unwrap_or_default();
+
+    if command.is_empty() {
+        state.push_message(format!("permission {status}: {id}"));
+    } else {
+        state.push_message(format!("permission {status}: {id} - {command}"));
     }
 }
 
@@ -728,6 +861,19 @@ impl TuiState {
         self.selected_provider_index = (self.selected_provider_index + 1) % self.providers.len();
     }
 
+    fn selected_permission(&self) -> Option<&PermissionView> {
+        self.pending_permissions.get(self.selected_permission_index)
+    }
+
+    fn set_pending_permissions(&mut self, permissions: Vec<PermissionView>) {
+        self.pending_permissions = permissions;
+        if self.pending_permissions.is_empty() {
+            self.selected_permission_index = 0;
+        } else if self.selected_permission_index >= self.pending_permissions.len() {
+            self.selected_permission_index = self.pending_permissions.len() - 1;
+        }
+    }
+
     fn provider_status(&self) -> String {
         let selected = self.selected_provider();
         self.providers
@@ -766,8 +912,26 @@ impl TuiState {
         }
     }
 
+    fn permission_status(&self) -> String {
+        let Some(permission) = self.selected_permission() else {
+            return "none pending".to_string();
+        };
+        let session = permission
+            .session_id
+            .as_deref()
+            .map(|session_id| format!(" {session_id}"))
+            .unwrap_or_default();
+        format!(
+            "[{}/{}] {}{}",
+            self.selected_permission_index + 1,
+            self.pending_permissions.len(),
+            short_text(&permission.command, 36),
+            session
+        )
+    }
+
     fn help_text(&self) -> &'static str {
-        "Enter send | Tab target | ^N new | ^L latest | ^H handoff | ^R health"
+        "Enter|Tab|^N new|^L load|^H hand|^R hlth|^P perm|^A ok|^D no"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -844,6 +1008,18 @@ fn provider_id(value: &Value) -> Option<&str> {
         .or_else(|| value.as_object()?.get("0")?.as_str())
 }
 
+fn permission_id(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.as_object()?.get("0")?.as_str())
+}
+
+fn task_session_id(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.as_object()?.get("0")?.as_str())
+}
+
 fn workspace_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -854,6 +1030,16 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn short_text(text: &str, max_chars: usize) -> String {
+    let text = one_line(text);
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+
+    let keep = max_chars.saturating_sub(3);
+    format!("{}...", text.chars().take(keep).collect::<String>())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,7 +1047,7 @@ mod tests {
 
     #[test]
     fn renders_mvp_dashboard_text() {
-        let backend = TestBackend::new(80, 16);
+        let backend = TestBackend::new(80, 17);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState::default();
 
@@ -873,9 +1059,10 @@ mod tests {
         assert!(rendered.contains("daemon: not checked"));
         assert!(rendered.contains("Status: idle"));
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
-        assert!(rendered.contains(
-            "Help: Enter send | Tab target | ^N new | ^L latest | ^H handoff | ^R health"
-        ));
+        assert!(rendered.contains("Perms: none pending"));
+        assert!(
+            rendered.contains("Help: Enter|Tab|^N new|^L load|^H hand|^R hlth|^P perm|^A ok|^D no")
+        );
     }
 
     #[test]
@@ -898,7 +1085,7 @@ mod tests {
 
     #[test]
     fn renders_prompt_input() {
-        let backend = TestBackend::new(80, 17);
+        let backend = TestBackend::new(80, 18);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
             input: "hello baize".to_string(),
@@ -1146,6 +1333,109 @@ mod tests {
     }
 
     #[test]
+    fn parses_pending_permissions_from_daemon_response() {
+        let response = json!({
+            "permissions": [
+                {
+                    "id": "perm_1",
+                    "session_id": "task_1",
+                    "command": "cargo test",
+                    "reason": "verify changes",
+                    "status": "Pending"
+                },
+                {
+                    "id": { "0": "perm_2" },
+                    "session_id": { "0": "task_2" },
+                    "command": "cargo fmt",
+                    "reason": "format changes",
+                    "status": "Pending"
+                }
+            ]
+        });
+
+        let permissions = parse_permissions(&response).expect("permissions");
+
+        assert_eq!(
+            permissions,
+            vec![
+                PermissionView {
+                    id: "perm_1".to_string(),
+                    session_id: Some("task_1".to_string()),
+                    command: "cargo test".to_string(),
+                    reason: "verify changes".to_string(),
+                    status: "Pending".to_string(),
+                },
+                PermissionView {
+                    id: "perm_2".to_string(),
+                    session_id: Some("task_2".to_string()),
+                    command: "cargo fmt".to_string(),
+                    reason: "format changes".to_string(),
+                    status: "Pending".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn permission_status_shows_selected_pending_permission() {
+        let state = TuiState {
+            pending_permissions: vec![PermissionView {
+                id: "perm_1".to_string(),
+                session_id: Some("task_1".to_string()),
+                command: "cargo test --all-features".to_string(),
+                reason: "verify changes".to_string(),
+                status: "Pending".to_string(),
+            }],
+            ..TuiState::default()
+        };
+
+        assert_eq!(
+            state.permission_status(),
+            "[1/1] cargo test --all-features task_1"
+        );
+    }
+
+    #[test]
+    fn set_pending_permissions_clamps_selection() {
+        let mut state = TuiState {
+            selected_permission_index: 3,
+            ..TuiState::default()
+        };
+
+        state.set_pending_permissions(vec![PermissionView {
+            id: "perm_1".to_string(),
+            session_id: None,
+            command: "cargo test".to_string(),
+            reason: "verify".to_string(),
+            status: "Pending".to_string(),
+        }]);
+
+        assert_eq!(state.selected_permission_index, 0);
+        assert_eq!(
+            state.selected_permission().expect("permission").id,
+            "perm_1"
+        );
+    }
+
+    #[test]
+    fn appends_permission_resolution_message() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "permission": {
+                "id": "perm_1",
+                "command": "cargo test",
+                "status": "Approved"
+            }
+        });
+
+        append_permission_resolution(&mut state, &response);
+
+        assert!(state
+            .session
+            .contains("permission Approved: perm_1 - cargo test"));
+    }
+
+    #[test]
     fn provider_status_includes_health() {
         let state = TuiState {
             provider_health: vec![
@@ -1187,7 +1477,7 @@ mod tests {
 
     #[test]
     fn status_line_reflects_activity() {
-        let backend = TestBackend::new(80, 16);
+        let backend = TestBackend::new(80, 17);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
             activity_status: "running codex".to_string(),
