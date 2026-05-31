@@ -137,6 +137,9 @@ fn run_app(
                             state.push_message(format!("load session failed: {error:#}"));
                         }
                     }
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        start_new_session(&mut state);
+                    }
                     KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
@@ -377,6 +380,15 @@ fn load_latest_session(state: &mut TuiState) -> Result<()> {
     refresh_session_diff(state)?;
     state.activity_status = "idle".to_string();
     Ok(())
+}
+
+fn start_new_session(state: &mut TuiState) {
+    state.session_id = None;
+    state.active_provider = None;
+    state.route_reason = None;
+    state.input.clear();
+    state.activity_status = "idle".to_string();
+    state.push_message("new session: next prompt will create a fresh task");
 }
 
 fn latest_session(response: &Value) -> Option<&Value> {
@@ -755,7 +767,7 @@ impl TuiState {
     }
 
     fn help_text(&self) -> &'static str {
-        "Enter send | Tab target | ^H handoff | ^L latest | ^R health | Esc quit"
+        "Enter send | Tab target | ^N new | ^L latest | ^H handoff | ^R health"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -862,7 +874,7 @@ mod tests {
         assert!(rendered.contains("Status: idle"));
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
         assert!(rendered.contains(
-            "Help: Enter send | Tab target | ^H handoff | ^L latest | ^R health | Esc quit"
+            "Help: Enter send | Tab target | ^N new | ^L latest | ^H handoff | ^R health"
         ));
     }
 
@@ -980,6 +992,29 @@ mod tests {
         assert_eq!(state.active_provider.as_deref(), Some("gemini"));
         assert!(state.session.contains("loaded session: task_1"));
         assert!(state.session.contains("objective: continue this task"));
+    }
+
+    #[test]
+    fn start_new_session_clears_session_binding_but_keeps_workspace() {
+        let mut state = TuiState {
+            session_id: Some("task_1".to_string()),
+            workspace_id: Some("ws_1".to_string()),
+            active_provider: Some("codex".to_string()),
+            route_reason: Some("old route".to_string()),
+            input: "draft prompt".to_string(),
+            activity_status: "running codex".to_string(),
+            ..TuiState::default()
+        };
+
+        start_new_session(&mut state);
+
+        assert_eq!(state.workspace_id.as_deref(), Some("ws_1"));
+        assert!(state.session_id.is_none());
+        assert!(state.active_provider.is_none());
+        assert!(state.route_reason.is_none());
+        assert!(state.input.is_empty());
+        assert_eq!(state.activity_status, "idle");
+        assert!(state.session.contains("new session"));
     }
 
     #[test]
