@@ -27,6 +27,7 @@ pub struct TuiState {
     pub workspace: String,
     pub session: String,
     pub daemon_status: String,
+    pub activity_status: String,
     pub providers: Vec<String>,
     pub provider_health: Vec<ProviderHealthView>,
     pub selected_provider_index: usize,
@@ -51,6 +52,7 @@ impl Default for TuiState {
             session: "Type a prompt and press Enter.\nEsc or Ctrl-C quits.\n\nBaize starts the local daemon automatically when possible."
                 .to_string(),
             daemon_status: "daemon: not checked".to_string(),
+            activity_status: "idle".to_string(),
             providers: vec![
                 "codex".to_string(),
                 "gemini".to_string(),
@@ -118,11 +120,13 @@ fn run_app(
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Err(error) = request_handoff(&mut state) {
+                            state.activity_status = "failed".to_string();
                             state.push_message(format!("handoff error: {error:#}"));
                         }
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Err(error) = refresh_provider_health(&mut state) {
+                            state.activity_status = "failed".to_string();
                             state
                                 .push_message(format!("provider health refresh failed: {error:#}"));
                         }
@@ -134,6 +138,7 @@ fn run_app(
                     }
                     KeyCode::Enter => {
                         if let Err(error) = submit_prompt(&mut state) {
+                            state.activity_status = "failed".to_string();
                             state.push_message(format!("error: {error:#}"));
                         }
                     }
@@ -152,7 +157,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(7),
+            Constraint::Length(8),
         ])
         .split(frame.area());
 
@@ -168,8 +173,9 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{}\nProviders: {}\nRoute: {}\nHelp: {}\n> {}",
+            "{}\nStatus: {}\nProviders: {}\nRoute: {}\nHelp: {}\n> {}",
             state.daemon_status,
+            state.activity_status,
             state.provider_status(),
             state.route_status(),
             state.help_text(),
@@ -242,9 +248,11 @@ fn load_provider_health() -> Result<Vec<ProviderHealthView>> {
 }
 
 fn refresh_provider_health(state: &mut TuiState) -> Result<()> {
+    state.activity_status = "refreshing provider health".to_string();
     let health = load_provider_health()?;
     let summary = summarize_provider_health(&health);
     state.provider_health = health;
+    state.activity_status = "idle".to_string();
     state.push_message(format!("provider health refreshed: {summary}"));
     Ok(())
 }
@@ -321,6 +329,7 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
         return Ok(());
     }
 
+    state.activity_status = format!("running {}", state.selected_provider());
     state.push_message(format!("> {prompt}"));
     let workspace_id = ensure_workspace(state)?;
     let session_id = ensure_session(state, &workspace_id, &prompt)?;
@@ -339,6 +348,7 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
     refresh_route_history(state)?;
     refresh_session_diff(state)?;
     state.input.clear();
+    state.activity_status = "idle".to_string();
     Ok(())
 }
 
@@ -353,6 +363,7 @@ fn request_handoff(state: &mut TuiState) -> Result<()> {
         return Ok(());
     }
 
+    state.activity_status = format!("handoff to {target_provider}");
     let handoff = post_json(
         &format!("/sessions/{session_id}/handoff"),
         json!({
@@ -373,6 +384,7 @@ fn request_handoff(state: &mut TuiState) -> Result<()> {
     append_handoff_response(state, &accepted);
     refresh_route_history(state)?;
     refresh_session_diff(state)?;
+    state.activity_status = "idle".to_string();
     Ok(())
 }
 
@@ -778,7 +790,7 @@ mod tests {
 
     #[test]
     fn renders_mvp_dashboard_text() {
-        let backend = TestBackend::new(80, 15);
+        let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState::default();
 
@@ -788,6 +800,7 @@ mod tests {
 
         assert!(rendered.contains("Baize MVP TUI"));
         assert!(rendered.contains("daemon: not checked"));
+        assert!(rendered.contains("Status: idle"));
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
         assert!(rendered
             .contains("Help: Enter send | Tab target | Ctrl-H handoff | Ctrl-R health | Esc quit"));
@@ -813,7 +826,7 @@ mod tests {
 
     #[test]
     fn renders_prompt_input() {
-        let backend = TestBackend::new(80, 16);
+        let backend = TestBackend::new(80, 17);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
             input: "hello baize".to_string(),
@@ -1042,5 +1055,21 @@ mod tests {
         ];
 
         assert_eq!(summarize_provider_health(&health), "codex:ok, gemini:down");
+    }
+
+    #[test]
+    fn status_line_reflects_activity() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = TuiState {
+            activity_status: "running codex".to_string(),
+            ..TuiState::default()
+        };
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("Status: running codex"));
     }
 }
