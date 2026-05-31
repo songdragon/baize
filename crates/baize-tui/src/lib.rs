@@ -146,7 +146,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(6),
+            Constraint::Length(7),
         ])
         .split(frame.area());
 
@@ -162,10 +162,11 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{}\nProviders: {}\nRoute: {}\n> {}",
+            "{}\nProviders: {}\nRoute: {}\nHelp: {}\n> {}",
             state.daemon_status,
             state.provider_status(),
             state.route_status(),
+            state.help_text(),
             state.input
         ))
         .block(Block::default().title("Status").borders(Borders::ALL)),
@@ -651,6 +652,10 @@ impl TuiState {
         }
     }
 
+    fn help_text(&self) -> &'static str {
+        "Enter send | Tab provider/target | Ctrl-H handoff | Esc quit"
+    }
+
     fn push_message(&mut self, message: impl Into<String>) {
         let mut lines = self
             .session
@@ -742,7 +747,7 @@ mod tests {
 
     #[test]
     fn renders_mvp_dashboard_text() {
-        let backend = TestBackend::new(80, 14);
+        let backend = TestBackend::new(80, 15);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState::default();
 
@@ -753,6 +758,9 @@ mod tests {
         assert!(rendered.contains("Baize MVP TUI"));
         assert!(rendered.contains("daemon: not checked"));
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
+        assert!(
+            rendered.contains("Help: Enter send | Tab provider/target | Ctrl-H handoff | Esc quit")
+        );
     }
 
     #[test]
@@ -775,7 +783,7 @@ mod tests {
 
     #[test]
     fn renders_prompt_input() {
-        let backend = TestBackend::new(80, 15);
+        let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
             input: "hello baize".to_string(),
