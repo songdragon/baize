@@ -57,6 +57,7 @@ POST /sessions/:id/cancel
 POST /sessions/:id/handoff
 GET  /sessions/:id/events
 GET  /sessions/:id/diff
+GET  /permissions
 POST /permissions
 POST /permissions/:id/approve
 POST /permissions/:id/deny

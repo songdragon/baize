@@ -88,6 +88,12 @@ struct CreatePermissionRequest {
     reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PermissionsQuery {
+    status: Option<String>,
+    session_id: Option<String>,
+}
+
 pub async fn run(config: BaizeConfig) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.daemon.host, config.daemon.port).parse()?;
     let state = AppState::new(config, EventStore::open_default()?);
@@ -149,7 +155,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:id/events", get(session_events))
         .route("/sessions/:id/diff", get(session_diff))
         .route("/sessions/:id/handoff/:handoff_id", get(handoff))
-        .route("/permissions", post(create_permission))
+        .route("/permissions", get(permissions).post(create_permission))
         .route("/permissions/:id/approve", post(approve_permission))
         .route("/permissions/:id/deny", post(deny_permission))
         .route("/events", get(events))
@@ -696,6 +702,40 @@ async fn session_diff(
     }
 }
 
+async fn permissions(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<PermissionsQuery>,
+) -> Json<serde_json::Value> {
+    let permissions = match with_store(&state, |store| store.list_permissions()) {
+        Ok(permissions) => permissions,
+        Err(error) => return Json(json!({ "error": error.to_string() })),
+    };
+    let status = match query.status.as_deref().map(parse_permission_status) {
+        Some(Some(status)) => Some(status),
+        Some(None) => return Json(json!({ "error": "invalid permission status" })),
+        None => None,
+    };
+    let session_id = query.session_id.as_deref();
+    let permissions = permissions
+        .into_iter()
+        .filter(|permission| {
+            status
+                .as_ref()
+                .is_none_or(|status| permission_status_eq(&permission.status, status))
+        })
+        .filter(|permission| {
+            session_id.is_none_or(|session_id| {
+                permission
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|permission_session| permission_session.0 == session_id)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Json(json!({ "permissions": permissions }))
+}
+
 async fn create_permission(
     State(state): State<AppState>,
     Json(request): Json<CreatePermissionRequest>,
@@ -829,6 +869,24 @@ fn json_result<T: Serialize>(key: &str, result: Result<T>) -> Json<serde_json::V
         Ok(value) => Json(json!({ key: value })),
         Err(error) => Json(json!({ "error": error.to_string() })),
     }
+}
+
+fn parse_permission_status(status: &str) -> Option<PermissionStatus> {
+    match status.to_ascii_lowercase().as_str() {
+        "pending" => Some(PermissionStatus::Pending),
+        "approved" => Some(PermissionStatus::Approved),
+        "denied" => Some(PermissionStatus::Denied),
+        _ => None,
+    }
+}
+
+fn permission_status_eq(left: &PermissionStatus, right: &PermissionStatus) -> bool {
+    matches!(
+        (left, right),
+        (PermissionStatus::Pending, PermissionStatus::Pending)
+            | (PermissionStatus::Approved, PermissionStatus::Approved)
+            | (PermissionStatus::Denied, PermissionStatus::Denied)
+    )
 }
 
 fn format_error_chain(error: &dyn std::error::Error) -> String {
@@ -1137,6 +1195,95 @@ mod tests {
             .expect("events")
             .iter()
             .any(|event| event["event_type"] == "handoff.accepted"));
+    }
+
+    #[tokio::test]
+    async fn lists_and_filters_permissions() {
+        let (app, _data_dir, _project_dir) = test_app();
+        let first = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/permissions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "session_id": "task_one",
+                        "command": "cargo test",
+                        "reason": "verify changes"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        let first_id = first["permission"]["id"].as_str().expect("permission id");
+
+        let second = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/permissions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "session_id": "task_two",
+                        "command": "cargo fmt",
+                        "reason": "format changes"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        let second_id = second["permission"]["id"].as_str().expect("permission id");
+
+        let _approved = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/permissions/{second_id}/approve"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        let pending = json_response(
+            app.clone(),
+            Request::builder()
+                .uri("/permissions?status=pending")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let pending_items = pending["permissions"].as_array().expect("permissions");
+        assert_eq!(pending_items.len(), 1);
+        assert_eq!(pending_items[0]["id"], first_id);
+
+        let session_filtered = json_response(
+            app.clone(),
+            Request::builder()
+                .uri("/permissions?session_id=task_two")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let session_items = session_filtered["permissions"]
+            .as_array()
+            .expect("permissions");
+        assert_eq!(session_items.len(), 1);
+        assert_eq!(session_items[0]["id"], second_id);
+        assert_eq!(session_items[0]["status"], "Approved");
+
+        let invalid = json_response(
+            app,
+            Request::builder()
+                .uri("/permissions?status=maybe")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(invalid["error"], "invalid permission status");
     }
 
     #[tokio::test]

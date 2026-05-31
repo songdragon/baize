@@ -266,6 +266,10 @@ impl EventStore {
         self.get_json("permissions", &id.0)
     }
 
+    pub fn list_permissions(&self) -> Result<Vec<PermissionRequest>> {
+        self.list_json("permissions")
+    }
+
     fn upsert_json<T: Serialize>(&self, table: &str, id: &str, value: &T) -> Result<()> {
         let sql = format!(
             "insert into {table} (id, json) values (?1, ?2) on conflict(id) do update set json = excluded.json"
@@ -312,8 +316,8 @@ pub fn default_data_dir() -> PathBuf {
 mod tests {
     use super::*;
     use baize_core::{
-        BaizeEvent, ProjectKind, ProviderId, RoutingMode, TaskSessionStatus, TrustLevel, VcsKind,
-        WorkspaceId,
+        BaizeEvent, PermissionStatus, ProjectKind, ProviderId, RoutingMode, TaskSessionStatus,
+        TrustLevel, VcsKind, WorkspaceId,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -400,6 +404,42 @@ mod tests {
         assert_eq!(decisions.len(), 2);
         assert_eq!(decisions[0].selected_provider_id.0, "codex");
         assert_eq!(decisions[1].selected_provider_id.0, "gemini");
+    }
+
+    #[test]
+    fn lists_permission_requests() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let session_id = TaskSessionId::new();
+        let first = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: Some(WorkspaceId::new()),
+            session_id: Some(session_id),
+            command: "cargo test".to_string(),
+            reason: "verify changes".to_string(),
+            status: PermissionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        let second = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: None,
+            session_id: None,
+            command: "cargo fmt".to_string(),
+            reason: "format changes".to_string(),
+            status: PermissionStatus::Approved,
+            created_at: Utc::now(),
+            resolved_at: Some(Utc::now()),
+        };
+
+        store.upsert_permission(&first).expect("first permission");
+        store.upsert_permission(&second).expect("second permission");
+
+        let permissions = store.list_permissions().expect("permissions");
+
+        assert_eq!(permissions.len(), 2);
+        assert_eq!(permissions[0].command, "cargo test");
+        assert!(matches!(permissions[1].status, PermissionStatus::Approved));
     }
 
     #[test]
