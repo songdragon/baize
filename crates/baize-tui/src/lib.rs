@@ -131,6 +131,12 @@ fn run_app(
                                 .push_message(format!("provider health refresh failed: {error:#}"));
                         }
                     }
+                    KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = load_latest_session(&mut state) {
+                            state.activity_status = "failed".to_string();
+                            state.push_message(format!("load session failed: {error:#}"));
+                        }
+                    }
                     KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
@@ -331,8 +337,13 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
 
     state.activity_status = format!("running {}", state.selected_provider());
     state.push_message(format!("> {prompt}"));
-    let workspace_id = ensure_workspace(state)?;
-    let session_id = ensure_session(state, &workspace_id, &prompt)?;
+    let session_id = match state.session_id.clone() {
+        Some(session_id) => session_id,
+        None => {
+            let workspace_id = ensure_workspace(state)?;
+            ensure_session(state, &workspace_id, &prompt)?
+        }
+    };
 
     let response = post_json(
         &format!("/sessions/{session_id}/prompt"),
@@ -349,6 +360,54 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
     refresh_session_diff(state)?;
     state.input.clear();
     state.activity_status = "idle".to_string();
+    Ok(())
+}
+
+fn load_latest_session(state: &mut TuiState) -> Result<()> {
+    state.activity_status = "loading latest session".to_string();
+    let response = get_json("/sessions")?;
+    let Some(session) = latest_session(&response) else {
+        state.push_message("no existing sessions");
+        state.activity_status = "idle".to_string();
+        return Ok(());
+    };
+
+    apply_loaded_session(state, session)?;
+    refresh_route_history(state)?;
+    refresh_session_diff(state)?;
+    state.activity_status = "idle".to_string();
+    Ok(())
+}
+
+fn latest_session(response: &Value) -> Option<&Value> {
+    response.get("sessions")?.as_array()?.last()
+}
+
+fn apply_loaded_session(state: &mut TuiState, session: &Value) -> Result<()> {
+    let id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| response_error("session.id", session))?;
+    let workspace_id = session
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| response_error("session.workspace_id", session))?;
+    let objective = session
+        .get("objective")
+        .and_then(Value::as_str)
+        .unwrap_or("session");
+    let provider = session
+        .get("active_provider_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    state.session_id = Some(id.to_string());
+    state.workspace_id = Some(workspace_id.to_string());
+    state.active_provider = Some(provider.to_string());
+    state.route_reason = None;
+    state.workspace = format!("Workspace: loaded\n{workspace_id}");
+    state.push_message(format!("loaded session: {id} ({provider})"));
+    state.push_message(format!("objective: {}", one_line(objective)));
     Ok(())
 }
 
@@ -696,7 +755,7 @@ impl TuiState {
     }
 
     fn help_text(&self) -> &'static str {
-        "Enter send | Tab target | Ctrl-H handoff | Ctrl-R health | Esc quit"
+        "Enter send | Tab target | ^H handoff | ^L latest | ^R health | Esc quit"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -802,8 +861,9 @@ mod tests {
         assert!(rendered.contains("daemon: not checked"));
         assert!(rendered.contains("Status: idle"));
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
-        assert!(rendered
-            .contains("Help: Enter send | Tab target | Ctrl-H handoff | Ctrl-R health | Esc quit"));
+        assert!(rendered.contains(
+            "Help: Enter send | Tab target | ^H handoff | ^L latest | ^R health | Esc quit"
+        ));
     }
 
     #[test]
@@ -887,6 +947,39 @@ mod tests {
         assert_eq!(state.active_provider.as_deref(), Some("gemini"));
         assert!(state.session.contains("handoff Accepted: codex -> gemini"));
         assert!(state.session.contains("Accepted handoff handoff_1"));
+    }
+
+    #[test]
+    fn selects_latest_session_from_response() {
+        let response = json!({
+            "sessions": [
+                { "id": "task_old" },
+                { "id": "task_new" }
+            ]
+        });
+
+        let session = latest_session(&response).expect("session");
+
+        assert_eq!(session["id"], "task_new");
+    }
+
+    #[test]
+    fn applies_loaded_session_state() {
+        let mut state = TuiState::default();
+        let session = json!({
+            "id": "task_1",
+            "workspace_id": "ws_1",
+            "objective": "continue this task",
+            "active_provider_id": "gemini"
+        });
+
+        apply_loaded_session(&mut state, &session).expect("load");
+
+        assert_eq!(state.session_id.as_deref(), Some("task_1"));
+        assert_eq!(state.workspace_id.as_deref(), Some("ws_1"));
+        assert_eq!(state.active_provider.as_deref(), Some("gemini"));
+        assert!(state.session.contains("loaded session: task_1"));
+        assert!(state.session.contains("objective: continue this task"));
     }
 
     #[test]
