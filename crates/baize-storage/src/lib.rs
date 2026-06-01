@@ -34,50 +34,78 @@ impl EventStore {
 
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
-            r#"
-            create table if not exists events (
-                id text primary key,
-                event_type text not null,
-                timestamp text not null,
-                workspace_id text,
-                session_id text,
-                provider_id text,
-                payload text not null
-            );
-            create index if not exists events_timestamp_idx on events(timestamp);
-            create index if not exists events_type_idx on events(event_type);
-
-            create table if not exists workspaces (
-                id text primary key,
-                json text not null
-            );
-            create table if not exists projects (
-                id text primary key,
-                workspace_id text not null,
-                json text not null
-            );
-            create table if not exists task_sessions (
-                id text primary key,
-                workspace_id text not null,
-                json text not null
-            );
-            create table if not exists route_decisions (
-                id text primary key,
-                session_id text not null,
-                json text not null
-            );
-            create table if not exists handoffs (
-                id text primary key,
-                session_id text not null,
-                json text not null
-            );
-            create table if not exists permissions (
-                id text primary key,
-                session_id text,
-                json text not null
-            );
-            "#,
+            "create table if not exists schema_version (version integer primary key);",
         )?;
+        let current: i64 = self
+            .conn
+            .query_row(
+                "select coalesce(max(version), 0) from schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let migrations: &[(&str, &str)] = &[
+            (
+                "v1",
+                r#"
+                create table if not exists events (
+                    id text primary key,
+                    event_type text not null,
+                    timestamp text not null,
+                    workspace_id text,
+                    session_id text,
+                    provider_id text,
+                    payload text not null
+                );
+                create index if not exists events_timestamp_idx on events(timestamp);
+                create index if not exists events_type_idx on events(event_type);
+
+                create table if not exists workspaces (
+                    id text primary key,
+                    json text not null
+                );
+                create table if not exists projects (
+                    id text primary key,
+                    workspace_id text not null,
+                    json text not null
+                );
+                create table if not exists task_sessions (
+                    id text primary key,
+                    workspace_id text not null,
+                    json text not null
+                );
+                create table if not exists route_decisions (
+                    id text primary key,
+                    session_id text not null,
+                    json text not null
+                );
+                create table if not exists handoffs (
+                    id text primary key,
+                    session_id text not null,
+                    json text not null
+                );
+                create table if not exists permissions (
+                    id text primary key,
+                    json text not null
+                );
+                "#,
+            ),
+            ("v2", "alter table permissions add column session_id text;"),
+        ];
+        for (index, (label, sql)) in migrations.iter().enumerate() {
+            let version = (index + 1) as i64;
+            if current < version {
+                self.conn
+                    .execute_batch(sql)
+                    .with_context(|| format!("migration {label} failed"))?;
+                self.conn
+                    .execute(
+                        "insert into schema_version (version) values (?1)",
+                        params![version],
+                    )
+                    .with_context(|| format!("recording migration {label} failed"))?;
+            }
+        }
         Ok(())
     }
 
@@ -108,6 +136,18 @@ impl EventStore {
                 row.get::<_, u64>(0)
             })?;
         Ok(count)
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        let version = self
+            .conn
+            .query_row(
+                "select coalesce(max(version), 0) from schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(version)
     }
 
     pub fn list_events_for_session(&self, session_id: &TaskSessionId) -> Result<Vec<BaizeEvent>> {
@@ -642,5 +682,54 @@ mod tests {
                 .objective,
             "test objective"
         );
+    }
+
+    #[test]
+    fn fresh_database_gets_latest_schema_version() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+
+        let version = store.schema_version().expect("schema version");
+        assert!(version >= 2, "expected at least version 2, got {version}");
+    }
+
+    #[test]
+    fn re_opening_database_does_not_re_run_migrations() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("baize.db");
+
+        let store = EventStore::open(&db_path).expect("store should open");
+        let version_first = store.schema_version().expect("version");
+        drop(store);
+
+        let store = EventStore::open(&db_path).expect("store should re-open");
+        let version_second = store.schema_version().expect("version");
+
+        assert_eq!(version_first, version_second);
+    }
+
+    #[test]
+    fn v2_permissions_session_id_column_exists() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+
+        let session_id = TaskSessionId::new();
+        let permission = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: None,
+            session_id: Some(session_id.clone()),
+            command: "ls".to_string(),
+            reason: "list".to_string(),
+            status: PermissionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        store.upsert_permission(&permission).expect("upsert");
+
+        let by_session = store
+            .list_permissions_for_session(&session_id)
+            .expect("list by session");
+        assert_eq!(by_session.len(), 1);
+        assert_eq!(by_session[0].command, "ls");
     }
 }

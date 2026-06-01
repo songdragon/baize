@@ -176,7 +176,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 86.
+Current full test count: 89.
 
 Implemented test coverage includes:
 
@@ -262,7 +262,7 @@ These are still in scope for a more usable MVP.
 
 ### 5. Persistence And Recovery
 
-- Add migration version tracking for SQLite schema;
+- ~~Add migration version tracking for SQLite schema~~ (done);
 - add query tables or indexes for higher-volume event lookup;
 - persist transcript/handoff artifacts as files when useful;
 - add crash recovery semantics for in-flight agent runs;
