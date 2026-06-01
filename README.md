@@ -59,6 +59,7 @@ GET  /sessions/:id/events
 GET  /sessions/:id/diff
 GET  /permissions
 POST /permissions
+GET  /permissions/:id
 POST /permissions/:id/approve
 POST /permissions/:id/deny
 GET  /events

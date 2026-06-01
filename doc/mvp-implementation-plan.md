@@ -66,6 +66,7 @@ This MVP implements the review-passed technical spec as a local Rust daemon plus
 - `GET /sessions/:id/handoff/:handoff_id`;
 - `GET /permissions`;
 - `POST /permissions`;
+- `GET /permissions/:id`;
 - `POST /permissions/:id/approve`;
 - `POST /permissions/:id/deny`;
 - `GET /events`.

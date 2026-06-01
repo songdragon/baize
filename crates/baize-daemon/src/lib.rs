@@ -156,6 +156,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:id/diff", get(session_diff))
         .route("/sessions/:id/handoff/:handoff_id", get(handoff))
         .route("/permissions", get(permissions).post(create_permission))
+        .route("/permissions/:id", get(permission))
         .route("/permissions/:id/approve", post(approve_permission))
         .route("/permissions/:id/deny", post(deny_permission))
         .route("/events", get(events))
@@ -760,6 +761,14 @@ async fn create_permission(
     Json(json!({ "permission": permission }))
 }
 
+async fn permission(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    let permission = with_store(&state, |store| store.get_permission(&PermissionId(id)));
+    json_result("permission", permission)
+}
+
 async fn approve_permission(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -1260,6 +1269,17 @@ mod tests {
         assert_eq!(pending_items.len(), 1);
         assert_eq!(pending_items[0]["id"], first_id);
 
+        let loaded = json_response(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/permissions/{first_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(loaded["permission"]["id"], first_id);
+        assert_eq!(loaded["permission"]["command"], "cargo test");
+
         let session_filtered = json_response(
             app.clone(),
             Request::builder()
@@ -1276,7 +1296,7 @@ mod tests {
         assert_eq!(session_items[0]["status"], "Approved");
 
         let invalid = json_response(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/permissions?status=maybe")
                 .body(Body::empty())
@@ -1284,6 +1304,16 @@ mod tests {
         )
         .await;
         assert_eq!(invalid["error"], "invalid permission status");
+
+        let missing = json_response(
+            app,
+            Request::builder()
+                .uri("/permissions/perm_missing")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert!(missing["permission"].is_null());
     }
 
     #[tokio::test]
