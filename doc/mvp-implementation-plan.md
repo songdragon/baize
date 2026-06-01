@@ -247,7 +247,7 @@ These are still in scope for a more usable MVP.
 
 - ~~Add sticky routing window~~ (done);
 - ~~include provider health in route selection~~ (done);
-- include explicit user-selected provider override reason;
+- ~~include explicit user-selected provider override reason~~ (done);
 - add task-type hints for route decisions;
 - add first quota/rate-limit inference from provider errors;
 - add configurable routing policy thresholds.
