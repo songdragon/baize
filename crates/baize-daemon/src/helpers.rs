@@ -86,12 +86,15 @@ pub fn select_provider(
     state: &AppState,
     requested: Option<String>,
     workspace_id: Option<&baize_core::WorkspaceId>,
+    override_reason: Option<String>,
 ) -> RoutingResult {
     if let Some(requested) = requested {
+        let reason =
+            override_reason.unwrap_or_else(|| "User-specified provider override.".to_string());
         return RoutingResult {
             provider_id: baize_core::ProviderId(requested),
             previous_provider_id: None,
-            reason: "User-specified provider override.".to_string(),
+            reason,
             confidence: 1.0,
         };
     }

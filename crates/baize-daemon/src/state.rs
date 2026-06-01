@@ -47,6 +47,7 @@ pub struct CreateSessionRequest {
     pub workspace_id: String,
     pub objective: String,
     pub provider_id: Option<String>,
+    pub provider_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -68,7 +68,12 @@ pub async fn create_session(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let now = Utc::now();
     let workspace_id = baize_core::WorkspaceId(request.workspace_id);
-    let routing = select_provider(&state, request.provider_id, Some(&workspace_id));
+    let routing = select_provider(
+        &state,
+        request.provider_id,
+        Some(&workspace_id),
+        request.provider_reason,
+    );
     let session = TaskSession {
         id: TaskSessionId::new(),
         workspace_id: workspace_id.clone(),

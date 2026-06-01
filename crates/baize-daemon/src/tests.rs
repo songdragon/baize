@@ -1023,7 +1023,7 @@ fn select_provider_returns_requested_override() {
             },
         }),
     );
-    let result = crate::helpers::select_provider(&state, Some("gemini".to_string()), None);
+    let result = crate::helpers::select_provider(&state, Some("gemini".to_string()), None, None);
     assert_eq!(result.provider_id.0, "gemini");
     assert!(result.reason.contains("User-specified"));
 }
@@ -1212,6 +1212,34 @@ fn select_provider_without_workspace_uses_health_priority() {
             },
         }),
     );
-    let result = crate::helpers::select_provider(&state, None, None);
+    let result = crate::helpers::select_provider(&state, None, None, None);
     assert!(!result.provider_id.0.is_empty());
+}
+
+#[test]
+fn select_provider_uses_custom_override_reason() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                events: vec![],
+                stderr: String::new(),
+            },
+        }),
+    );
+    let result = crate::helpers::select_provider(
+        &state,
+        Some("gemini".to_string()),
+        None,
+        Some("Gemini handles multi-file edits better".to_string()),
+    );
+    assert_eq!(result.provider_id.0, "gemini");
+    assert_eq!(result.reason, "Gemini handles multi-file edits better");
+    assert!((result.confidence - 1.0).abs() < 0.01);
 }
