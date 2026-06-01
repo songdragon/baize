@@ -5,9 +5,19 @@ use baize_adapters::default_provider_profiles;
 use baize_config::BaizeConfig;
 use baize_core::PermissionStatus;
 use baize_storage::EventStore;
+use chrono::Utc;
 use serde::Serialize;
 
 use crate::state::AppState;
+
+const STICKY_WINDOW_MINUTES: i64 = 30;
+
+pub struct RoutingResult {
+    pub provider_id: baize_core::ProviderId,
+    pub previous_provider_id: Option<baize_core::ProviderId>,
+    pub reason: String,
+    pub confidence: f32,
+}
 
 pub fn with_store<T>(state: &AppState, f: impl FnOnce(&EventStore) -> Result<T>) -> Result<T> {
     let store = state
@@ -72,10 +82,26 @@ pub fn ok_json(value: serde_json::Value) -> (StatusCode, Json<serde_json::Value>
     (StatusCode::OK, Json(value))
 }
 
-pub fn select_provider(state: &AppState, requested: Option<String>) -> baize_core::ProviderId {
+pub fn select_provider(
+    state: &AppState,
+    requested: Option<String>,
+    workspace_id: Option<&baize_core::WorkspaceId>,
+) -> RoutingResult {
     if let Some(requested) = requested {
-        return baize_core::ProviderId(requested);
+        return RoutingResult {
+            provider_id: baize_core::ProviderId(requested),
+            previous_provider_id: None,
+            reason: "User-specified provider override.".to_string(),
+            confidence: 1.0,
+        };
     }
+
+    if let Some(wid) = workspace_id {
+        if let Some(sticky) = try_sticky_provider(state, wid) {
+            return sticky;
+        }
+    }
+
     let providers = default_provider_profiles();
     let ordered_ids: Vec<&String> = state.config.providers.order.iter().collect();
     for id in &ordered_ids {
@@ -83,13 +109,56 @@ pub fn select_provider(state: &AppState, requested: Option<String>) -> baize_cor
             continue;
         };
         if is_provider_healthy(state, &provider.id.0) {
-            return baize_core::ProviderId((*id).clone());
+            return RoutingResult {
+                provider_id: baize_core::ProviderId((*id).clone()),
+                previous_provider_id: None,
+                reason: format!("Selected {} from configured provider priority.", id),
+                confidence: 0.75,
+            };
         }
     }
-    ordered_ids
+    let fallback = ordered_ids
         .first()
         .map(|id| baize_core::ProviderId((*id).clone()))
-        .unwrap_or_else(|| baize_core::ProviderId("codex".to_string()))
+        .unwrap_or_else(|| baize_core::ProviderId("codex".to_string()));
+    RoutingResult {
+        provider_id: fallback.clone(),
+        previous_provider_id: None,
+        reason: format!(
+            "Selected {} (higher-priority providers unhealthy).",
+            fallback.0
+        ),
+        confidence: 0.6,
+    }
+}
+
+fn try_sticky_provider(
+    state: &AppState,
+    workspace_id: &baize_core::WorkspaceId,
+) -> Option<RoutingResult> {
+    let latest = with_store(state, |store| {
+        store.get_latest_session_for_workspace(workspace_id)
+    })
+    .ok()??;
+    let active = latest.active_provider_id.as_ref()?;
+    let elapsed = Utc::now()
+        .signed_duration_since(latest.created_at)
+        .num_minutes();
+    if elapsed > STICKY_WINDOW_MINUTES {
+        return None;
+    }
+    if !is_provider_healthy(state, &active.0) {
+        return None;
+    }
+    Some(RoutingResult {
+        provider_id: active.clone(),
+        previous_provider_id: Some(active.clone()),
+        reason: format!(
+            "Sticky routing: reusing {} from recent session ({} min ago).",
+            active.0, elapsed
+        ),
+        confidence: 0.85,
+    })
 }
 
 pub fn is_provider_healthy(_state: &AppState, provider_id: &str) -> bool {

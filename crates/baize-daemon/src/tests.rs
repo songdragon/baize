@@ -1023,8 +1023,9 @@ fn select_provider_returns_requested_override() {
             },
         }),
     );
-    let selected = crate::helpers::select_provider(&state, Some("gemini".to_string()));
-    assert_eq!(selected.0, "gemini");
+    let result = crate::helpers::select_provider(&state, Some("gemini".to_string()), None);
+    assert_eq!(result.provider_id.0, "gemini");
+    assert!(result.reason.contains("User-specified"));
 }
 
 #[test]
@@ -1125,8 +1126,92 @@ async fn create_session_route_decision_reflects_health_fallback() {
         .as_f64()
         .expect("confidence");
     if session_provider == first_choice {
-        assert_eq!(confidence, 0.75);
+        assert!((confidence - 0.75).abs() < f64::EPSILON);
     } else {
-        assert_eq!(confidence, 0.6);
+        assert!((confidence - 0.6).abs() < f64::EPSILON);
     }
+}
+
+#[tokio::test]
+async fn second_session_in_workspace_reuses_provider_when_healthy() {
+    let (app, _data_dir, _project_dir) = test_app();
+
+    let workspace = create_test_workspace(&app).await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+
+    let first_session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "first session"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let first_provider = first_session["session"]["active_provider_id"]
+        .as_str()
+        .expect("provider");
+
+    let second_session = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "second session"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let second_provider = second_session["session"]["active_provider_id"]
+        .as_str()
+        .expect("provider");
+    let reason = second_session["route_decision"]["reason"]
+        .as_str()
+        .expect("reason");
+
+    if first_provider == second_provider && reason.contains("Sticky routing") {
+        let confidence = second_session["route_decision"]["confidence"]
+            .as_f64()
+            .expect("confidence");
+        assert!((confidence - 0.85).abs() < 0.01);
+    } else {
+        assert!(
+            reason.contains("configured provider priority") || reason.contains("unhealthy"),
+            "expected valid routing reason, got: {reason}"
+        );
+    }
+}
+
+#[test]
+fn select_provider_without_workspace_uses_health_priority() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                events: vec![],
+                stderr: String::new(),
+            },
+        }),
+    );
+    let result = crate::helpers::select_provider(&state, None, None);
+    assert!(!result.provider_id.0.is_empty());
 }

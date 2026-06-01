@@ -245,7 +245,7 @@ These are still in scope for a more usable MVP.
 
 ### 3. Routing
 
-- Add sticky routing window;
+- ~~Add sticky routing window~~ (done);
 - ~~include provider health in route selection~~ (done);
 - include explicit user-selected provider override reason;
 - add task-type hints for route decisions;

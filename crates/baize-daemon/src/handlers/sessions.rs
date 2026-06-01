@@ -68,36 +68,23 @@ pub async fn create_session(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let now = Utc::now();
     let workspace_id = baize_core::WorkspaceId(request.workspace_id);
-    let selected_provider_id = select_provider(&state, request.provider_id);
+    let routing = select_provider(&state, request.provider_id, Some(&workspace_id));
     let session = TaskSession {
         id: TaskSessionId::new(),
         workspace_id: workspace_id.clone(),
         objective: request.objective,
-        active_provider_id: Some(selected_provider_id.clone()),
+        active_provider_id: Some(routing.provider_id.clone()),
         status: TaskSessionStatus::Running,
         created_at: now,
         updated_at: now,
     };
-    let first_choice_id = state.config.providers.order.first().cloned();
-    let is_health_fallback = first_choice_id.as_deref() != Some(&selected_provider_id.0);
-    let reason = if is_health_fallback {
-        format!(
-            "Selected {} (higher-priority providers unhealthy).",
-            selected_provider_id.0
-        )
-    } else {
-        format!(
-            "Selected {} from configured provider priority.",
-            selected_provider_id.0
-        )
-    };
     let decision = RouteDecision {
         id: RouteDecisionId::new(),
         session_id: session.id.clone(),
-        selected_provider_id: selected_provider_id.clone(),
-        previous_provider_id: None,
-        reason,
-        confidence: if is_health_fallback { 0.6 } else { 0.75 },
+        selected_provider_id: routing.provider_id.clone(),
+        previous_provider_id: routing.previous_provider_id,
+        reason: routing.reason,
+        confidence: routing.confidence,
         mode: RoutingMode::Assisted,
         created_at: now,
     };
@@ -115,7 +102,7 @@ pub async fn create_session(
         baize_core::BaizeEvent::new("session.created", serde_json::json!({ "session": session }));
     created.workspace_id = Some(workspace_id.clone());
     created.session_id = Some(session.id.clone());
-    created.provider_id = Some(selected_provider_id.clone());
+    created.provider_id = Some(routing.provider_id.clone());
     state.record_event(created);
 
     let mut routed = baize_core::BaizeEvent::new(
@@ -124,7 +111,7 @@ pub async fn create_session(
     );
     routed.workspace_id = Some(workspace_id);
     routed.session_id = Some(session.id.clone());
-    routed.provider_id = Some(selected_provider_id);
+    routed.provider_id = Some(routing.provider_id);
     state.record_event(routed);
 
     ok_json(serde_json::json!({ "session": session, "route_decision": decision }))

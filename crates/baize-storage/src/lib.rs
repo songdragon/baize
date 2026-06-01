@@ -259,6 +259,23 @@ impl EventStore {
         self.get_json("task_sessions", &id.0)
     }
 
+    pub fn get_latest_session_for_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<Option<TaskSession>> {
+        let mut stmt = self.conn.prepare(
+            "select json from task_sessions where workspace_id = ?1 order by rowid desc limit 1",
+        )?;
+        let mut rows = stmt.query(params![&workspace_id.0])?;
+        match rows.next()? {
+            Some(row) => {
+                let json_str: String = row.get(0)?;
+                Ok(Some(serde_json::from_str(&json_str)?))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub fn insert_route_decision(&self, decision: &RouteDecision) -> Result<()> {
         self.conn.execute(
             "insert into route_decisions (id, session_id, json) values (?1, ?2, ?3)",
@@ -804,5 +821,64 @@ mod tests {
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].payload["i"], 2);
         assert_eq!(page[1].payload["i"], 3);
+    }
+
+    #[test]
+    fn get_latest_session_for_workspace_returns_most_recent() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let ws_a = WorkspaceId::new();
+        let ws_b = WorkspaceId::new();
+        let now = Utc::now();
+
+        let session_a1 = TaskSession {
+            id: TaskSessionId::new(),
+            workspace_id: ws_a.clone(),
+            objective: "first in A".to_string(),
+            active_provider_id: Some(ProviderId("codex".to_string())),
+            status: TaskSessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+        };
+        let session_a2 = TaskSession {
+            id: TaskSessionId::new(),
+            workspace_id: ws_a.clone(),
+            objective: "second in A".to_string(),
+            active_provider_id: Some(ProviderId("gemini".to_string())),
+            status: TaskSessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+        };
+        let session_b1 = TaskSession {
+            id: TaskSessionId::new(),
+            workspace_id: ws_b.clone(),
+            objective: "first in B".to_string(),
+            active_provider_id: Some(ProviderId("opencode".to_string())),
+            status: TaskSessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+        };
+
+        store.upsert_task_session(&session_a1).expect("a1");
+        store.upsert_task_session(&session_a2).expect("a2");
+        store.upsert_task_session(&session_b1).expect("b1");
+
+        let latest_a = store
+            .get_latest_session_for_workspace(&ws_a)
+            .expect("latest a")
+            .expect("some");
+        assert_eq!(latest_a.objective, "second in A");
+        assert_eq!(latest_a.active_provider_id.unwrap().0, "gemini");
+
+        let latest_b = store
+            .get_latest_session_for_workspace(&ws_b)
+            .expect("latest b")
+            .expect("some");
+        assert_eq!(latest_b.objective, "first in B");
+
+        let latest_empty = store
+            .get_latest_session_for_workspace(&WorkspaceId::new())
+            .expect("query");
+        assert!(latest_empty.is_none());
     }
 }
