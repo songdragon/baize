@@ -1,5 +1,6 @@
 use anyhow::Result;
 use axum::extract::{Path as AxumPath, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -147,6 +148,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:id/prompt", post(prompt_session))
         .route("/sessions/:id/cancel", post(cancel_session))
         .route("/sessions/:id/routes", get(session_routes))
+        .route("/sessions/:id/handoffs", get(session_handoffs))
+        .route("/sessions/:id/permissions", get(session_permissions))
         .route("/sessions/:id/handoff", post(create_handoff))
         .route(
             "/sessions/:id/handoff/:handoff_id/accept",
@@ -164,8 +167,8 @@ pub fn router(state: AppState) -> Router {
         .layer(CorsLayer::permissive())
 }
 
-async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(json!({
+async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    ok_json(json!({
         "status": "ok",
         "daemon": {
             "host": state.config.daemon.host,
@@ -174,45 +177,49 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-async fn providers(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(json!({ "providers": ordered_provider_profiles(&state.config) }))
+async fn providers(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    ok_json(json!({ "providers": ordered_provider_profiles(&state.config) }))
 }
 
-async fn provider_health(AxumPath(id): AxumPath<String>) -> Json<serde_json::Value> {
+async fn provider_health(AxumPath(id): AxumPath<String>) -> (StatusCode, Json<serde_json::Value>) {
     let providers = default_provider_profiles();
     let Some(provider) = providers.into_iter().find(|provider| provider.id.0 == id) else {
-        return Json(json!({ "error": "provider not found" }));
+        return not_found("provider not found");
     };
-    Json(json!({ "health": check_provider(&provider) }))
+    ok_json(json!({ "health": check_provider(&provider) }))
 }
 
-async fn provider_validate(AxumPath(id): AxumPath<String>) -> Json<serde_json::Value> {
+async fn provider_validate(
+    AxumPath(id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let providers = default_provider_profiles();
     let Some(provider) = providers.into_iter().find(|provider| provider.id.0 == id) else {
-        return Json(json!({ "error": "provider not found" }));
+        return not_found("provider not found");
     };
-    Json(json!({ "validation": validate_provider(&provider) }))
+    ok_json(json!({ "validation": validate_provider(&provider) }))
 }
 
-async fn check_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn check_providers(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let providers = ordered_provider_profiles(&state.config);
     let health = providers.iter().map(check_provider).collect::<Vec<_>>();
     let event = BaizeEvent::new("provider.health.changed", json!({ "health": health }));
     state.record_event(event);
-    Json(json!({ "health": health }))
+    ok_json(json!({ "health": health }))
 }
 
-async fn validate_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn validate_providers(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let validations = validate_all_providers();
     let event = BaizeEvent::new(
         "provider.validation.completed",
         json!({ "validations": validations }),
     );
     state.record_event(event);
-    Json(json!({ "validations": validations }))
+    ok_json(json!({ "validations": validations }))
 }
 
-async fn workspaces(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn workspaces(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let workspaces = with_store(&state, |store| store.list_workspaces());
     json_result("workspaces", workspaces)
 }
@@ -220,10 +227,10 @@ async fn workspaces(State(state): State<AppState>) -> Json<serde_json::Value> {
 async fn create_workspace(
     State(state): State<AppState>,
     Json(request): Json<CreateWorkspaceRequest>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let status = match baize_workspace::inspect(&request.path) {
         Ok(status) => status,
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Err(error) => return bad_request(&error.to_string()),
     };
     let now = Utc::now();
     let workspace_id = WorkspaceId::new();
@@ -268,7 +275,7 @@ async fn create_workspace(
         Ok(())
     });
     if let Err(error) = save {
-        return Json(json!({ "error": error.to_string() }));
+        return internal_error(error.to_string());
     }
 
     let mut event = BaizeEvent::new(
@@ -277,32 +284,32 @@ async fn create_workspace(
     );
     event.workspace_id = Some(workspace_id);
     state.record_event(event);
-    Json(json!({ "workspace": workspace, "project": project }))
+    ok_json(json!({ "workspace": workspace, "project": project }))
 }
 
 async fn workspace_status(
     axum::extract::Query(query): axum::extract::Query<WorkspaceStatusQuery>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let path = query.path.unwrap_or_else(|| PathBuf::from("."));
     match baize_workspace::inspect(path) {
-        Ok(status) => Json(json!({ "status": status })),
-        Err(error) => Json(json!({ "error": error.to_string() })),
+        Ok(status) => ok_json(json!({ "status": status })),
+        Err(error) => bad_request(&error.to_string()),
     }
 }
 
 async fn workspace_status_by_id(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let workspace = match with_store(&state, |store| store.get_workspace(&WorkspaceId(id))) {
         Ok(Some(workspace)) => workspace,
-        Ok(None) => return Json(json!({ "error": "workspace not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("workspace not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
     let project = match with_store(&state, |store| store.get_primary_project(&workspace)) {
         Ok(Some(project)) => project,
-        Ok(None) => return Json(json!({ "error": "project not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("project not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
     workspace_status(axum::extract::Query(WorkspaceStatusQuery {
         path: Some(project.root),
@@ -310,7 +317,7 @@ async fn workspace_status_by_id(
     .await
 }
 
-async fn sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn sessions(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let sessions = with_store(&state, |store| store.list_task_sessions());
     json_result("sessions", sessions)
 }
@@ -318,25 +325,45 @@ async fn sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
 async fn session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let session = with_store(&state, |store| store.get_task_session(&TaskSessionId(id)));
-    json_result("session", session)
+    json_result_option("session", session)
 }
 
 async fn session_routes(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let routes = with_store(&state, |store| {
         store.list_route_decisions_for_session(&TaskSessionId(id))
     });
     json_result("routes", routes)
 }
 
+async fn session_handoffs(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let handoffs = with_store(&state, |store| {
+        store.list_handoffs_for_session(&TaskSessionId(id))
+    });
+    json_result("handoffs", handoffs)
+}
+
+async fn session_permissions(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let permissions = with_store(&state, |store| {
+        store.list_permissions_for_session(&TaskSessionId(id))
+    });
+    json_result("permissions", permissions)
+}
+
 async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<CreateSessionRequest>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let now = Utc::now();
     let workspace_id = WorkspaceId(request.workspace_id);
     let selected_provider_id = select_provider(&state, request.provider_id);
@@ -369,7 +396,7 @@ async fn create_session(
         Ok(())
     });
     if let Err(error) = save {
-        return Json(json!({ "error": error.to_string() }));
+        return internal_error(error.to_string());
     }
 
     let mut created = BaizeEvent::new("session.created", json!({ "session": session }));
@@ -384,32 +411,41 @@ async fn create_session(
     routed.provider_id = Some(selected_provider_id);
     state.record_event(routed);
 
-    Json(json!({ "session": session, "route_decision": decision }))
+    ok_json(json!({ "session": session, "route_decision": decision }))
 }
 
 async fn prompt_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PromptRequest>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let session_id = TaskSessionId(id);
-    let session = match with_store(&state, |store| store.get_task_session(&session_id)) {
+    let mut session = match with_store(&state, |store| store.get_task_session(&session_id)) {
         Ok(Some(session)) => session,
-        Ok(None) => return Json(json!({ "error": "session not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("session not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
+    if matches!(session.status, TaskSessionStatus::Canceled) {
+        return bad_request("session is canceled");
+    }
     let provider_id = session
         .active_provider_id
         .clone()
         .unwrap_or_else(|| ProviderId("codex".to_string()));
     let workspace = match with_store(&state, |store| store.get_workspace(&session.workspace_id)) {
         Ok(Some(workspace)) => workspace,
-        _ => return Json(json!({ "error": "workspace not found" })),
+        _ => return not_found("workspace not found"),
     };
     let project = match with_store(&state, |store| store.get_primary_project(&workspace)) {
         Ok(Some(project)) => project,
-        _ => return Json(json!({ "error": "project not found" })),
+        _ => return not_found("project not found"),
     };
+
+    session.status = TaskSessionStatus::Running;
+    session.updated_at = Utc::now();
+    if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
+        return internal_error(error.to_string());
+    }
 
     let mut started = BaizeEvent::new(
         "session.agent.started",
@@ -450,6 +486,11 @@ async fn prompt_session(
                 state.record_event(event);
             }
 
+            let new_status = if result.success {
+                TaskSessionStatus::Running
+            } else {
+                TaskSessionStatus::Failed
+            };
             let final_event_type = if result.success {
                 "session.agent.completed"
             } else {
@@ -468,13 +509,35 @@ async fn prompt_session(
             final_event.provider_id = Some(provider_id.clone());
             state.record_event(final_event);
 
-            Json(json!({
-                "status": if result.success { "completed" } else { "failed" },
-                "provider_id": provider_id,
-                "events": result.events,
-                "exit_code": result.exit_code,
-                "stderr": result.stderr,
-            }))
+            session.status = new_status.clone();
+            session.updated_at = Utc::now();
+            if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
+                return internal_error(error.to_string());
+            }
+
+            let mut status_event =
+                BaizeEvent::new("session.status.changed", json!({ "status": new_status }));
+            status_event.workspace_id = Some(session.workspace_id.clone());
+            status_event.session_id = Some(session.id.clone());
+            status_event.provider_id = Some(provider_id.clone());
+            state.record_event(status_event);
+
+            let code = if result.success {
+                StatusCode::OK
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                code,
+                Json(json!({
+                    "status": if result.success { "running" } else { "failed" },
+                    "session_id": session.id.0,
+                    "provider_id": provider_id,
+                    "events": result.events,
+                    "exit_code": result.exit_code,
+                    "stderr": result.stderr,
+                })),
+            )
         }
         Err(error) => {
             let error = format_error_chain(error.as_ref());
@@ -484,11 +547,30 @@ async fn prompt_session(
             failed.provider_id = Some(provider_id.clone());
             state.record_event(failed);
 
-            Json(json!({
-                "status": "failed",
-                "provider_id": provider_id,
-                "error": error,
-            }))
+            session.status = TaskSessionStatus::Failed;
+            session.updated_at = Utc::now();
+            if let Err(store_error) =
+                with_store(&state, |store| store.upsert_task_session(&session))
+            {
+                return internal_error(store_error.to_string());
+            }
+
+            let mut status_event =
+                BaizeEvent::new("session.status.changed", json!({ "status": "Failed" }));
+            status_event.workspace_id = Some(session.workspace_id.clone());
+            status_event.session_id = Some(session.id.clone());
+            status_event.provider_id = Some(provider_id.clone());
+            state.record_event(status_event);
+
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "failed",
+                    "session_id": session.id.0,
+                    "provider_id": provider_id,
+                    "error": error,
+                })),
+            )
         }
     }
 }
@@ -496,36 +578,36 @@ async fn prompt_session(
 async fn cancel_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let session_id = TaskSessionId(id);
     let mut session = match with_store(&state, |store| store.get_task_session(&session_id)) {
         Ok(Some(session)) => session,
-        Ok(None) => return Json(json!({ "error": "session not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("session not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
     session.status = TaskSessionStatus::Canceled;
     session.updated_at = Utc::now();
     if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
-        return Json(json!({ "error": error.to_string() }));
+        return internal_error(error.to_string());
     }
     let mut event = BaizeEvent::new("session.agent.completed", json!({ "status": "canceled" }));
     event.workspace_id = Some(session.workspace_id.clone());
     event.session_id = Some(session.id.clone());
     event.provider_id = session.active_provider_id.clone();
     state.record_event(event);
-    Json(json!({ "session": session }))
+    ok_json(json!({ "session": session }))
 }
 
 async fn create_handoff(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<HandoffRequest>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let session_id = TaskSessionId(id);
     let session = match with_store(&state, |store| store.get_task_session(&session_id)) {
         Ok(Some(session)) => session,
-        Ok(None) => return Json(json!({ "error": "session not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("session not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
     let from_provider_id = session
         .active_provider_id
@@ -534,11 +616,11 @@ async fn create_handoff(
     let to_provider_id = ProviderId(request.to_provider_id);
     let workspace = match with_store(&state, |store| store.get_workspace(&session.workspace_id)) {
         Ok(Some(workspace)) => workspace,
-        _ => return Json(json!({ "error": "workspace not found" })),
+        _ => return not_found("workspace not found"),
     };
     let project = match with_store(&state, |store| store.get_primary_project(&workspace)) {
         Ok(Some(project)) => project,
-        _ => return Json(json!({ "error": "project not found" })),
+        _ => return not_found("project not found"),
     };
     let status = baize_workspace::inspect(&project.root).ok();
     let changed_files = status
@@ -572,34 +654,34 @@ async fn create_handoff(
         created_at: Utc::now(),
     };
     if let Err(error) = with_store(&state, |store| store.insert_handoff(&handoff)) {
-        return Json(json!({ "error": error.to_string() }));
+        return internal_error(error.to_string());
     }
     let mut event = BaizeEvent::new("handoff.created", json!({ "handoff": handoff }));
     event.workspace_id = Some(session.workspace_id);
     event.session_id = Some(session.id);
     event.provider_id = Some(to_provider_id);
     state.record_event(event);
-    Json(json!({ "handoff": handoff }))
+    ok_json(json!({ "handoff": handoff }))
 }
 
 async fn accept_handoff(
     State(state): State<AppState>,
     AxumPath((id, handoff_id)): AxumPath<(String, String)>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let session_id = TaskSessionId(id);
     let mut handoff = match with_store(&state, |store| store.get_handoff(&HandoffId(handoff_id))) {
         Ok(Some(handoff)) => handoff,
-        Ok(None) => return Json(json!({ "error": "handoff not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("handoff not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
     if handoff.session_id != session_id {
-        return Json(json!({ "error": "handoff does not belong to session" }));
+        return bad_request("handoff does not belong to session");
     }
 
     let mut session = match with_store(&state, |store| store.get_task_session(&session_id)) {
         Ok(Some(session)) => session,
-        Ok(None) => return Json(json!({ "error": "session not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("session not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
 
     let previous_provider_id = session.active_provider_id.clone();
@@ -630,7 +712,7 @@ async fn accept_handoff(
         Ok(())
     });
     if let Err(error) = save {
-        return Json(json!({ "error": error.to_string() }));
+        return internal_error(error.to_string());
     }
 
     let mut accepted = BaizeEvent::new(
@@ -652,7 +734,7 @@ async fn accept_handoff(
     routed.provider_id = Some(selected_provider_id);
     state.record_event(routed);
 
-    Json(json!({
+    ok_json(json!({
         "handoff": handoff,
         "session": session,
         "route_decision": decision,
@@ -662,15 +744,15 @@ async fn accept_handoff(
 async fn handoff(
     State(state): State<AppState>,
     AxumPath((_session_id, handoff_id)): AxumPath<(String, String)>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let handoff = with_store(&state, |store| store.get_handoff(&HandoffId(handoff_id)));
-    json_result("handoff", handoff)
+    json_result_option("handoff", handoff)
 }
 
 async fn session_events(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let events = with_store(&state, |store| {
         store.list_events_for_session(&TaskSessionId(id))
     });
@@ -680,40 +762,40 @@ async fn session_events(
 async fn session_diff(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let session = match with_store(&state, |store| store.get_task_session(&TaskSessionId(id))) {
         Ok(Some(session)) => session,
-        Ok(None) => return Json(json!({ "error": "session not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("session not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
     let workspace = match with_store(&state, |store| store.get_workspace(&session.workspace_id)) {
         Ok(Some(workspace)) => workspace,
-        _ => return Json(json!({ "error": "workspace not found" })),
+        _ => return not_found("workspace not found"),
     };
     let project = match with_store(&state, |store| store.get_primary_project(&workspace)) {
         Ok(Some(project)) => project,
-        _ => return Json(json!({ "error": "project not found" })),
+        _ => return not_found("project not found"),
     };
     match baize_workspace::inspect(project.root) {
-        Ok(status) => Json(json!({ "diff": {
+        Ok(status) => ok_json(json!({ "diff": {
             "dirty": status.dirty,
             "changed_files": status.changed_files,
         }})),
-        Err(error) => Json(json!({ "error": error.to_string() })),
+        Err(error) => internal_error(error.to_string()),
     }
 }
 
 async fn permissions(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<PermissionsQuery>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let permissions = match with_store(&state, |store| store.list_permissions()) {
         Ok(permissions) => permissions,
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Err(error) => return internal_error(error.to_string()),
     };
     let status = match query.status.as_deref().map(parse_permission_status) {
         Some(Some(status)) => Some(status),
-        Some(None) => return Json(json!({ "error": "invalid permission status" })),
+        Some(None) => return bad_request("invalid permission status"),
         None => None,
     };
     let session_id = query.session_id.as_deref();
@@ -734,13 +816,13 @@ async fn permissions(
         })
         .collect::<Vec<_>>();
 
-    Json(json!({ "permissions": permissions }))
+    ok_json(json!({ "permissions": permissions }))
 }
 
 async fn create_permission(
     State(state): State<AppState>,
     Json(request): Json<CreatePermissionRequest>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let permission = PermissionRequest {
         id: PermissionId::new(),
         workspace_id: request.workspace_id.map(WorkspaceId),
@@ -752,34 +834,34 @@ async fn create_permission(
         resolved_at: None,
     };
     if let Err(error) = with_store(&state, |store| store.upsert_permission(&permission)) {
-        return Json(json!({ "error": error.to_string() }));
+        return internal_error(error.to_string());
     }
     let mut event = BaizeEvent::new("permission.requested", json!({ "permission": permission }));
     event.workspace_id = permission.workspace_id.clone();
     event.session_id = permission.session_id.clone();
     state.record_event(event);
-    Json(json!({ "permission": permission }))
+    ok_json(json!({ "permission": permission }))
 }
 
 async fn permission(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let permission = with_store(&state, |store| store.get_permission(&PermissionId(id)));
-    json_result("permission", permission)
+    json_result_option("permission", permission)
 }
 
 async fn approve_permission(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     resolve_permission(state, PermissionId(id), PermissionStatus::Approved)
 }
 
 async fn deny_permission(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     resolve_permission(state, PermissionId(id), PermissionStatus::Denied)
 }
 
@@ -787,22 +869,22 @@ fn resolve_permission(
     state: AppState,
     id: PermissionId,
     status: PermissionStatus,
-) -> Json<serde_json::Value> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let mut permission = match with_store(&state, |store| store.get_permission(&id)) {
         Ok(Some(permission)) => permission,
-        Ok(None) => return Json(json!({ "error": "permission not found" })),
-        Err(error) => return Json(json!({ "error": error.to_string() })),
+        Ok(None) => return not_found("permission not found"),
+        Err(error) => return internal_error(error.to_string()),
     };
     permission.status = status;
     permission.resolved_at = Some(Utc::now());
     if let Err(error) = with_store(&state, |store| store.upsert_permission(&permission)) {
-        return Json(json!({ "error": error.to_string() }));
+        return internal_error(error.to_string());
     }
     let mut event = BaizeEvent::new("permission.resolved", json!({ "permission": permission }));
     event.workspace_id = permission.workspace_id.clone();
     event.session_id = permission.session_id.clone();
     state.record_event(event);
-    Json(json!({ "permission": permission }))
+    ok_json(json!({ "permission": permission }))
 }
 
 async fn events(
@@ -873,11 +955,53 @@ fn with_store<T>(state: &AppState, f: impl FnOnce(&EventStore) -> Result<T>) -> 
     f(&store)
 }
 
-fn json_result<T: Serialize>(key: &str, result: Result<T>) -> Json<serde_json::Value> {
+fn json_result<T: Serialize>(
+    key: &str,
+    result: Result<T>,
+) -> (StatusCode, Json<serde_json::Value>) {
     match result {
-        Ok(value) => Json(json!({ key: value })),
-        Err(error) => Json(json!({ "error": error.to_string() })),
+        Ok(value) => (StatusCode::OK, Json(json!({ key: value }))),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error.to_string() })),
+        ),
     }
+}
+
+fn json_result_option<T: Serialize>(
+    key: &str,
+    result: Result<Option<T>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match result {
+        Ok(Some(value)) => (StatusCode::OK, Json(json!({ key: value }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("{key} not found") })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error.to_string() })),
+        ),
+    }
+}
+
+fn not_found(message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": message })))
+}
+
+fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+}
+
+fn internal_error(message: String) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": message })),
+    )
+}
+
+fn ok_json(value: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::OK, Json(value))
 }
 
 fn parse_permission_status(status: &str) -> Option<PermissionStatus> {
@@ -960,12 +1084,21 @@ mod tests {
     }
 
     async fn json_response(app: Router, request: Request<Body>) -> serde_json::Value {
+        let (_, value) = json_response_with_status(app, request).await;
+        value
+    }
+
+    async fn json_response_with_status(
+        app: Router,
+        request: Request<Body>,
+    ) -> (StatusCode, serde_json::Value) {
         let response = app.oneshot(request).await.expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        serde_json::from_slice(&bytes).expect("json")
+        let value = serde_json::from_slice(&bytes).expect("json");
+        (status, value)
     }
 
     #[tokio::test]
@@ -1014,7 +1147,7 @@ mod tests {
                 .expect("request"),
         )
         .await;
-        assert_eq!(prompt["status"], "completed");
+        assert_eq!(prompt["status"], "running");
 
         let events = json_response(
             app.clone(),
@@ -1399,5 +1532,502 @@ mod tests {
 
         assert_eq!(health["health"][0]["provider_id"], "gemini");
         assert_eq!(health["health"][1]["provider_id"], "codex");
+    }
+
+    fn failing_app() -> (Router, tempfile::TempDir, tempfile::TempDir) {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let project_dir = tempfile::tempdir().expect("project dir");
+        let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+        let state = AppState::with_executor(
+            BaizeConfig::default(),
+            store,
+            Arc::new(FailingAgentExecutor),
+        );
+        (router(state), data_dir, project_dir)
+    }
+
+    #[derive(Clone)]
+    struct RecoverableAgentExecutor {
+        fail_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AgentExecutor for RecoverableAgentExecutor {
+        fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+            if self.fail_count.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                self.fail_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(anyhow::anyhow!("transient failure"));
+            }
+            Ok(AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                events: vec![baize_adapters::AgentExecutionEvent {
+                    kind: AgentExecutionEventKind::Output,
+                    text: Some("recovered output".to_string()),
+                    raw: None,
+                }],
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn recoverable_app() -> (Router, tempfile::TempDir, tempfile::TempDir) {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let project_dir = tempfile::tempdir().expect("project dir");
+        let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+        let state = AppState::with_executor(
+            BaizeConfig::default(),
+            store,
+            Arc::new(RecoverableAgentExecutor {
+                fail_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+            }),
+        );
+        (router(state), data_dir, project_dir)
+    }
+
+    async fn setup_workspace_and_session(
+        app: &Router,
+        project_dir: &tempfile::TempDir,
+    ) -> (String, String) {
+        let workspace = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/workspaces")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "path": project_dir.path() }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+        let session = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "workspace_id": workspace_id,
+                        "objective": "test"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        let session_id = session["session"]["id"].as_str().expect("session id");
+        (workspace_id.to_string(), session_id.to_string())
+    }
+
+    #[tokio::test]
+    async fn prompt_success_keeps_session_running() {
+        let (app, _data_dir, project_dir) = test_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        let prompt = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "hello" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(prompt["status"], "running");
+
+        let session = json_response(
+            app,
+            Request::builder()
+                .uri(format!("/sessions/{session_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(session["session"]["status"], "Running");
+    }
+
+    #[tokio::test]
+    async fn prompt_failure_transitions_session_to_failed() {
+        let (app, _data_dir, project_dir) = failing_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        let prompt = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "fail" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(prompt["status"], "failed");
+
+        let session = json_response(
+            app,
+            Request::builder()
+                .uri(format!("/sessions/{session_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(session["session"]["status"], "Failed");
+    }
+
+    #[tokio::test]
+    async fn failed_session_recovers_on_successful_prompt() {
+        let (app, _data_dir, project_dir) = recoverable_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        let first = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "fail first" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(first["status"], "failed");
+
+        let session_after_fail = json_response(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/sessions/{session_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(session_after_fail["session"]["status"], "Failed");
+
+        let second = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "recover" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(second["status"], "running");
+
+        let session_after_recover = json_response(
+            app,
+            Request::builder()
+                .uri(format!("/sessions/{session_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(session_after_recover["session"]["status"], "Running");
+    }
+
+    #[tokio::test]
+    async fn canceled_session_rejects_prompt() {
+        let (app, _data_dir, project_dir) = test_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        let cancel = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/cancel"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(cancel["session"]["status"], "Canceled");
+
+        let prompt = json_response(
+            app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "after cancel" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(prompt["error"], "session is canceled");
+    }
+
+    #[tokio::test]
+    async fn session_status_changed_event_emitted_on_failure() {
+        let (app, _data_dir, project_dir) = failing_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        let _prompt = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "fail" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+
+        let events = json_response(
+            app,
+            Request::builder()
+                .uri(format!("/sessions/{session_id}/events"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert!(events["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .any(|event| event["event_type"] == "session.status.changed"
+                && event["payload"]["status"] == "Failed"));
+    }
+
+    #[tokio::test]
+    async fn not_found_resources_return_404() {
+        let (app, _data_dir, _project_dir) = test_app();
+
+        let (status, body) = json_response_with_status(
+            app.clone(),
+            Request::builder()
+                .uri("/sessions/task_missing")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "session not found");
+
+        let (status, _body) = json_response_with_status(
+            app.clone(),
+            Request::builder()
+                .uri("/permissions/perm_missing")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, body) = json_response_with_status(
+            app,
+            Request::builder()
+                .uri("/providers/nonexistent/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "provider not found");
+    }
+
+    #[tokio::test]
+    async fn bad_request_returns_400() {
+        let (app, _data_dir, _project_dir) = test_app();
+
+        let (status, body) = json_response_with_status(
+            app.clone(),
+            Request::builder()
+                .uri("/permissions?status=maybe")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid permission status");
+    }
+
+    #[tokio::test]
+    async fn canceled_session_prompt_returns_400() {
+        let (app, _data_dir, project_dir) = test_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        let _cancel = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/cancel"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        let (status, body) = json_response_with_status(
+            app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "after cancel" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "session is canceled");
+    }
+
+    #[tokio::test]
+    async fn prompt_failure_returns_500() {
+        let (app, _data_dir, project_dir) = failing_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        let (status, body) = json_response_with_status(
+            app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "fail" }).to_string()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn successful_operations_return_200() {
+        let (app, _data_dir, project_dir) = test_app();
+
+        let (status, _) = json_response_with_status(
+            app.clone(),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = json_response_with_status(
+            app.clone(),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/providers")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, workspace) = json_response_with_status(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/workspaces")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "path": project_dir.path() }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        let workspace_id = workspace["workspace"]["id"].as_str().expect("id");
+
+        let (status, _) = json_response_with_status(
+            app,
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/workspaces/{workspace_id}/status"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_handoffs_lists_handoffs_for_session() {
+        let (app, _data_dir, project_dir) = test_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        let handoff = json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{session_id}/handoff"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "to_provider_id": "gemini" }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+
+        let handoff_id = handoff["handoff"]["id"].as_str().expect("handoff id");
+
+        let list = json_response(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/sessions/{session_id}/handoffs"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let handoffs = list["handoffs"].as_array().expect("handoffs array");
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0]["id"], handoff_id);
+        assert_eq!(handoffs[0]["to_provider_id"], "gemini");
+    }
+
+    #[tokio::test]
+    async fn session_permissions_lists_permissions_for_session() {
+        let (app, _data_dir, project_dir) = test_app();
+        let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+        json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/permissions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "session_id": session_id,
+                        "command": "cargo test",
+                        "reason": "verify"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        json_response(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/permissions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "session_id": session_id,
+                        "command": "cargo fmt",
+                        "reason": "format"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+
+        let list = json_response(
+            app,
+            Request::builder()
+                .uri(format!("/sessions/{session_id}/permissions"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let perms = list["permissions"].as_array().expect("permissions array");
+        assert_eq!(perms.len(), 2);
+        assert_eq!(perms[0]["command"], "cargo test");
+        assert_eq!(perms[1]["command"], "cargo fmt");
     }
 }

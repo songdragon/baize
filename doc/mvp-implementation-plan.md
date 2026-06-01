@@ -108,6 +108,9 @@ The MVP target is a single-workspace local agent supervisor:
 - `POST /permissions/:id/approve`;
 - `POST /permissions/:id/deny`;
 - `GET /events`.
+- Session status transitions: `Running` stays on prompt success, transitions to `Failed` on prompt failure or executor error, recovers from `Failed` on next successful prompt.
+- Canceled sessions reject new prompt requests.
+- `session.status.changed` event emission on status transitions.
 
 ### 7. Routing
 
@@ -173,7 +176,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 72.
+Current full test count: 86.
 
 Implemented test coverage includes:
 
@@ -196,6 +199,8 @@ Implemented test coverage includes:
 - daemon provider ordering and provider health ordering;
 - daemon handoff creation and accept flow;
 - daemon permission listing/filtering/detail lookup;
+- daemon session status transitions (Running, Failed, Canceled, recovery);
+- daemon canceled session prompt rejection;
 - TUI dashboard rendering;
 - TUI prompt input rendering;
 - TUI provider, route, permission and handoff status formatting;
@@ -231,12 +236,12 @@ These are still in scope for a more usable MVP.
 
 ### 2. Daemon And API
 
-- Add structured `GET /sessions/:id/handoffs` list endpoint;
-- add structured `GET /sessions/:id/permissions` convenience endpoint or document query usage;
-- add session status transitions for completed/failed prompt runs;
-- add explicit canceled-state behavior for future prompt requests;
+- ~~Add structured `GET /sessions/:id/handoffs` list endpoint~~ (done);
+- ~~add structured `GET /sessions/:id/permissions` convenience endpoint or document query usage~~ (done);
+- ~~add session status transitions for completed/failed prompt runs~~ (done);
+- ~~add explicit canceled-state behavior for future prompt requests~~ (done);
 - add pagination or limit parameters for events, sessions and permissions;
-- add API-level status codes instead of returning every error as HTTP 200 JSON.
+- ~~add API-level status codes instead of returning every error as HTTP 200 JSON~~ (done);
 
 ### 3. Routing
 

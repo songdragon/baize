@@ -73,6 +73,7 @@ impl EventStore {
             );
             create table if not exists permissions (
                 id text primary key,
+                session_id text,
                 json text not null
             );
             "#,
@@ -258,8 +259,35 @@ impl EventStore {
         self.get_json("handoffs", &id.0)
     }
 
+    pub fn list_handoffs_for_session(
+        &self,
+        session_id: &TaskSessionId,
+    ) -> Result<Vec<HandoffSummary>> {
+        let mut stmt = self
+            .conn
+            .prepare("select json from handoffs where session_id = ?1 order by rowid")?;
+        let rows = stmt.query_map(params![&session_id.0], |row| row.get::<_, String>(0))?;
+        let mut handoffs = Vec::new();
+        for row in rows {
+            handoffs.push(serde_json::from_str(&row?)?);
+        }
+        Ok(handoffs)
+    }
+
     pub fn upsert_permission(&self, permission: &PermissionRequest) -> Result<()> {
-        self.upsert_json("permissions", &permission.id.0, permission)
+        self.conn.execute(
+            r#"
+            insert into permissions (id, session_id, json)
+            values (?1, ?2, ?3)
+            on conflict(id) do update set session_id = excluded.session_id, json = excluded.json
+            "#,
+            params![
+                &permission.id.0,
+                permission.session_id.as_ref().map(|id| id.0.as_str()),
+                serde_json::to_string(permission)?,
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn get_permission(&self, id: &PermissionId) -> Result<Option<PermissionRequest>> {
@@ -268,6 +296,21 @@ impl EventStore {
 
     pub fn list_permissions(&self) -> Result<Vec<PermissionRequest>> {
         self.list_json("permissions")
+    }
+
+    pub fn list_permissions_for_session(
+        &self,
+        session_id: &TaskSessionId,
+    ) -> Result<Vec<PermissionRequest>> {
+        let mut stmt = self
+            .conn
+            .prepare("select json from permissions where session_id = ?1 order by rowid")?;
+        let rows = stmt.query_map(params![&session_id.0], |row| row.get::<_, String>(0))?;
+        let mut permissions = Vec::new();
+        for row in rows {
+            permissions.push(serde_json::from_str(&row?)?);
+        }
+        Ok(permissions)
     }
 
     fn upsert_json<T: Serialize>(&self, table: &str, id: &str, value: &T) -> Result<()> {
@@ -440,6 +483,107 @@ mod tests {
         assert_eq!(permissions.len(), 2);
         assert_eq!(permissions[0].command, "cargo test");
         assert!(matches!(permissions[1].status, PermissionStatus::Approved));
+    }
+
+    #[test]
+    fn lists_handoffs_for_session() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let session_id = TaskSessionId::new();
+        let other_session_id = TaskSessionId::new();
+        let now = Utc::now();
+        let first = HandoffSummary {
+            id: HandoffId::new(),
+            session_id: session_id.clone(),
+            from_provider_id: ProviderId("codex".to_string()),
+            to_provider_id: ProviderId("gemini".to_string()),
+            summary_markdown: "# Handoff 1".to_string(),
+            mechanical_facts: baize_core::HandoffFacts::default(),
+            status: baize_core::HandoffStatus::Accepted,
+            created_at: now,
+        };
+        let second = HandoffSummary {
+            id: HandoffId::new(),
+            session_id: session_id.clone(),
+            from_provider_id: ProviderId("gemini".to_string()),
+            to_provider_id: ProviderId("codex".to_string()),
+            summary_markdown: "# Handoff 2".to_string(),
+            mechanical_facts: baize_core::HandoffFacts::default(),
+            status: baize_core::HandoffStatus::Draft,
+            created_at: now,
+        };
+        let other = HandoffSummary {
+            id: HandoffId::new(),
+            session_id: other_session_id,
+            from_provider_id: ProviderId("codex".to_string()),
+            to_provider_id: ProviderId("opencode".to_string()),
+            summary_markdown: "# Other".to_string(),
+            mechanical_facts: baize_core::HandoffFacts::default(),
+            status: baize_core::HandoffStatus::Draft,
+            created_at: now,
+        };
+
+        store.insert_handoff(&first).expect("first handoff");
+        store.insert_handoff(&second).expect("second handoff");
+        store.insert_handoff(&other).expect("other handoff");
+
+        let handoffs = store
+            .list_handoffs_for_session(&session_id)
+            .expect("handoffs");
+
+        assert_eq!(handoffs.len(), 2);
+        assert_eq!(handoffs[0].to_provider_id.0, "gemini");
+        assert_eq!(handoffs[1].to_provider_id.0, "codex");
+    }
+
+    #[test]
+    fn lists_permissions_for_session() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let session_id = TaskSessionId::new();
+        let other_session_id = TaskSessionId::new();
+        let first = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: Some(WorkspaceId::new()),
+            session_id: Some(session_id.clone()),
+            command: "cargo test".to_string(),
+            reason: "verify".to_string(),
+            status: PermissionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        let second = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: None,
+            session_id: Some(session_id.clone()),
+            command: "cargo fmt".to_string(),
+            reason: "format".to_string(),
+            status: PermissionStatus::Approved,
+            created_at: Utc::now(),
+            resolved_at: Some(Utc::now()),
+        };
+        let other = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: None,
+            session_id: Some(other_session_id),
+            command: "rm -rf".to_string(),
+            reason: "cleanup".to_string(),
+            status: PermissionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+
+        store.upsert_permission(&first).expect("first permission");
+        store.upsert_permission(&second).expect("second permission");
+        store.upsert_permission(&other).expect("other permission");
+
+        let permissions = store
+            .list_permissions_for_session(&session_id)
+            .expect("permissions");
+
+        assert_eq!(permissions.len(), 2);
+        assert_eq!(permissions[0].command, "cargo test");
+        assert_eq!(permissions[1].command, "cargo fmt");
     }
 
     #[test]
