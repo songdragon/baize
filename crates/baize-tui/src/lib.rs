@@ -183,6 +183,8 @@ fn run_app(
                     KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         start_new_session(&mut state);
                     }
+                    KeyCode::Down => state.select_next_permission(),
+                    KeyCode::Up => state.select_previous_permission(),
                     KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
@@ -865,6 +867,24 @@ impl TuiState {
         self.pending_permissions.get(self.selected_permission_index)
     }
 
+    fn select_next_permission(&mut self) {
+        if self.pending_permissions.is_empty() {
+            return;
+        }
+        self.selected_permission_index =
+            (self.selected_permission_index + 1) % self.pending_permissions.len();
+    }
+
+    fn select_previous_permission(&mut self) {
+        if self.pending_permissions.is_empty() {
+            return;
+        }
+        self.selected_permission_index = self
+            .selected_permission_index
+            .checked_sub(1)
+            .unwrap_or(self.pending_permissions.len() - 1);
+    }
+
     fn set_pending_permissions(&mut self, permissions: Vec<PermissionView>) {
         self.pending_permissions = permissions;
         if self.pending_permissions.is_empty() {
@@ -931,7 +951,7 @@ impl TuiState {
     }
 
     fn help_text(&self) -> &'static str {
-        "Enter|Tab|^N new|^L load|^H hand|^R hlth|^P perm|^A ok|^D no"
+        "Enter|Tab|Up/Dn perm|^N new|^L load|^H hand|^P pull|^A ok|^D no"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -1060,9 +1080,8 @@ mod tests {
         assert!(rendered.contains("Status: idle"));
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
         assert!(rendered.contains("Perms: none pending"));
-        assert!(
-            rendered.contains("Help: Enter|Tab|^N new|^L load|^H hand|^R hlth|^P perm|^A ok|^D no")
-        );
+        assert!(rendered
+            .contains("Help: Enter|Tab|Up/Dn perm|^N new|^L load|^H hand|^P pull|^A ok|^D no"));
     }
 
     #[test]
@@ -1414,6 +1433,47 @@ mod tests {
         assert_eq!(
             state.selected_permission().expect("permission").id,
             "perm_1"
+        );
+    }
+
+    #[test]
+    fn cycles_pending_permission_selection() {
+        let mut state = TuiState {
+            pending_permissions: vec![
+                PermissionView {
+                    id: "perm_1".to_string(),
+                    session_id: None,
+                    command: "cargo test".to_string(),
+                    reason: "verify".to_string(),
+                    status: "Pending".to_string(),
+                },
+                PermissionView {
+                    id: "perm_2".to_string(),
+                    session_id: None,
+                    command: "cargo fmt".to_string(),
+                    reason: "format".to_string(),
+                    status: "Pending".to_string(),
+                },
+            ],
+            ..TuiState::default()
+        };
+
+        state.select_next_permission();
+        assert_eq!(
+            state.selected_permission().expect("permission").id,
+            "perm_2"
+        );
+
+        state.select_next_permission();
+        assert_eq!(
+            state.selected_permission().expect("permission").id,
+            "perm_1"
+        );
+
+        state.select_previous_permission();
+        assert_eq!(
+            state.selected_permission().expect("permission").id,
+            "perm_2"
         );
     }
 
