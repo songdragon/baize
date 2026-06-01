@@ -251,7 +251,7 @@ These are still in scope for a more usable MVP.
 - ~~include provider health in route selection~~ (done);
 - ~~include explicit user-selected provider override reason~~ (done);
 - ~~add task-type hints for route decisions~~ (done);
-- add first quota/rate-limit inference from provider errors;
+- ~~add first quota/rate-limit inference from provider errors~~ (done);
 - add configurable routing policy thresholds.
 
 ### 4. Adapter Runtime

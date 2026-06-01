@@ -8,8 +8,7 @@ use baize_adapters::{
     AgentExecutionEvent, AgentExecutionEventKind, AgentPromptRequest, AgentRunResult,
 };
 use baize_config::BaizeConfig;
-use baize_core::ProviderId;
-use baize_core::TaskType;
+use baize_core::{ProviderId, QuotaConfidence, QuotaSource, TaskType};
 use baize_storage::EventStore;
 use serde_json::json;
 use std::sync::Arc;
@@ -32,6 +31,17 @@ struct FailingAgentExecutor;
 impl AgentExecutor for FailingAgentExecutor {
     fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
         Err(anyhow::anyhow!("inner failure").context("outer failure"))
+    }
+}
+
+#[derive(Clone)]
+struct RateLimitedAgentExecutor;
+
+impl AgentExecutor for RateLimitedAgentExecutor {
+    fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+        Err(anyhow::anyhow!(
+            "429 Too Many Requests: rate limit exceeded for provider"
+        ))
     }
 }
 
@@ -181,6 +191,29 @@ fn infers_task_type_from_objective_text() {
     );
 }
 
+#[test]
+fn infers_provider_limit_from_error_text() {
+    let quota = crate::helpers::infer_provider_limit(
+        "Provider error: insufficient quota, please check your billing details",
+    )
+    .expect("quota inference");
+    assert_eq!(quota.kind, crate::helpers::ProviderLimitKind::QuotaExceeded);
+    assert_eq!(quota.confidence, QuotaConfidence::Estimated);
+    assert_eq!(quota.source, QuotaSource::ErrorInference);
+
+    let rate_limit =
+        crate::helpers::infer_provider_limit("HTTP 429 Too Many Requests: rate limit exceeded")
+            .expect("rate-limit inference");
+    assert_eq!(
+        rate_limit.kind,
+        crate::helpers::ProviderLimitKind::RateLimit
+    );
+    assert_eq!(rate_limit.confidence, QuotaConfidence::Estimated);
+    assert_eq!(rate_limit.source, QuotaSource::ErrorInference);
+
+    assert!(crate::helpers::infer_provider_limit("plain adapter failure").is_none());
+}
+
 #[tokio::test]
 async fn prompt_failure_returns_error_chain() {
     let data_dir = tempfile::tempdir().expect("data dir");
@@ -237,6 +270,82 @@ async fn prompt_failure_returns_error_chain() {
 
     assert_eq!(prompt["status"], "failed");
     assert_eq!(prompt["error"], "outer failure: inner failure");
+}
+
+#[tokio::test]
+async fn prompt_failure_reports_limit_inference() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(RateLimitedAgentExecutor),
+    );
+    let app = router(state);
+
+    let workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path() }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+    let session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "rate limit path"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let session_id = session["session"]["id"].as_str().expect("session id");
+
+    let (status, prompt) = json_response_with_status(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "fail" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(prompt["status"], "failed");
+    assert_eq!(prompt["limit_inference"]["kind"], "RateLimit");
+    assert_eq!(prompt["limit_inference"]["confidence"], "Estimated");
+    assert_eq!(prompt["limit_inference"]["source"], "ErrorInference");
+
+    let events = json_response(
+        app,
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/events"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert!(events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["event_type"] == "session.agent.failed"
+            && event["payload"]["limit_inference"]["kind"] == "RateLimit"));
 }
 
 #[tokio::test]

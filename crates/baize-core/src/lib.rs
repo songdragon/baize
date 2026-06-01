@@ -177,14 +177,14 @@ pub struct QuotaState {
     pub observed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuotaConfidence {
     Exact,
     Estimated,
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuotaSource {
     ProviderApi,
     ErrorInference,

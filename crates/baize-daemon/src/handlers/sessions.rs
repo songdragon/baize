@@ -8,8 +8,8 @@ use baize_core::{
 use chrono::Utc;
 
 use crate::helpers::{
-    bad_request, format_error_chain, infer_task_type, internal_error, json_result,
-    json_result_option, ok_json, select_provider, with_store,
+    bad_request, format_error_chain, infer_provider_limit, infer_task_type, internal_error,
+    json_result, json_result_option, ok_json, select_provider, with_store,
 };
 use crate::state::{AppState, CreateSessionRequest, PaginationQuery, PromptRequest};
 
@@ -207,12 +207,19 @@ pub async fn prompt_session(
             } else {
                 "session.agent.failed"
             };
+            let stderr = result.stderr.clone();
+            let limit_inference = if result.success {
+                None
+            } else {
+                infer_provider_limit(&stderr)
+            };
             let mut final_event = baize_core::BaizeEvent::new(
                 final_event_type,
                 serde_json::json!({
                     "success": result.success,
                     "exit_code": result.exit_code,
-                    "stderr": result.stderr,
+                    "stderr": stderr,
+                    "limit_inference": limit_inference,
                 }),
             );
             final_event.workspace_id = Some(session.workspace_id.clone());
@@ -248,15 +255,20 @@ pub async fn prompt_session(
                     "provider_id": provider_id,
                     "events": result.events,
                     "exit_code": result.exit_code,
-                    "stderr": result.stderr,
+                    "stderr": stderr,
+                    "limit_inference": limit_inference,
                 })),
             )
         }
         Err(error) => {
             let error = format_error_chain(error.as_ref());
+            let limit_inference = infer_provider_limit(&error);
             let mut failed = baize_core::BaizeEvent::new(
                 "session.agent.failed",
-                serde_json::json!({ "error": error }),
+                serde_json::json!({
+                    "error": error,
+                    "limit_inference": limit_inference,
+                }),
             );
             failed.workspace_id = Some(session.workspace_id.clone());
             failed.session_id = Some(session.id.clone());
@@ -287,6 +299,7 @@ pub async fn prompt_session(
                     "session_id": session.id.0,
                     "provider_id": provider_id,
                     "error": error,
+                    "limit_inference": limit_inference,
                 })),
             )
         }

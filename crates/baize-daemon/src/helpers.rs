@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use baize_adapters::default_provider_profiles;
 use baize_config::BaizeConfig;
-use baize_core::{PermissionStatus, TaskType};
+use baize_core::{PermissionStatus, QuotaConfidence, QuotaSource, TaskType};
 use baize_storage::EventStore;
 use chrono::Utc;
 use serde::Serialize;
@@ -17,6 +17,19 @@ pub struct RoutingResult {
     pub previous_provider_id: Option<baize_core::ProviderId>,
     pub reason: String,
     pub confidence: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderLimitInference {
+    pub kind: ProviderLimitKind,
+    pub confidence: QuotaConfidence,
+    pub source: QuotaSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ProviderLimitKind {
+    QuotaExceeded,
+    RateLimit,
 }
 
 pub fn infer_task_type(objective: &str) -> TaskType {
@@ -36,6 +49,47 @@ pub fn infer_task_type(objective: &str) -> TaskType {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+pub fn infer_provider_limit(message: &str) -> Option<ProviderLimitInference> {
+    let normalized = message.to_ascii_lowercase();
+    if contains_any(
+        &normalized,
+        &[
+            "insufficient quota",
+            "quota exceeded",
+            "usage limit",
+            "credit balance",
+            "billing hard limit",
+            "exceeded your current quota",
+        ],
+    ) {
+        return Some(ProviderLimitInference {
+            kind: ProviderLimitKind::QuotaExceeded,
+            confidence: QuotaConfidence::Estimated,
+            source: QuotaSource::ErrorInference,
+        });
+    }
+
+    if contains_any(
+        &normalized,
+        &[
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "429",
+            "rpm",
+            "tpm",
+        ],
+    ) {
+        return Some(ProviderLimitInference {
+            kind: ProviderLimitKind::RateLimit,
+            confidence: QuotaConfidence::Estimated,
+            source: QuotaSource::ErrorInference,
+        });
+    }
+
+    None
 }
 
 pub fn with_store<T>(state: &AppState, f: impl FnOnce(&EventStore) -> Result<T>) -> Result<T> {
