@@ -950,6 +950,9 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
             state.push_message(format!("stderr: {}", one_line(stderr)));
         }
     }
+    if let Some(hint) = provider_error_hint(response) {
+        state.push_message(hint);
+    }
 }
 
 fn append_recent_events(state: &mut TuiState, response: &Value) {
@@ -1170,10 +1173,16 @@ fn parse_http_json_response(response: &str) -> Result<Value> {
         .split_once("\r\n\r\n")
         .ok_or_else(|| anyhow!("invalid daemon response"))?;
     let status_line = head.lines().next().unwrap_or_default();
+    let value: Value = serde_json::from_str(body.trim()).context("parse daemon JSON response")?;
     if !status_line.contains(" 200 ") {
+        if value.get("status").and_then(Value::as_str) == Some("failed") {
+            return Ok(value);
+        }
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(anyhow!("daemon returned {status_line}: {error}"));
+        }
         return Err(anyhow!("daemon returned {status_line}"));
     }
-    let value: Value = serde_json::from_str(body.trim()).context("parse daemon JSON response")?;
     if let Some(error) = value.get("error").and_then(Value::as_str) {
         return Err(anyhow!(error.to_string()));
     }
@@ -1216,6 +1225,79 @@ fn workspace_name(path: &Path) -> String {
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn provider_error_hint(response: &Value) -> Option<String> {
+    if let Some(kind) = response
+        .get("limit_inference")
+        .and_then(|limit| limit.get("kind"))
+        .and_then(Value::as_str)
+    {
+        return match kind {
+            "RateLimit" => Some(
+                "provider hint: rate limit detected; switch provider or wait for the quota window"
+                    .to_string(),
+            ),
+            "QuotaExceeded" => Some(
+                "provider hint: quota exhausted; switch provider or wait for quota reset"
+                    .to_string(),
+            ),
+            _ => None,
+        };
+    }
+
+    let detail = [
+        response.get("error").and_then(Value::as_str),
+        response.get("stderr").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ");
+    if detail.trim().is_empty() {
+        return None;
+    }
+
+    let detail = detail.to_ascii_lowercase();
+    if contains_any(
+        &detail,
+        &[
+            "timed out",
+            "timeout",
+            "deadline",
+            "interactive prompt",
+            "would block",
+        ],
+    ) {
+        return Some(
+            "provider hint: command timed out; check CLI login/interactivity or increase timeout"
+                .to_string(),
+        );
+    }
+    if contains_any(
+        &detail,
+        &[
+            "auth",
+            "login",
+            "oauth",
+            "api key",
+            "credential",
+            "permission denied",
+            "unauthorized",
+            "not authenticated",
+        ],
+    ) {
+        return Some(
+            "provider hint: authentication/setup required; run the provider CLI login flow"
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn short_text(text: &str, max_chars: usize) -> String {
@@ -1269,6 +1351,24 @@ mod tests {
         let error = parse_http_json_response(response).expect_err("error");
 
         assert!(error.to_string().contains("no daemon"));
+    }
+
+    #[test]
+    fn parse_http_json_response_allows_structured_prompt_failure() {
+        let response = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\n\r\n{\"status\":\"failed\",\"error\":\"provider failed\"}";
+        let value = parse_http_json_response(response).expect("structured failure");
+
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["error"], "provider failed");
+    }
+
+    #[test]
+    fn parse_http_json_response_includes_error_for_non_prompt_failure() {
+        let response = "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\n\r\n{\"error\":\"session not found\"}";
+        let error = parse_http_json_response(response).expect_err("error");
+
+        assert!(error.to_string().contains("HTTP/1.1 404 Not Found"));
+        assert!(error.to_string().contains("session not found"));
     }
 
     #[test]
@@ -1562,6 +1662,57 @@ mod tests {
         assert!(state
             .transcript_text()
             .contains("workspace dirty: a.rs, b.rs, c.rs, d.rs, e.rs (+1 more)"));
+    }
+
+    #[test]
+    fn append_prompt_response_shows_rate_limit_hint() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "status": "failed",
+            "provider_id": "codex",
+            "error": "429 Too Many Requests",
+            "limit_inference": {
+                "kind": "RateLimit",
+                "confidence": "Estimated",
+                "source": "ErrorInference"
+            }
+        });
+
+        append_prompt_response(&mut state, &response);
+
+        assert!(state.transcript_text().contains("result: failed via codex"));
+        assert!(state
+            .transcript_text()
+            .contains("provider hint: rate limit detected"));
+    }
+
+    #[test]
+    fn append_prompt_response_shows_auth_and_timeout_hints() {
+        let mut auth_state = TuiState::default();
+        append_prompt_response(
+            &mut auth_state,
+            &json!({
+                "status": "failed",
+                "provider_id": "gemini",
+                "stderr": "not authenticated; please run login"
+            }),
+        );
+        assert!(auth_state
+            .transcript_text()
+            .contains("provider hint: authentication/setup required"));
+
+        let mut timeout_state = TuiState::default();
+        append_prompt_response(
+            &mut timeout_state,
+            &json!({
+                "status": "failed",
+                "provider_id": "codex",
+                "error": "codex timed out after 10 seconds"
+            }),
+        );
+        assert!(timeout_state
+            .transcript_text()
+            .contains("provider hint: command timed out"));
     }
 
     #[test]
