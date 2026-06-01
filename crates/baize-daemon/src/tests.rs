@@ -9,6 +9,7 @@ use baize_adapters::{
 };
 use baize_config::BaizeConfig;
 use baize_core::ProviderId;
+use baize_core::TaskType;
 use baize_storage::EventStore;
 use serde_json::json;
 use std::sync::Arc;
@@ -153,6 +154,31 @@ async fn creates_workspace_session_prompt_and_events() {
     )
     .await;
     assert_eq!(routes["routes"][0]["selected_provider_id"], "codex");
+    assert_eq!(routes["routes"][0]["task_type"], "Testing");
+}
+
+#[test]
+fn infers_task_type_from_objective_text() {
+    assert_eq!(
+        crate::helpers::infer_task_type("please add unit tests"),
+        TaskType::Testing
+    );
+    assert_eq!(
+        crate::helpers::infer_task_type("debug this provider failure"),
+        TaskType::Debugging
+    );
+    assert_eq!(
+        crate::helpers::infer_task_type("refactor the TUI state"),
+        TaskType::Refactor
+    );
+    assert_eq!(
+        crate::helpers::infer_task_type("update README docs"),
+        TaskType::Documentation
+    );
+    assert_eq!(
+        crate::helpers::infer_task_type("build a new endpoint"),
+        TaskType::Implementation
+    );
 }
 
 #[tokio::test]

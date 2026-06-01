@@ -8,8 +8,8 @@ use baize_core::{
 use chrono::Utc;
 
 use crate::helpers::{
-    bad_request, format_error_chain, internal_error, json_result, json_result_option, ok_json,
-    select_provider, with_store,
+    bad_request, format_error_chain, infer_task_type, internal_error, json_result,
+    json_result_option, ok_json, select_provider, with_store,
 };
 use crate::state::{AppState, CreateSessionRequest, PaginationQuery, PromptRequest};
 
@@ -68,6 +68,7 @@ pub async fn create_session(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let now = Utc::now();
     let workspace_id = baize_core::WorkspaceId(request.workspace_id);
+    let task_type = infer_task_type(&request.objective);
     let routing = select_provider(
         &state,
         request.provider_id,
@@ -88,7 +89,8 @@ pub async fn create_session(
         session_id: session.id.clone(),
         selected_provider_id: routing.provider_id.clone(),
         previous_provider_id: routing.previous_provider_id,
-        reason: routing.reason,
+        reason: format!("{} Task hint: {:?}.", routing.reason, task_type),
+        task_type: Some(task_type),
         confidence: routing.confidence,
         mode: RoutingMode::Assisted,
         created_at: now,

@@ -4,7 +4,9 @@ use axum::Json;
 use baize_core::{HandoffFacts, HandoffId, HandoffStatus, HandoffSummary, RoutingMode};
 use chrono::Utc;
 
-use crate::helpers::{bad_request, internal_error, json_result_option, ok_json, with_store};
+use crate::helpers::{
+    bad_request, infer_task_type, internal_error, json_result_option, ok_json, with_store,
+};
 use crate::state::AppState;
 
 pub async fn create_handoff(
@@ -110,6 +112,7 @@ pub async fn accept_handoff(
             "Accepted handoff {} to {}.",
             handoff.id.0, selected_provider_id.0
         ),
+        task_type: Some(infer_task_type(&session.objective)),
         confidence: 0.9,
         mode: RoutingMode::Assisted,
         created_at: now,

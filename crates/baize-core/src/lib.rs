@@ -219,9 +219,20 @@ pub struct RouteDecision {
     pub selected_provider_id: ProviderId,
     pub previous_provider_id: Option<ProviderId>,
     pub reason: String,
+    #[serde(default)]
+    pub task_type: Option<TaskType>,
     pub confidence: f32,
     pub mode: RoutingMode,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskType {
+    Testing,
+    Debugging,
+    Refactor,
+    Documentation,
+    Implementation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,5 +342,23 @@ mod tests {
         assert!(event.workspace_id.is_none());
         assert!(event.session_id.is_none());
         assert!(event.provider_id.is_none());
+    }
+
+    #[test]
+    fn route_decision_deserializes_without_task_type() {
+        let raw = json!({
+            "id": "route_1",
+            "session_id": "task_1",
+            "selected_provider_id": "codex",
+            "previous_provider_id": null,
+            "reason": "legacy record",
+            "confidence": 0.75,
+            "mode": "Assisted",
+            "created_at": Utc::now(),
+        });
+
+        let decision: RouteDecision = serde_json::from_value(raw).expect("route decision");
+
+        assert!(decision.task_type.is_none());
     }
 }

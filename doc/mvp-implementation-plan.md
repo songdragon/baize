@@ -119,6 +119,7 @@ The MVP target is a single-workspace local agent supervisor:
 - requested provider override;
 - route decision persistence;
 - route decision event emission;
+- task-type hints on route decisions;
 - route history API;
 - TUI display of recent route history.
 
@@ -176,7 +177,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 90.
+Current full test count: 109.
 
 Implemented test coverage includes:
 
@@ -197,6 +198,7 @@ Implemented test coverage includes:
 - daemon workspace/session/prompt/events flow;
 - daemon prompt failure error chain;
 - daemon provider ordering and provider health ordering;
+- daemon task-type inference for route decisions;
 - daemon handoff creation and accept flow;
 - daemon permission listing/filtering/detail lookup;
 - daemon session status transitions (Running, Failed, Canceled, recovery);
@@ -248,7 +250,7 @@ These are still in scope for a more usable MVP.
 - ~~Add sticky routing window~~ (done);
 - ~~include provider health in route selection~~ (done);
 - ~~include explicit user-selected provider override reason~~ (done);
-- add task-type hints for route decisions;
+- ~~add task-type hints for route decisions~~ (done);
 - add first quota/rate-limit inference from provider errors;
 - add configurable routing policy thresholds.
 

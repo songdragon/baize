@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use baize_adapters::default_provider_profiles;
 use baize_config::BaizeConfig;
-use baize_core::PermissionStatus;
+use baize_core::{PermissionStatus, TaskType};
 use baize_storage::EventStore;
 use chrono::Utc;
 use serde::Serialize;
@@ -17,6 +17,25 @@ pub struct RoutingResult {
     pub previous_provider_id: Option<baize_core::ProviderId>,
     pub reason: String,
     pub confidence: f32,
+}
+
+pub fn infer_task_type(objective: &str) -> TaskType {
+    let objective = objective.to_ascii_lowercase();
+    if contains_any(&objective, &["test", "tests", "testing", "ut", "coverage"]) {
+        TaskType::Testing
+    } else if contains_any(&objective, &["debug", "bug", "fix", "failure", "error"]) {
+        TaskType::Debugging
+    } else if contains_any(&objective, &["refactor", "cleanup", "restructure"]) {
+        TaskType::Refactor
+    } else if contains_any(&objective, &["doc", "docs", "readme", "spec"]) {
+        TaskType::Documentation
+    } else {
+        TaskType::Implementation
+    }
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 pub fn with_store<T>(state: &AppState, f: impl FnOnce(&EventStore) -> Result<T>) -> Result<T> {
