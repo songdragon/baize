@@ -1,10 +1,20 @@
 # MVP Implementation Plan
 
-Status: implemented
+Status: implemented and actively hardening
 
 ## Scope
 
 This MVP implements the review-passed technical spec as a local Rust daemon plus TUI shell. Gemini and Codex prompt execution paths are wired through CLI adapters; tests use fake executors and parser fixtures so CI does not spend model quota.
+
+The MVP target is a single-workspace local agent supervisor:
+
+- inspect and register the current project;
+- create and resume task sessions;
+- route work to configured coding-agent providers;
+- execute prompt requests through Codex/Gemini CLI paths;
+- record session events, route decisions, handoffs and permissions;
+- let the user operate the workflow from a TUI;
+- keep the kernel API reusable for a future desktop app.
 
 ## Implemented Work
 
@@ -16,41 +26,67 @@ This MVP implements the review-passed technical spec as a local Rust daemon plus
 - route decision model;
 - handoff summary and mechanical facts;
 - permission request and resolution model;
-- event model for append-only logging and SSE.
+- event model for append-only logging and SSE;
+- generated ID constructors for all MVP entities.
 
 ### 2. Storage
 
 - SQLite append-only `events` table;
 - MVP query tables for workspaces, projects, sessions, route decisions, handoffs and permissions;
 - JSON-backed records for fast iteration before final relational schema hardening;
-- session event lookup.
+- workspace/project/session persistence;
+- session event lookup;
+- route decision lookup by session;
+- permission insert, list and detail lookup;
+- handoff insert/update and detail lookup.
 
 ### 3. Workspace
 
 - local path inspection;
 - git root detection;
 - branch detection;
-- dirty state and changed files.
+- dirty state and changed files;
+- clean git repository inspection;
+- dirty git repository inspection with tracked and untracked files;
+- fixed `git status --porcelain` parsing so changed file names do not lose the first character.
 
-### 4. Provider Validation
+### 4. Provider Validation And Adapters
 
 - default provider order: Codex, Gemini, Copilot, OpenCode;
 - provider transport registry;
 - health probing via provider command `--version`;
-- ACP transport metadata for Copilot and OpenCode.
+- ACP transport metadata for Copilot and OpenCode;
 - structured validation for Codex/Gemini/Copilot/OpenCode;
 - detected capabilities and capability gap reporting;
-- daemon endpoints for provider validation.
+- daemon endpoints for provider validation;
 - Gemini `--prompt --output-format stream-json` execution path;
-- Codex `exec --json` execution path.
+- Codex `exec --json` execution path;
+- stream-json/JSONL parser behavior;
 - prompt execution timeout to prevent hanging on provider authentication or interactive prompts.
 
-### 5. Daemon API
+### 5. Config And CLI
+
+- default TOML config model;
+- config loading with default fallback;
+- config validation;
+- `baize config path`;
+- `baize config show`;
+- `baize config init --force`;
+- `baize config validate`;
+- `baize status`;
+- `baize doctor`;
+- `baize providers`;
+- `baize validate [provider]`;
+- refactored CLI command handling into testable output/action functions.
+
+### 6. Daemon API
 
 - `GET /health`;
 - `GET /providers`;
 - `GET /providers/:id/health`;
+- `GET /providers/:id/validate`;
 - `POST /providers/check`;
+- `POST /providers/validate`;
 - `GET /workspaces`;
 - `POST /workspaces`;
 - `GET /workspaces/:id/status`;
@@ -60,7 +96,9 @@ This MVP implements the review-passed technical spec as a local Rust daemon plus
 - `GET /sessions/:id`;
 - `POST /sessions/:id/prompt`;
 - `POST /sessions/:id/cancel`;
+- `GET /sessions/:id/routes`;
 - `POST /sessions/:id/handoff`;
+- `POST /sessions/:id/handoff/:handoff_id/accept`;
 - `GET /sessions/:id/events`;
 - `GET /sessions/:id/diff`;
 - `GET /sessions/:id/handoff/:handoff_id`;
@@ -71,55 +109,176 @@ This MVP implements the review-passed technical spec as a local Rust daemon plus
 - `POST /permissions/:id/deny`;
 - `GET /events`.
 
-### 6. Routing
+### 7. Routing
 
 - assisted-mode default route decision;
 - configured provider priority selection;
 - requested provider override;
 - route decision persistence;
-- route decision event emission.
+- route decision event emission;
+- route history API;
+- TUI display of recent route history.
 
-### 7. Handoff
+### 8. Handoff
 
 - markdown handoff artifact generation;
 - Baize mechanical facts attachment;
 - changed files and user constraints capture;
-- handoff persistence and event emission.
+- handoff persistence and event emission;
+- handoff accept flow that updates active provider and emits route decision;
+- TUI handoff preview before accept;
+- TUI pending handoff status line;
+- `Ctrl-H` to create preview;
+- `Ctrl-Y` to accept pending handoff;
+- pending handoff is cleared when loading, starting or canceling sessions.
 
-### 8. Permission
+### 9. Permission
 
 - permission request creation;
 - approve/deny resolution;
-- permission persistence and event emission.
+- permission persistence and event emission;
+- list permissions;
+- filter permissions by status;
+- filter permissions by session ID;
+- fetch permission detail by ID;
+- TUI pending permission status line;
+- `Ctrl-P` to refresh pending permissions;
+- `Up`/`Down` to select pending permission;
+- `Ctrl-A` to approve selected permission;
+- `Ctrl-D` to deny selected permission.
 
-### 9. TUI
+### 10. TUI
 
 - ratatui shell;
 - workspace/session/status panels;
-- provider status text;
-- render function covered by unit test.
+- daemon auto-start;
+- daemon connection status display;
+- provider list loaded from daemon config;
+- provider health display;
+- `Ctrl-R` provider health refresh;
+- prompt input and `Enter` submit;
+- selected provider switching with `Tab`;
+- latest session loading with `Ctrl-L`;
+- new session reset with `Ctrl-N`;
+- current session cancel with `Ctrl-X`;
+- activity status line;
+- provider status line;
+- route status line;
+- permission status line;
+- handoff status line;
+- workspace diff display after prompt/handoff;
+- recent session event display;
+- recent route history display;
+- compact keyboard help line.
 
 ## Test Coverage
 
+Current full test count: 72.
+
+Implemented test coverage includes:
+
 - core ID and event construction;
 - ACP JSON-RPC request construction;
-- config defaults and TOML parsing;
+- config defaults, TOML parsing, initialization and validation;
+- CLI action planning and output formatting;
 - storage event append/count/session lookup;
 - storage workspace/project/session persistence;
-- workspace inspection for non-git directories;
-- adapter provider priority and ACP transport metadata;
-- daemon workspace/session/prompt/events flow;
-- daemon handoff creation;
+- storage route decision and permission lookup;
+- workspace inspection for plain directories;
+- workspace inspection for clean and dirty git repositories;
+- provider priority and ACP transport metadata;
+- provider validation behavior;
 - Gemini/Codex command construction;
 - stream-json/JSONL parser behavior;
-- daemon prompt flow with fake executor;
-- TUI dashboard rendering.
+- command timeout behavior;
+- daemon workspace/session/prompt/events flow;
+- daemon prompt failure error chain;
+- daemon provider ordering and provider health ordering;
+- daemon handoff creation and accept flow;
+- daemon permission listing/filtering/detail lookup;
+- TUI dashboard rendering;
+- TUI prompt input rendering;
+- TUI provider, route, permission and handoff status formatting;
+- TUI latest session state loading;
+- TUI new session reset behavior;
+- TUI session cancel state updates;
+- TUI handoff preview and accept guard behavior;
+- TUI permission selection and resolution display;
+- TUI workspace diff and route history display.
 
-## Out Of MVP
+Last measured coverage snapshot:
+
+```text
+TOTAL line coverage:     77.02%
+TOTAL function coverage: 70.17%
+TOTAL region coverage:   73.20%
+```
+
+Note: the coverage snapshot was measured before the latest small TUI/API additions. Re-run `cargo llvm-cov --workspace --summary-only` for the current exact number.
+
+## Remaining MVP TODO
+
+These are still in scope for a more usable MVP.
+
+### 1. TUI Usability
+
+- Add a scrollback model for the session transcript instead of only keeping the last 30 lines;
+- add explicit visual selection for provider, permission and handoff states;
+- add a session list view instead of only `Ctrl-L` latest-session loading;
+- add a handoff preview detail view with more than the first few markdown lines;
+- add clearer command result/test result sections;
+- add better error presentation for provider authentication failures and timeouts.
+
+### 2. Daemon And API
+
+- Add structured `GET /sessions/:id/handoffs` list endpoint;
+- add structured `GET /sessions/:id/permissions` convenience endpoint or document query usage;
+- add session status transitions for completed/failed prompt runs;
+- add explicit canceled-state behavior for future prompt requests;
+- add pagination or limit parameters for events, sessions and permissions;
+- add API-level status codes instead of returning every error as HTTP 200 JSON.
+
+### 3. Routing
+
+- Add sticky routing window;
+- include provider health in route selection;
+- include explicit user-selected provider override reason;
+- add task-type hints for route decisions;
+- add first quota/rate-limit inference from provider errors;
+- add configurable routing policy thresholds.
+
+### 4. Adapter Runtime
+
+- Validate real Codex CLI execution end to end with authentication, timeout and JSON parsing;
+- validate real Gemini CLI execution end to end with authentication, timeout and stream-json parsing;
+- preserve provider-native session/resume IDs when available;
+- expose adapter stderr and provider errors in a more structured form;
+- add Copilot/OpenCode ACP proof-of-life beyond metadata.
+
+### 5. Persistence And Recovery
+
+- Add migration version tracking for SQLite schema;
+- add query tables or indexes for higher-volume event lookup;
+- persist transcript/handoff artifacts as files when useful;
+- add crash recovery semantics for in-flight agent runs;
+- add checkpoint references for before-handoff policy.
+
+### 6. Documentation
+
+- Write a quickstart for running `baize tui` with local data directory;
+- document required provider CLI setup for Codex and Gemini;
+- document current keyboard shortcuts;
+- document local API examples with curl;
+- document test and coverage commands.
+
+## Post-MVP / Out Of MVP
 
 - ACP session lifecycle implementation beyond message primitives;
-- quota extraction from providers;
+- exact quota extraction from providers where APIs allow it;
 - multi-workspace TUI switching;
-- desktop app;
+- desktop app shell;
 - final relational schema hardening;
-- hunk attribution.
+- hunk attribution;
+- full command permission sandbox;
+- multi-agent concurrent execution;
+- cloud sync or team collaboration.
