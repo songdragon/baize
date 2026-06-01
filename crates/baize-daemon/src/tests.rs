@@ -1330,6 +1330,89 @@ async fn second_session_in_workspace_reuses_provider_when_healthy() {
     }
 }
 
+#[tokio::test]
+async fn sticky_routing_can_be_disabled_by_config() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let mut config = BaizeConfig::default();
+    config.providers.order = vec!["codex".to_string()];
+    config.routing.sticky_window_minutes = 0;
+    let state = AppState::with_executor(
+        config,
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                events: vec![],
+                stderr: String::new(),
+            },
+        }),
+    );
+    let app = router(state);
+
+    let workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path(), "name": "test-workspace" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+
+    let first_session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "first session",
+                    "provider_id": "gemini"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(first_session["session"]["active_provider_id"], "gemini");
+
+    let second_session = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "second session"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(second_session["session"]["active_provider_id"], "codex");
+    let reason = second_session["route_decision"]["reason"]
+        .as_str()
+        .expect("reason");
+    assert!(
+        !reason.contains("Sticky routing"),
+        "sticky routing should be disabled, got: {reason}"
+    );
+}
+
 #[test]
 fn select_provider_without_workspace_uses_health_priority() {
     let data_dir = tempfile::tempdir().expect("data dir");

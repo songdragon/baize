@@ -10,8 +10,6 @@ use serde::Serialize;
 
 use crate::state::AppState;
 
-const STICKY_WINDOW_MINUTES: i64 = 30;
-
 pub struct RoutingResult {
     pub provider_id: baize_core::ProviderId,
     pub previous_provider_id: Option<baize_core::ProviderId>,
@@ -212,6 +210,11 @@ fn try_sticky_provider(
     state: &AppState,
     workspace_id: &baize_core::WorkspaceId,
 ) -> Option<RoutingResult> {
+    let sticky_window_minutes = i64::from(state.config.routing.sticky_window_minutes);
+    if sticky_window_minutes == 0 {
+        return None;
+    }
+
     let latest = with_store(state, |store| {
         store.get_latest_session_for_workspace(workspace_id)
     })
@@ -220,7 +223,7 @@ fn try_sticky_provider(
     let elapsed = Utc::now()
         .signed_duration_since(latest.created_at)
         .num_minutes();
-    if elapsed > STICKY_WINDOW_MINUTES {
+    if elapsed > sticky_window_minutes {
         return None;
     }
     if !is_provider_healthy(state, &active.0) {
@@ -230,8 +233,8 @@ fn try_sticky_provider(
         provider_id: active.clone(),
         previous_provider_id: Some(active.clone()),
         reason: format!(
-            "Sticky routing: reusing {} from recent session ({} min ago).",
-            active.0, elapsed
+            "Sticky routing: reusing {} from recent session ({} min ago, window {} min).",
+            active.0, elapsed, sticky_window_minutes
         ),
         confidence: 0.85,
     })

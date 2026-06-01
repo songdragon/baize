@@ -12,6 +12,8 @@ const CHECKPOINT_POLICIES: &[&str] = &["before_handoff", "off"];
 pub struct BaizeConfig {
     pub daemon: DaemonConfig,
     pub workspace: WorkspaceConfig,
+    #[serde(default)]
+    pub routing: RoutingConfig,
     pub providers: ProviderConfig,
 }
 
@@ -32,6 +34,16 @@ pub struct ProviderConfig {
     pub order: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(default = "default_sticky_window_minutes")]
+    pub sticky_window_minutes: u16,
+    #[serde(default = "default_quota_switch_threshold_percent")]
+    pub quota_switch_threshold_percent: u8,
+    #[serde(default = "default_failure_threshold_count")]
+    pub failure_threshold_count: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigValidation {
     pub valid: bool,
@@ -50,6 +62,7 @@ impl Default for BaizeConfig {
                 command_policy: "ask".to_string(),
                 checkpoint_policy: "before_handoff".to_string(),
             },
+            routing: RoutingConfig::default(),
             providers: ProviderConfig {
                 order: vec![
                     "codex".to_string(),
@@ -60,6 +73,28 @@ impl Default for BaizeConfig {
             },
         }
     }
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            sticky_window_minutes: default_sticky_window_minutes(),
+            quota_switch_threshold_percent: default_quota_switch_threshold_percent(),
+            failure_threshold_count: default_failure_threshold_count(),
+        }
+    }
+}
+
+fn default_sticky_window_minutes() -> u16 {
+    30
+}
+
+fn default_quota_switch_threshold_percent() -> u8 {
+    10
+}
+
+fn default_failure_threshold_count() -> u8 {
+    3
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -129,6 +164,15 @@ pub fn validate_config(config: &BaizeConfig) -> ConfigValidation {
     if config.providers.order.is_empty() {
         errors.push("providers.order must not be empty".to_string());
     }
+    if config.routing.sticky_window_minutes > 1440 {
+        errors.push("routing.sticky_window_minutes must be <= 1440".to_string());
+    }
+    if config.routing.quota_switch_threshold_percent > 100 {
+        errors.push("routing.quota_switch_threshold_percent must be <= 100".to_string());
+    }
+    if config.routing.failure_threshold_count == 0 {
+        errors.push("routing.failure_threshold_count must be greater than 0".to_string());
+    }
 
     let mut seen = HashSet::new();
     for provider in &config.providers.order {
@@ -164,6 +208,9 @@ mod tests {
         assert_eq!(config.providers.order[0], "codex");
         assert_eq!(config.providers.order[1], "gemini");
         assert_eq!(config.workspace.command_policy, "ask");
+        assert_eq!(config.routing.sticky_window_minutes, 30);
+        assert_eq!(config.routing.quota_switch_threshold_percent, 10);
+        assert_eq!(config.routing.failure_threshold_count, 3);
     }
 
     #[test]
@@ -178,6 +225,11 @@ mod tests {
             command_policy = "allow_project"
             checkpoint_policy = "off"
 
+            [routing]
+            sticky_window_minutes = 45
+            quota_switch_threshold_percent = 15
+            failure_threshold_count = 2
+
             [providers]
             order = ["gemini", "codex"]
             "#,
@@ -187,7 +239,33 @@ mod tests {
         assert_eq!(config.daemon.host, "0.0.0.0");
         assert_eq!(config.daemon.port, 9000);
         assert_eq!(config.workspace.command_policy, "allow_project");
+        assert_eq!(config.routing.sticky_window_minutes, 45);
+        assert_eq!(config.routing.quota_switch_threshold_percent, 15);
+        assert_eq!(config.routing.failure_threshold_count, 2);
         assert_eq!(config.providers.order, vec!["gemini", "codex"]);
+    }
+
+    #[test]
+    fn parses_legacy_config_without_routing_section() {
+        let config = parse_config(
+            r#"
+            [daemon]
+            host = "127.0.0.1"
+            port = 7878
+
+            [workspace]
+            command_policy = "ask"
+            checkpoint_policy = "before_handoff"
+
+            [providers]
+            order = ["codex", "gemini"]
+            "#,
+        )
+        .expect("legacy config should parse");
+
+        assert_eq!(config.routing.sticky_window_minutes, 30);
+        assert_eq!(config.routing.quota_switch_threshold_percent, 10);
+        assert_eq!(config.routing.failure_threshold_count, 3);
     }
 
     #[test]
@@ -198,6 +276,7 @@ mod tests {
         assert_eq!(config.daemon.host, "127.0.0.1");
         assert_eq!(config.providers.order[0], "codex");
         assert!(raw.contains("[providers]"));
+        assert!(raw.contains("[routing]"));
     }
 
     #[test]
@@ -237,6 +316,9 @@ mod tests {
         config.daemon.host = " ".to_string();
         config.workspace.command_policy = "always".to_string();
         config.workspace.checkpoint_policy = "sometimes".to_string();
+        config.routing.sticky_window_minutes = 1441;
+        config.routing.quota_switch_threshold_percent = 101;
+        config.routing.failure_threshold_count = 0;
         config.providers.order = vec![
             "codex".to_string(),
             "codex".to_string(),
@@ -258,5 +340,17 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("unknown provider: unknown")));
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("sticky_window_minutes")));
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("quota_switch_threshold_percent")));
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("failure_threshold_count")));
     }
 }

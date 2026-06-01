@@ -69,6 +69,7 @@ The MVP target is a single-workspace local agent supervisor:
 - default TOML config model;
 - config loading with default fallback;
 - config validation;
+- configurable routing policy thresholds;
 - `baize config path`;
 - `baize config show`;
 - `baize config init --force`;
@@ -120,6 +121,7 @@ The MVP target is a single-workspace local agent supervisor:
 - route decision persistence;
 - route decision event emission;
 - task-type hints on route decisions;
+- configurable sticky routing window;
 - route history API;
 - TUI display of recent route history.
 
@@ -199,6 +201,7 @@ Implemented test coverage includes:
 - daemon prompt failure error chain;
 - daemon provider ordering and provider health ordering;
 - daemon task-type inference for route decisions;
+- daemon configurable sticky routing policy;
 - daemon handoff creation and accept flow;
 - daemon permission listing/filtering/detail lookup;
 - daemon session status transitions (Running, Failed, Canceled, recovery);
@@ -252,7 +255,7 @@ These are still in scope for a more usable MVP.
 - ~~include explicit user-selected provider override reason~~ (done);
 - ~~add task-type hints for route decisions~~ (done);
 - ~~add first quota/rate-limit inference from provider errors~~ (done);
-- add configurable routing policy thresholds.
+- ~~add configurable routing policy thresholds~~ (done).
 
 ### 4. Adapter Runtime
 
