@@ -227,7 +227,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(9),
+            Constraint::Length(10),
         ])
         .split(frame.area());
 
@@ -243,12 +243,13 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{}\nStatus: {}\nProviders: {}\nRoute: {}\nPerms: {}\nHelp: {}\n> {}",
+            "{}\nStatus: {}\nProviders: {}\nRoute: {}\nPerms: {}\nHandoff: {}\nHelp: {}\n> {}",
             state.daemon_status,
             state.activity_status,
             state.provider_status(),
             state.route_status(),
             state.permission_status(),
+            state.handoff_status(),
             state.help_text(),
             state.input
         ))
@@ -1054,6 +1055,16 @@ impl TuiState {
         )
     }
 
+    fn handoff_status(&self) -> String {
+        match (&self.pending_handoff_id, &self.pending_handoff_session_id) {
+            (Some(handoff_id), Some(session_id)) => {
+                format!("{handoff_id} on {session_id}; Ctrl-Y accepts")
+            }
+            (Some(handoff_id), None) => format!("{handoff_id}; Ctrl-Y accepts"),
+            _ => "none pending".to_string(),
+        }
+    }
+
     fn help_text(&self) -> &'static str {
         "Ent|Tab|Up/Dn|^N new|^L load|^H hand|^Y yes|^A ok|^D no|^X stop"
     }
@@ -1177,7 +1188,7 @@ mod tests {
 
     #[test]
     fn renders_mvp_dashboard_text() {
-        let backend = TestBackend::new(80, 17);
+        let backend = TestBackend::new(80, 18);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState::default();
 
@@ -1190,6 +1201,7 @@ mod tests {
         assert!(rendered.contains("Status: idle"));
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
         assert!(rendered.contains("Perms: none pending"));
+        assert!(rendered.contains("Handoff: none pending"));
         assert!(rendered
             .contains("Help: Ent|Tab|Up/Dn|^N new|^L load|^H hand|^Y yes|^A ok|^D no|^X stop"));
     }
@@ -1214,7 +1226,7 @@ mod tests {
 
     #[test]
     fn renders_prompt_input() {
-        let backend = TestBackend::new(80, 18);
+        let backend = TestBackend::new(80, 19);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
             input: "hello baize".to_string(),
@@ -1300,6 +1312,20 @@ mod tests {
             .contains("handoff preview: handoff_1 codex -> gemini"));
         assert!(state.session.contains("Objective: continue task"));
         assert!(state.session.contains("press Ctrl-Y to accept handoff"));
+    }
+
+    #[test]
+    fn handoff_status_shows_pending_handoff() {
+        let state = TuiState {
+            pending_handoff_id: Some("handoff_1".to_string()),
+            pending_handoff_session_id: Some("task_1".to_string()),
+            ..TuiState::default()
+        };
+
+        assert_eq!(
+            state.handoff_status(),
+            "handoff_1 on task_1; Ctrl-Y accepts"
+        );
     }
 
     #[test]
@@ -1727,7 +1753,7 @@ mod tests {
 
     #[test]
     fn status_line_reflects_activity() {
-        let backend = TestBackend::new(80, 17);
+        let backend = TestBackend::new(80, 18);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
             activity_status: "running codex".to_string(),
