@@ -1041,13 +1041,9 @@ impl TuiState {
                 let health = health_status_for(&self.provider_health, provider)
                     .map(short_health_status)
                     .unwrap_or("?");
-                let label = format!("{provider}:{health}");
-                match (provider == selected, active) {
-                    (true, true) => format!("[{label}*]"),
-                    (true, false) => format!("[{label}]"),
-                    (false, true) => format!("{label}*"),
-                    (false, false) => label,
-                }
+                let selected_marker = if provider == selected { ">" } else { " " };
+                let active_marker = if active { "*" } else { "" };
+                format!("{selected_marker}{provider}:{health}{active_marker}")
             })
             .collect::<Vec<_>>()
             .join(", ")
@@ -1080,7 +1076,7 @@ impl TuiState {
             .map(|session_id| format!(" {session_id}"))
             .unwrap_or_default();
         format!(
-            "[{}/{}] {}{}",
+            "> [{}/{}] {}{}",
             self.selected_permission_index + 1,
             self.pending_permissions.len(),
             short_text(&permission.command, 36),
@@ -1091,9 +1087,9 @@ impl TuiState {
     fn handoff_status(&self) -> String {
         match (&self.pending_handoff_id, &self.pending_handoff_session_id) {
             (Some(handoff_id), Some(session_id)) => {
-                format!("{handoff_id} on {session_id}; Ctrl-Y accepts")
+                format!("> {handoff_id} on {session_id}; Ctrl-Y accepts")
             }
-            (Some(handoff_id), None) => format!("{handoff_id}; Ctrl-Y accepts"),
+            (Some(handoff_id), None) => format!("> {handoff_id}; Ctrl-Y accepts"),
             _ => "none pending".to_string(),
         }
     }
@@ -1250,7 +1246,7 @@ mod tests {
         assert!(rendered.contains("Baize MVP TUI"));
         assert!(rendered.contains("daemon: not checked"));
         assert!(rendered.contains("Status: idle"));
-        assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
+        assert!(rendered.contains("Providers: >codex:?,  gemini:?,  copilot:?,  opencode:?"));
         assert!(rendered.contains("Perms: none pending"));
         assert!(rendered.contains("Handoff: none pending"));
         assert!(rendered
@@ -1381,7 +1377,7 @@ mod tests {
 
         assert_eq!(
             state.handoff_status(),
-            "handoff_1 on task_1; Ctrl-Y accepts"
+            "> handoff_1 on task_1; Ctrl-Y accepts"
         );
     }
 
@@ -1691,7 +1687,7 @@ mod tests {
 
         assert_eq!(
             state.permission_status(),
-            "[1/1] cargo test --all-features task_1"
+            "> [1/1] cargo test --all-features task_1"
         );
     }
 
@@ -1794,8 +1790,34 @@ mod tests {
             ..TuiState::default()
         };
 
-        assert!(state.provider_status().contains("[codex:ok]"));
+        assert!(state.provider_status().contains(">codex:ok"));
         assert!(state.provider_status().contains("gemini:down"));
+    }
+
+    #[test]
+    fn provider_status_marks_selected_and_active_providers() {
+        let state = TuiState {
+            selected_provider_index: 1,
+            active_provider: Some("codex".to_string()),
+            provider_health: vec![
+                ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "gemini".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+            ],
+            ..TuiState::default()
+        };
+
+        let status = state.provider_status();
+
+        assert!(status.contains(" codex:ok*"));
+        assert!(status.contains(">gemini:ok"));
     }
 
     #[test]
