@@ -26,7 +26,7 @@ pub fn inspect(path: impl AsRef<Path>) -> Result<WorkspaceStatus> {
     let porcelain = git_output(&root, &["status", "--porcelain"]).unwrap_or_default();
     let changed_files = porcelain
         .lines()
-        .filter_map(|line| line.get(3..).map(str::trim))
+        .filter_map(porcelain_path)
         .filter(|line| !line.is_empty())
         .map(ToString::to_string)
         .collect::<Vec<_>>();
@@ -58,9 +58,14 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn porcelain_path(line: &str) -> Option<&str> {
+    line.get(2..).map(str::trim).filter(|path| !path.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn inspect_plain_directory_without_git() {
@@ -75,5 +80,67 @@ mod tests {
         assert!(status.branch.is_none());
         assert!(!status.dirty);
         assert!(status.changed_files.is_empty());
+    }
+
+    #[test]
+    fn inspect_clean_git_repository() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        run_git(temp.path(), &["init", "-b", "main"]);
+
+        let status = inspect(temp.path()).expect("inspect should work");
+
+        assert_eq!(
+            status.root,
+            temp.path().canonicalize().expect("canonical path")
+        );
+        assert_eq!(
+            status.git_root,
+            Some(temp.path().canonicalize().expect("canonical path"))
+        );
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert!(!status.dirty);
+        assert!(status.changed_files.is_empty());
+    }
+
+    #[test]
+    fn inspect_git_repository_with_changed_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        run_git(temp.path(), &["init", "-b", "main"]);
+        fs::write(temp.path().join("tracked.txt"), "before\n").expect("write tracked file");
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+
+        fs::write(temp.path().join("tracked.txt"), "after\n").expect("modify tracked file");
+        fs::write(temp.path().join("new.txt"), "new\n").expect("write new file");
+
+        let status = inspect(temp.path()).expect("inspect should work");
+
+        assert!(status.dirty);
+        assert_eq!(status.changed_files, vec!["tracked.txt", "new.txt"]);
+    }
+
+    #[test]
+    fn parses_porcelain_paths_without_dropping_first_character() {
+        assert_eq!(porcelain_path(" M tracked.txt"), Some("tracked.txt"));
+        assert_eq!(porcelain_path("M  staged.txt"), Some("staged.txt"));
+        assert_eq!(porcelain_path("?? new.txt"), Some("new.txt"));
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "Baize Test")
+            .env("GIT_AUTHOR_EMAIL", "baize@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Baize Test")
+            .env("GIT_COMMITTER_EMAIL", "baize@example.invalid")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
