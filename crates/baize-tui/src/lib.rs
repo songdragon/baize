@@ -25,7 +25,8 @@ const DAEMON_START_POLL_MS: u64 = 100;
 #[derive(Debug, Clone)]
 pub struct TuiState {
     pub workspace: String,
-    pub session: String,
+    pub transcript: Vec<String>,
+    pub scroll_offset: u16,
     pub daemon_status: String,
     pub activity_status: String,
     pub providers: Vec<String>,
@@ -62,8 +63,13 @@ impl Default for TuiState {
     fn default() -> Self {
         Self {
             workspace: "Baize MVP TUI".to_string(),
-            session: "Type a prompt and press Enter.\nEsc or Ctrl-C quits.\n\nBaize starts the local daemon automatically when possible."
-                .to_string(),
+            transcript: vec![
+                "Type a prompt and press Enter.".to_string(),
+                "Esc or Ctrl-C quits.".to_string(),
+                String::new(),
+                "Baize starts the local daemon automatically when possible.".to_string(),
+            ],
+            scroll_offset: 0,
             daemon_status: "daemon: not checked".to_string(),
             activity_status: "idle".to_string(),
             providers: vec![
@@ -201,6 +207,10 @@ fn run_app(
                     }
                     KeyCode::Down => state.select_next_permission(),
                     KeyCode::Up => state.select_previous_permission(),
+                    KeyCode::PageUp => state.scroll_up(10),
+                    KeyCode::PageDown => state.scroll_down(10),
+                    KeyCode::Home => state.scroll_to_top(),
+                    KeyCode::End => state.scroll_to_bottom(),
                     KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
@@ -236,9 +246,32 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
             .block(Block::default().title("Workspace").borders(Borders::ALL)),
         chunks[0],
     );
+
+    let session_text = state.transcript_text();
+    let line_count = state.transcript.len() as u16;
+    let visible_height = chunks[1].height.saturating_sub(2);
+    let is_scrolled = state.scroll_offset > 0;
+    let max_scroll = line_count.saturating_sub(visible_height);
+    let effective_scroll = if state.scroll_offset > max_scroll {
+        max_scroll
+    } else {
+        state.scroll_offset
+    };
+    let title = if is_scrolled {
+        let current_top = line_count.saturating_sub(effective_scroll + visible_height) + 1;
+        format!(
+            "Session ({}-{}/{})",
+            current_top,
+            current_top + visible_height.saturating_sub(1),
+            line_count
+        )
+    } else {
+        "Session".to_string()
+    };
     frame.render_widget(
-        Paragraph::new(state.session.as_str())
-            .block(Block::default().title("Session").borders(Borders::ALL)),
+        Paragraph::new(session_text)
+            .scroll((effective_scroll, 0))
+            .block(Block::default().title(title).borders(Borders::ALL)),
         chunks[1],
     );
     frame.render_widget(
@@ -1070,14 +1103,32 @@ impl TuiState {
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
-        let mut lines = self
-            .session
-            .lines()
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        lines.push(message.into());
-        let keep_from = lines.len().saturating_sub(30);
-        self.session = lines.split_off(keep_from).join("\n");
+        self.transcript.push(message.into());
+        self.scroll_offset = 0;
+    }
+
+    fn scroll_up(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+        let max_scroll = self.transcript.len().saturating_sub(1) as u16;
+        if self.scroll_offset > max_scroll {
+            self.scroll_offset = max_scroll;
+        }
+    }
+
+    fn scroll_down(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.scroll_offset = self.transcript.len().saturating_sub(1) as u16;
+    }
+
+    fn transcript_text(&self) -> String {
+        self.transcript.join("\n")
     }
 }
 
@@ -1285,8 +1336,12 @@ mod tests {
         append_handoff_response(&mut state, &response);
 
         assert_eq!(state.active_provider.as_deref(), Some("gemini"));
-        assert!(state.session.contains("handoff Accepted: codex -> gemini"));
-        assert!(state.session.contains("Accepted handoff handoff_1"));
+        assert!(state
+            .transcript_text()
+            .contains("handoff Accepted: codex -> gemini"));
+        assert!(state
+            .transcript_text()
+            .contains("Accepted handoff handoff_1"));
     }
 
     #[test]
@@ -1308,10 +1363,12 @@ mod tests {
         assert_eq!(state.pending_handoff_id.as_deref(), Some("handoff_1"));
         assert_eq!(state.pending_handoff_session_id.as_deref(), Some("task_1"));
         assert!(state
-            .session
+            .transcript_text()
             .contains("handoff preview: handoff_1 codex -> gemini"));
-        assert!(state.session.contains("Objective: continue task"));
-        assert!(state.session.contains("press Ctrl-Y to accept handoff"));
+        assert!(state.transcript_text().contains("Objective: continue task"));
+        assert!(state
+            .transcript_text()
+            .contains("press Ctrl-Y to accept handoff"));
     }
 
     #[test]
@@ -1335,7 +1392,7 @@ mod tests {
         accept_pending_handoff(&mut state).expect("accept");
 
         assert!(state
-            .session
+            .transcript_text()
             .contains("create a handoff preview before accepting"));
     }
 
@@ -1374,8 +1431,10 @@ mod tests {
         assert_eq!(state.active_provider.as_deref(), Some("gemini"));
         assert!(state.pending_handoff_id.is_none());
         assert!(state.pending_handoff_session_id.is_none());
-        assert!(state.session.contains("loaded session: task_1"));
-        assert!(state.session.contains("objective: continue this task"));
+        assert!(state.transcript_text().contains("loaded session: task_1"));
+        assert!(state
+            .transcript_text()
+            .contains("objective: continue this task"));
     }
 
     #[test]
@@ -1402,7 +1461,7 @@ mod tests {
         assert!(state.pending_handoff_session_id.is_none());
         assert!(state.input.is_empty());
         assert_eq!(state.activity_status, "idle");
-        assert!(state.session.contains("new session"));
+        assert!(state.transcript_text().contains("new session"));
     }
 
     #[test]
@@ -1412,7 +1471,9 @@ mod tests {
         cancel_current_session(&mut state).expect("cancel");
 
         assert!(state.session_id.is_none());
-        assert!(state.session.contains("start a session before canceling"));
+        assert!(state
+            .transcript_text()
+            .contains("start a session before canceling"));
     }
 
     #[test]
@@ -1436,7 +1497,7 @@ mod tests {
         assert_eq!(state.session_id.as_deref(), Some("task_1"));
         assert_eq!(state.active_provider.as_deref(), Some("gemini"));
         assert!(state.route_reason.is_none());
-        assert!(state.session.contains("session task_1: Canceled"));
+        assert!(state.transcript_text().contains("session task_1: Canceled"));
     }
 
     #[test]
@@ -1459,9 +1520,13 @@ mod tests {
 
         append_route_history(&mut state, &response);
 
-        assert!(state.session.contains("routes:"));
-        assert!(state.session.contains("none -> codex: Selected codex."));
-        assert!(state.session.contains("codex -> gemini: Accepted handoff."));
+        assert!(state.transcript_text().contains("routes:"));
+        assert!(state
+            .transcript_text()
+            .contains("none -> codex: Selected codex."));
+        assert!(state
+            .transcript_text()
+            .contains("codex -> gemini: Accepted handoff."));
     }
 
     #[test]
@@ -1476,7 +1541,7 @@ mod tests {
 
         append_session_diff(&mut state, &response);
 
-        assert!(state.session.contains("workspace clean"));
+        assert!(state.transcript_text().contains("workspace clean"));
     }
 
     #[test]
@@ -1499,7 +1564,7 @@ mod tests {
         append_session_diff(&mut state, &response);
 
         assert!(state
-            .session
+            .transcript_text()
             .contains("workspace dirty: a.rs, b.rs, c.rs, d.rs, e.rs (+1 more)"));
     }
 
@@ -1707,7 +1772,7 @@ mod tests {
         append_permission_resolution(&mut state, &response);
 
         assert!(state
-            .session
+            .transcript_text()
             .contains("permission Approved: perm_1 - cargo test"));
     }
 
@@ -1765,5 +1830,113 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("Status: running codex"));
+    }
+
+    #[test]
+    fn push_message_appends_to_transcript() {
+        let mut state = TuiState::default();
+        let initial_len = state.transcript.len();
+        state.push_message("hello");
+        assert_eq!(state.transcript.len(), initial_len + 1);
+        assert_eq!(state.transcript.last().unwrap(), "hello");
+        state.push_message("world");
+        assert_eq!(state.transcript.len(), initial_len + 2);
+    }
+
+    #[test]
+    fn transcript_never_truncates() {
+        let mut state = TuiState::default();
+        let initial_len = state.transcript.len();
+        for i in 0..100 {
+            state.push_message(format!("line {i}"));
+        }
+        assert_eq!(state.transcript.len(), initial_len + 100);
+        assert_eq!(state.transcript[initial_len], "line 0");
+        assert_eq!(state.transcript[initial_len + 99], "line 99");
+    }
+
+    #[test]
+    fn push_message_resets_scroll_offset() {
+        let mut state = TuiState::default();
+        state.scroll_offset = 50;
+        state.push_message("new message");
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_up_increments_offset() {
+        let mut state = TuiState::default();
+        for i in 0..50 {
+            state.push_message(format!("line {i}"));
+        }
+        assert_eq!(state.scroll_offset, 0);
+        state.scroll_up(10);
+        assert_eq!(state.scroll_offset, 10);
+        state.scroll_up(10);
+        assert_eq!(state.scroll_offset, 20);
+    }
+
+    #[test]
+    fn scroll_down_decrements_offset() {
+        let mut state = TuiState::default();
+        for i in 0..50 {
+            state.push_message(format!("line {i}"));
+        }
+        state.scroll_offset = 20;
+        state.scroll_down(10);
+        assert_eq!(state.scroll_offset, 10);
+    }
+
+    #[test]
+    fn scroll_offset_clamped_to_transcript_length() {
+        let mut state = TuiState::default();
+        state.push_message("only one line");
+        state.scroll_up(100);
+        assert_eq!(state.scroll_offset, 4);
+    }
+
+    #[test]
+    fn scroll_to_bottom_resets_offset() {
+        let mut state = TuiState::default();
+        for i in 0..50 {
+            state.push_message(format!("line {i}"));
+        }
+        state.scroll_offset = 30;
+        state.scroll_to_bottom();
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_to_top_sets_max_offset() {
+        let mut state = TuiState::default();
+        for i in 0..50 {
+            state.push_message(format!("line {i}"));
+        }
+        state.scroll_to_top();
+        assert_eq!(state.scroll_offset, 53);
+    }
+
+    #[test]
+    fn renders_scrolled_session_title() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = TuiState::default();
+        for i in 0..50 {
+            state.push_message(format!("line {i}"));
+        }
+        state.scroll_offset = 10;
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("Session ("));
+    }
+
+    #[test]
+    fn transcript_text_joins_with_newlines() {
+        let mut state = TuiState::default();
+        state.transcript = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(state.transcript_text(), "a\nb\nc");
     }
 }

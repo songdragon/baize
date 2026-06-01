@@ -227,7 +227,7 @@ These are still in scope for a more usable MVP.
 
 ### 1. TUI Usability
 
-- Add a scrollback model for the session transcript instead of only keeping the last 30 lines;
+- ~~Add a scrollback model for the session transcript instead of only keeping the last 30 lines;~~ (done)
 - add explicit visual selection for provider, permission and handoff states;
 - add a session list view instead of only `Ctrl-L` latest-session loading;
 - add a handoff preview detail view with more than the first few markdown lines;
