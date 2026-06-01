@@ -38,6 +38,8 @@ pub struct TuiState {
     pub input: String,
     pub workspace_id: Option<String>,
     pub session_id: Option<String>,
+    pub pending_handoff_id: Option<String>,
+    pub pending_handoff_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +81,8 @@ impl Default for TuiState {
             input: String::new(),
             workspace_id: None,
             session_id: None,
+            pending_handoff_id: None,
+            pending_handoff_session_id: None,
         }
     }
 }
@@ -147,6 +151,12 @@ fn run_app(
                         if let Err(error) = request_handoff(&mut state) {
                             state.activity_status = "failed".to_string();
                             state.push_message(format!("handoff error: {error:#}"));
+                        }
+                    }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = accept_pending_handoff(&mut state) {
+                            state.activity_status = "failed".to_string();
+                            state.push_message(format!("handoff accept error: {error:#}"));
                         }
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -488,6 +498,8 @@ fn start_new_session(state: &mut TuiState) {
     state.session_id = None;
     state.active_provider = None;
     state.route_reason = None;
+    state.pending_handoff_id = None;
+    state.pending_handoff_session_id = None;
     state.input.clear();
     state.activity_status = "idle".to_string();
     state.push_message("new session: next prompt will create a fresh task");
@@ -526,6 +538,8 @@ fn append_cancel_response(state: &mut TuiState, response: &Value) {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     state.route_reason = None;
+    state.pending_handoff_id = None;
+    state.pending_handoff_session_id = None;
     state.push_message(format!("session {id}: {status}"));
 }
 
@@ -555,6 +569,8 @@ fn apply_loaded_session(state: &mut TuiState, session: &Value) -> Result<()> {
     state.workspace_id = Some(workspace_id.to_string());
     state.active_provider = Some(provider.to_string());
     state.route_reason = None;
+    state.pending_handoff_id = None;
+    state.pending_handoff_session_id = None;
     state.workspace = format!("Workspace: loaded\n{workspace_id}");
     state.push_message(format!("loaded session: {id} ({provider})"));
     state.push_message(format!("objective: {}", one_line(objective)));
@@ -586,15 +602,61 @@ fn request_handoff(state: &mut TuiState) -> Result<()> {
         .and_then(Value::as_str)
         .ok_or_else(|| response_error("handoff.id", &handoff))?
         .to_string();
+    append_handoff_preview(state, &handoff);
+    state.pending_handoff_id = Some(handoff_id);
+    state.pending_handoff_session_id = Some(session_id);
+    state.activity_status = "idle".to_string();
+    Ok(())
+}
+
+fn accept_pending_handoff(state: &mut TuiState) -> Result<()> {
+    let (Some(session_id), Some(handoff_id)) = (
+        state.pending_handoff_session_id.clone(),
+        state.pending_handoff_id.clone(),
+    ) else {
+        state.push_message("create a handoff preview before accepting");
+        return Ok(());
+    };
+
+    state.activity_status = "accepting handoff".to_string();
     let accepted = post_json(
         &format!("/sessions/{session_id}/handoff/{handoff_id}/accept"),
         json!({}),
     )?;
     append_handoff_response(state, &accepted);
+    state.pending_handoff_id = None;
+    state.pending_handoff_session_id = None;
     refresh_route_history(state)?;
     refresh_session_diff(state)?;
     state.activity_status = "idle".to_string();
     Ok(())
+}
+
+fn append_handoff_preview(state: &mut TuiState, response: &Value) {
+    let handoff = response.get("handoff").unwrap_or(&Value::Null);
+    let id = handoff.get("id").and_then(handoff_id).unwrap_or("unknown");
+    let from_provider = handoff
+        .get("from_provider_id")
+        .and_then(provider_id)
+        .unwrap_or("unknown");
+    let to_provider = handoff
+        .get("to_provider_id")
+        .and_then(provider_id)
+        .unwrap_or("unknown");
+    state.push_message(format!(
+        "handoff preview: {id} {from_provider} -> {to_provider}"
+    ));
+    if let Some(summary) = handoff.get("summary_markdown").and_then(Value::as_str) {
+        for line in summary
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(4)
+        {
+            state.push_message(format!("  {}", one_line(line)));
+        }
+    }
+    state.push_message("press Ctrl-Y to accept handoff");
 }
 
 fn append_handoff_response(state: &mut TuiState, response: &Value) {
@@ -993,7 +1055,7 @@ impl TuiState {
     }
 
     fn help_text(&self) -> &'static str {
-        "Ent|Tab|Up/Dn|^N new|^L load|^H hand|^P pull|^A ok|^D no|^X stop"
+        "Ent|Tab|Up/Dn|^N new|^L load|^H hand|^Y yes|^A ok|^D no|^X stop"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -1076,6 +1138,12 @@ fn permission_id(value: &Value) -> Option<&str> {
         .or_else(|| value.as_object()?.get("0")?.as_str())
 }
 
+fn handoff_id(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.as_object()?.get("0")?.as_str())
+}
+
 fn task_session_id(value: &Value) -> Option<&str> {
     value
         .as_str()
@@ -1123,7 +1191,7 @@ mod tests {
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
         assert!(rendered.contains("Perms: none pending"));
         assert!(rendered
-            .contains("Help: Ent|Tab|Up/Dn|^N new|^L load|^H hand|^P pull|^A ok|^D no|^X stop"));
+            .contains("Help: Ent|Tab|Up/Dn|^N new|^L load|^H hand|^Y yes|^A ok|^D no|^X stop"));
     }
 
     #[test]
@@ -1210,6 +1278,42 @@ mod tests {
     }
 
     #[test]
+    fn appends_handoff_preview_and_records_pending_handoff() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "handoff": {
+                "id": "handoff_1",
+                "from_provider_id": "codex",
+                "to_provider_id": "gemini",
+                "summary_markdown": "# Handoff\n\nObjective: continue task\n\nChanged files: none\n"
+            }
+        });
+
+        append_handoff_preview(&mut state, &response);
+        state.pending_handoff_id = Some("handoff_1".to_string());
+        state.pending_handoff_session_id = Some("task_1".to_string());
+
+        assert_eq!(state.pending_handoff_id.as_deref(), Some("handoff_1"));
+        assert_eq!(state.pending_handoff_session_id.as_deref(), Some("task_1"));
+        assert!(state
+            .session
+            .contains("handoff preview: handoff_1 codex -> gemini"));
+        assert!(state.session.contains("Objective: continue task"));
+        assert!(state.session.contains("press Ctrl-Y to accept handoff"));
+    }
+
+    #[test]
+    fn accept_pending_handoff_without_preview_is_noop_message() {
+        let mut state = TuiState::default();
+
+        accept_pending_handoff(&mut state).expect("accept");
+
+        assert!(state
+            .session
+            .contains("create a handoff preview before accepting"));
+    }
+
+    #[test]
     fn selects_latest_session_from_response() {
         let response = json!({
             "sessions": [
@@ -1225,7 +1329,11 @@ mod tests {
 
     #[test]
     fn applies_loaded_session_state() {
-        let mut state = TuiState::default();
+        let mut state = TuiState {
+            pending_handoff_id: Some("handoff_1".to_string()),
+            pending_handoff_session_id: Some("task_old".to_string()),
+            ..TuiState::default()
+        };
         let session = json!({
             "id": "task_1",
             "workspace_id": "ws_1",
@@ -1238,6 +1346,8 @@ mod tests {
         assert_eq!(state.session_id.as_deref(), Some("task_1"));
         assert_eq!(state.workspace_id.as_deref(), Some("ws_1"));
         assert_eq!(state.active_provider.as_deref(), Some("gemini"));
+        assert!(state.pending_handoff_id.is_none());
+        assert!(state.pending_handoff_session_id.is_none());
         assert!(state.session.contains("loaded session: task_1"));
         assert!(state.session.contains("objective: continue this task"));
     }
@@ -1249,6 +1359,8 @@ mod tests {
             workspace_id: Some("ws_1".to_string()),
             active_provider: Some("codex".to_string()),
             route_reason: Some("old route".to_string()),
+            pending_handoff_id: Some("handoff_1".to_string()),
+            pending_handoff_session_id: Some("task_1".to_string()),
             input: "draft prompt".to_string(),
             activity_status: "running codex".to_string(),
             ..TuiState::default()
@@ -1260,6 +1372,8 @@ mod tests {
         assert!(state.session_id.is_none());
         assert!(state.active_provider.is_none());
         assert!(state.route_reason.is_none());
+        assert!(state.pending_handoff_id.is_none());
+        assert!(state.pending_handoff_session_id.is_none());
         assert!(state.input.is_empty());
         assert_eq!(state.activity_status, "idle");
         assert!(state.session.contains("new session"));
