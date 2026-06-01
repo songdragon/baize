@@ -1005,3 +1005,128 @@ async fn session_permissions_lists_permissions_for_session() {
     assert_eq!(perms[0]["command"], "cargo test");
     assert_eq!(perms[1]["command"], "cargo fmt");
 }
+
+#[test]
+fn select_provider_returns_requested_override() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                events: vec![],
+                stderr: String::new(),
+            },
+        }),
+    );
+    let selected = crate::helpers::select_provider(&state, Some("gemini".to_string()));
+    assert_eq!(selected.0, "gemini");
+}
+
+#[test]
+fn is_provider_healthy_returns_false_for_unknown_provider() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                events: vec![],
+                stderr: String::new(),
+            },
+        }),
+    );
+    assert!(!crate::helpers::is_provider_healthy(
+        &state,
+        "nonexistent_provider"
+    ));
+}
+
+async fn create_test_workspace(app: &Router) -> serde_json::Value {
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let response = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path(), "name": "test-workspace" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    response
+}
+
+#[tokio::test]
+async fn create_session_route_decision_reflects_health_fallback() {
+    let (app, _data_dir, _project_dir) = test_app();
+
+    let workspace = create_test_workspace(&app).await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+
+    let session_response = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "test objective"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    let session_provider = session_response["session"]["active_provider_id"]
+        .as_str()
+        .expect("provider id");
+
+    let config = BaizeConfig::default();
+    let first_choice = config
+        .providers
+        .order
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("codex");
+
+    if session_provider == first_choice {
+        let reason = session_response["route_decision"]["reason"]
+            .as_str()
+            .expect("reason");
+        assert!(
+            reason.contains("configured provider priority"),
+            "expected priority reason, got: {reason}"
+        );
+    } else {
+        let reason = session_response["route_decision"]["reason"]
+            .as_str()
+            .expect("reason");
+        assert!(
+            reason.contains("unhealthy"),
+            "expected health fallback reason, got: {reason}"
+        );
+    }
+
+    let confidence = session_response["route_decision"]["confidence"]
+        .as_f64()
+        .expect("confidence");
+    if session_provider == first_choice {
+        assert_eq!(confidence, 0.75);
+    } else {
+        assert_eq!(confidence, 0.6);
+    }
+}

@@ -246,7 +246,7 @@ These are still in scope for a more usable MVP.
 ### 3. Routing
 
 - Add sticky routing window;
-- include provider health in route selection;
+- ~~include provider health in route selection~~ (done);
 - include explicit user-selected provider override reason;
 - add task-type hints for route decisions;
 - add first quota/rate-limit inference from provider errors;

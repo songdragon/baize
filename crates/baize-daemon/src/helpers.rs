@@ -77,19 +77,31 @@ pub fn select_provider(state: &AppState, requested: Option<String>) -> baize_cor
         return baize_core::ProviderId(requested);
     }
     let providers = default_provider_profiles();
-    state
-        .config
-        .providers
-        .order
-        .iter()
-        .find(|id| {
-            providers
-                .iter()
-                .any(|provider| provider.id.0 == **id && provider.enabled)
-        })
-        .cloned()
-        .map(baize_core::ProviderId)
+    let ordered_ids: Vec<&String> = state.config.providers.order.iter().collect();
+    for id in &ordered_ids {
+        let Some(provider) = providers.iter().find(|p| p.id.0 == **id && p.enabled) else {
+            continue;
+        };
+        if is_provider_healthy(state, &provider.id.0) {
+            return baize_core::ProviderId((*id).clone());
+        }
+    }
+    ordered_ids
+        .first()
+        .map(|id| baize_core::ProviderId((*id).clone()))
         .unwrap_or_else(|| baize_core::ProviderId("codex".to_string()))
+}
+
+pub fn is_provider_healthy(_state: &AppState, provider_id: &str) -> bool {
+    let providers = default_provider_profiles();
+    let Some(provider) = providers.iter().find(|p| p.id.0 == provider_id) else {
+        return false;
+    };
+    let health = baize_adapters::check_provider(provider);
+    matches!(
+        health.status,
+        baize_core::HealthStatus::Healthy | baize_core::HealthStatus::Unknown
+    )
 }
 
 pub fn ordered_provider_profiles(config: &BaizeConfig) -> Vec<baize_core::ProviderProfile> {

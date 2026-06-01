@@ -78,16 +78,26 @@ pub async fn create_session(
         created_at: now,
         updated_at: now,
     };
+    let first_choice_id = state.config.providers.order.first().cloned();
+    let is_health_fallback = first_choice_id.as_deref() != Some(&selected_provider_id.0);
+    let reason = if is_health_fallback {
+        format!(
+            "Selected {} (higher-priority providers unhealthy).",
+            selected_provider_id.0
+        )
+    } else {
+        format!(
+            "Selected {} from configured provider priority.",
+            selected_provider_id.0
+        )
+    };
     let decision = RouteDecision {
         id: RouteDecisionId::new(),
         session_id: session.id.clone(),
         selected_provider_id: selected_provider_id.clone(),
         previous_provider_id: None,
-        reason: format!(
-            "Selected {} from configured provider priority.",
-            selected_provider_id.0
-        ),
-        confidence: 0.75,
+        reason,
+        confidence: if is_health_fallback { 0.6 } else { 0.75 },
         mode: RoutingMode::Assisted,
         created_at: now,
     };
