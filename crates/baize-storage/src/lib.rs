@@ -150,11 +150,18 @@ impl EventStore {
         Ok(version)
     }
 
-    pub fn list_events_for_session(&self, session_id: &TaskSessionId) -> Result<Vec<BaizeEvent>> {
-        let mut stmt = self
-            .conn
-            .prepare("select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where session_id = ?1 order by timestamp")?;
-        let rows = stmt.query_map(params![&session_id.0], |row| {
+    pub fn list_events_for_session(
+        &self,
+        session_id: &TaskSessionId,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<BaizeEvent>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where session_id = ?1 order by timestamp limit ?2 offset ?3",
+        )?;
+        let rows = stmt.query_map(params![&session_id.0, limit, offset], |row| {
             let timestamp: String = row.get(2)?;
             let payload: String = row.get(6)?;
             Ok(BaizeEvent {
@@ -240,8 +247,12 @@ impl EventStore {
         Ok(())
     }
 
-    pub fn list_task_sessions(&self) -> Result<Vec<TaskSession>> {
-        self.list_json("task_sessions")
+    pub fn list_task_sessions(
+        &self,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<TaskSession>> {
+        self.list_json_paginated("task_sessions", limit, offset)
     }
 
     pub fn get_task_session(&self, id: &TaskSessionId) -> Result<Option<TaskSession>> {
@@ -334,18 +345,28 @@ impl EventStore {
         self.get_json("permissions", &id.0)
     }
 
-    pub fn list_permissions(&self) -> Result<Vec<PermissionRequest>> {
-        self.list_json("permissions")
+    pub fn list_permissions(
+        &self,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<PermissionRequest>> {
+        self.list_json_paginated("permissions", limit, offset)
     }
 
     pub fn list_permissions_for_session(
         &self,
         session_id: &TaskSessionId,
+        limit: Option<u64>,
+        offset: Option<u64>,
     ) -> Result<Vec<PermissionRequest>> {
-        let mut stmt = self
-            .conn
-            .prepare("select json from permissions where session_id = ?1 order by rowid")?;
-        let rows = stmt.query_map(params![&session_id.0], |row| row.get::<_, String>(0))?;
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select json from permissions where session_id = ?1 order by rowid limit ?2 offset ?3",
+        )?;
+        let rows = stmt.query_map(params![&session_id.0, limit, offset], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut permissions = Vec::new();
         for row in rows {
             permissions.push(serde_json::from_str(&row?)?);
@@ -377,6 +398,24 @@ impl EventStore {
         let sql = format!("select json from {table} order by rowid");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut values = Vec::new();
+        for row in rows {
+            values.push(serde_json::from_str(&row?)?);
+        }
+        Ok(values)
+    }
+
+    fn list_json_paginated<T: DeserializeOwned>(
+        &self,
+        table: &str,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<T>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let sql = format!("select json from {table} order by rowid limit ?1 offset ?2");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit, offset], |row| row.get::<_, String>(0))?;
         let mut values = Vec::new();
         for row in rows {
             values.push(serde_json::from_str(&row?)?);
@@ -430,7 +469,7 @@ mod tests {
 
         store.append_event(&event).expect("append should work");
         let events = store
-            .list_events_for_session(&session_id)
+            .list_events_for_session(&session_id, None, None)
             .expect("events should load");
 
         assert_eq!(events.len(), 1);
@@ -518,7 +557,7 @@ mod tests {
         store.upsert_permission(&first).expect("first permission");
         store.upsert_permission(&second).expect("second permission");
 
-        let permissions = store.list_permissions().expect("permissions");
+        let permissions = store.list_permissions(None, None).expect("permissions");
 
         assert_eq!(permissions.len(), 2);
         assert_eq!(permissions[0].command, "cargo test");
@@ -618,7 +657,7 @@ mod tests {
         store.upsert_permission(&other).expect("other permission");
 
         let permissions = store
-            .list_permissions_for_session(&session_id)
+            .list_permissions_for_session(&session_id, None, None)
             .expect("permissions");
 
         assert_eq!(permissions.len(), 2);
@@ -727,9 +766,43 @@ mod tests {
         store.upsert_permission(&permission).expect("upsert");
 
         let by_session = store
-            .list_permissions_for_session(&session_id)
+            .list_permissions_for_session(&session_id, None, None)
             .expect("list by session");
         assert_eq!(by_session.len(), 1);
         assert_eq!(by_session[0].command, "ls");
+    }
+
+    #[test]
+    fn pagination_limits_and_offsets_results() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let session_id = TaskSessionId::new();
+        for i in 0..5 {
+            let mut event = BaizeEvent::new("test.event", json!({ "i": i }));
+            event.session_id = Some(session_id.clone());
+            store.append_event(&event).expect("append");
+        }
+
+        let all = store
+            .list_events_for_session(&session_id, None, None)
+            .expect("all");
+        assert_eq!(all.len(), 5);
+
+        let limited = store
+            .list_events_for_session(&session_id, Some(2), None)
+            .expect("limited");
+        assert_eq!(limited.len(), 2);
+
+        let offset = store
+            .list_events_for_session(&session_id, None, Some(3))
+            .expect("offset");
+        assert_eq!(offset.len(), 2);
+
+        let page = store
+            .list_events_for_session(&session_id, Some(2), Some(2))
+            .expect("page");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].payload["i"], 2);
+        assert_eq!(page[1].payload["i"], 3);
     }
 }

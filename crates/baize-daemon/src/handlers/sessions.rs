@@ -11,10 +11,15 @@ use crate::helpers::{
     bad_request, format_error_chain, internal_error, json_result, json_result_option, ok_json,
     select_provider, with_store,
 };
-use crate::state::{AppState, CreateSessionRequest, PromptRequest};
+use crate::state::{AppState, CreateSessionRequest, PaginationQuery, PromptRequest};
 
-pub async fn sessions(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let sessions = with_store(&state, |store| store.list_task_sessions());
+pub async fn sessions(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<PaginationQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let sessions = with_store(&state, |store| {
+        store.list_task_sessions(query.limit, query.offset)
+    });
     json_result("sessions", sessions)
 }
 
@@ -49,9 +54,10 @@ pub async fn session_handoffs(
 pub async fn session_permissions(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<PaginationQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let permissions = with_store(&state, |store| {
-        store.list_permissions_for_session(&TaskSessionId(id))
+        store.list_permissions_for_session(&TaskSessionId(id), query.limit, query.offset)
     });
     json_result("permissions", permissions)
 }
@@ -312,9 +318,10 @@ pub async fn cancel_session(
 pub async fn session_events(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<PaginationQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let events = with_store(&state, |store| {
-        store.list_events_for_session(&TaskSessionId(id))
+        store.list_events_for_session(&TaskSessionId(id), query.limit, query.offset)
     });
     json_result("events", events)
 }

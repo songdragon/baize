@@ -14,7 +14,9 @@ pub async fn permissions(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<PermissionsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let permissions = match with_store(&state, |store| store.list_permissions()) {
+    let permissions = match with_store(&state, |store| {
+        store.list_permissions(query.limit, query.offset)
+    }) {
         Ok(permissions) => permissions,
         Err(error) => return internal_error(error.to_string()),
     };

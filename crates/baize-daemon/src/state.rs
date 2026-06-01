@@ -73,6 +73,14 @@ pub struct CreatePermissionRequest {
 pub struct PermissionsQuery {
     pub status: Option<String>,
     pub session_id: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaginationQuery {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 pub async fn run(config: BaizeConfig) -> Result<()> {

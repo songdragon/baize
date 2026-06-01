@@ -176,7 +176,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 89.
+Current full test count: 90.
 
 Implemented test coverage includes:
 
@@ -240,7 +240,7 @@ These are still in scope for a more usable MVP.
 - ~~add structured `GET /sessions/:id/permissions` convenience endpoint or document query usage~~ (done);
 - ~~add session status transitions for completed/failed prompt runs~~ (done);
 - ~~add explicit canceled-state behavior for future prompt requests~~ (done);
-- add pagination or limit parameters for events, sessions and permissions;
+- ~~add pagination or limit parameters for events, sessions and permissions~~ (done);
 - ~~add API-level status codes instead of returning every error as HTTP 200 JSON~~ (done);
 
 ### 3. Routing
