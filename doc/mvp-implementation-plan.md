@@ -177,6 +177,7 @@ The MVP target is a single-workspace local agent supervisor:
 - workspace diff display after prompt/handoff;
 - recent session event display;
 - recent route history display;
+- recent session list display;
 - compact keyboard help line.
 
 ## Test Coverage
@@ -214,6 +215,7 @@ Implemented test coverage includes:
 - TUI selected provider, permission and handoff markers;
 - TUI provider error hints for authentication, timeout and inferred quota/rate limits;
 - TUI latest session state loading;
+- TUI recent session list parsing and display;
 - TUI new session reset behavior;
 - TUI session cancel state updates;
 - TUI handoff preview and accept guard behavior;
@@ -238,7 +240,7 @@ These are still in scope for a more usable MVP.
 
 - ~~Add a scrollback model for the session transcript instead of only keeping the last 30 lines;~~ (done)
 - ~~add explicit visual selection for provider, permission and handoff states~~ (done);
-- add a session list view instead of only `Ctrl-L` latest-session loading;
+- ~~add a session list view instead of only `Ctrl-L` latest-session loading~~ (done);
 - add a handoff preview detail view with more than the first few markdown lines;
 - add clearer command result/test result sections;
 - ~~add better error presentation for provider authentication failures and timeouts~~ (done).

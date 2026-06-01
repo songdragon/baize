@@ -31,6 +31,8 @@ pub struct TuiState {
     pub activity_status: String,
     pub providers: Vec<String>,
     pub provider_health: Vec<ProviderHealthView>,
+    pub recent_sessions: Vec<SessionView>,
+    pub selected_session_index: usize,
     pub pending_permissions: Vec<PermissionView>,
     pub selected_permission_index: usize,
     pub selected_provider_index: usize,
@@ -59,6 +61,15 @@ pub struct PermissionView {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionView {
+    pub id: String,
+    pub workspace_id: String,
+    pub objective: String,
+    pub active_provider_id: Option<String>,
+    pub status: String,
+}
+
 impl Default for TuiState {
     fn default() -> Self {
         Self {
@@ -79,6 +90,8 @@ impl Default for TuiState {
                 "opencode".to_string(),
             ],
             provider_health: Vec::new(),
+            recent_sessions: Vec::new(),
+            selected_session_index: 0,
             pending_permissions: Vec::new(),
             selected_permission_index: 0,
             selected_provider_index: 0,
@@ -237,7 +250,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(10),
+            Constraint::Length(11),
         ])
         .split(frame.area());
 
@@ -276,11 +289,12 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{}\nStatus: {}\nProviders: {}\nRoute: {}\nPerms: {}\nHandoff: {}\nHelp: {}\n> {}",
+            "{}\nStatus: {}\nProviders: {}\nRoute: {}\nSessions: {}\nPerms: {}\nHandoff: {}\nHelp: {}\n> {}",
             state.daemon_status,
             state.activity_status,
             state.provider_status(),
             state.route_status(),
+            state.session_status(),
             state.permission_status(),
             state.handoff_status(),
             state.help_text(),
@@ -515,6 +529,9 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
 fn load_latest_session(state: &mut TuiState) -> Result<()> {
     state.activity_status = "loading latest session".to_string();
     let response = get_json("/sessions")?;
+    let sessions = parse_session_views(&response)?;
+    state.set_recent_sessions(sessions);
+    append_session_list(state);
     let Some(session) = latest_session(&response) else {
         state.push_message("no existing sessions");
         state.activity_status = "idle".to_string();
@@ -581,6 +598,39 @@ fn latest_session(response: &Value) -> Option<&Value> {
     response.get("sessions")?.as_array()?.last()
 }
 
+fn parse_session_views(response: &Value) -> Result<Vec<SessionView>> {
+    let sessions = response
+        .get("sessions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| response_error("sessions", response))?;
+
+    Ok(sessions
+        .iter()
+        .filter_map(|session| {
+            let id = session.get("id").and_then(task_session_id)?;
+            let workspace_id = session.get("workspace_id").and_then(workspace_id)?;
+            let objective = session
+                .get("objective")
+                .and_then(Value::as_str)
+                .unwrap_or("session");
+            let status = session
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown");
+            Some(SessionView {
+                id: id.to_string(),
+                workspace_id: workspace_id.to_string(),
+                objective: objective.to_string(),
+                active_provider_id: session
+                    .get("active_provider_id")
+                    .and_then(provider_id)
+                    .map(ToOwned::to_owned),
+                status: status.to_string(),
+            })
+        })
+        .collect())
+}
+
 fn apply_loaded_session(state: &mut TuiState, session: &Value) -> Result<()> {
     let id = session
         .get("id")
@@ -606,9 +656,41 @@ fn apply_loaded_session(state: &mut TuiState, session: &Value) -> Result<()> {
     state.pending_handoff_id = None;
     state.pending_handoff_session_id = None;
     state.workspace = format!("Workspace: loaded\n{workspace_id}");
+    state.select_recent_session(id);
     state.push_message(format!("loaded session: {id} ({provider})"));
     state.push_message(format!("objective: {}", one_line(objective)));
     Ok(())
+}
+
+fn append_session_list(state: &mut TuiState) {
+    if state.recent_sessions.is_empty() {
+        return;
+    }
+
+    state.push_message("sessions:".to_string());
+    let start = state.recent_sessions.len().saturating_sub(5);
+    let visible_sessions = state
+        .recent_sessions
+        .iter()
+        .cloned()
+        .enumerate()
+        .skip(start)
+        .collect::<Vec<_>>();
+    for (index, session) in visible_sessions {
+        let selected = if index == state.selected_session_index {
+            ">"
+        } else {
+            " "
+        };
+        let provider = session.active_provider_id.as_deref().unwrap_or("none");
+        state.push_message(format!(
+            "  {selected} {} {} {} - {}",
+            session.id,
+            session.status,
+            provider,
+            short_text(&session.objective, 40)
+        ));
+    }
 }
 
 fn request_handoff(state: &mut TuiState) -> Result<()> {
@@ -1035,6 +1117,25 @@ impl TuiState {
         }
     }
 
+    fn set_recent_sessions(&mut self, sessions: Vec<SessionView>) {
+        self.recent_sessions = sessions;
+        if self.recent_sessions.is_empty() {
+            self.selected_session_index = 0;
+        } else {
+            self.selected_session_index = self.recent_sessions.len() - 1;
+        }
+    }
+
+    fn select_recent_session(&mut self, session_id: &str) {
+        if let Some(index) = self
+            .recent_sessions
+            .iter()
+            .position(|session| session.id == session_id)
+        {
+            self.selected_session_index = index;
+        }
+    }
+
     fn provider_status(&self) -> String {
         let selected = self.selected_provider();
         self.providers
@@ -1067,6 +1168,31 @@ impl TuiState {
                 self.selected_provider()
             ),
         }
+    }
+
+    fn session_status(&self) -> String {
+        if let Some(session) = self.recent_sessions.get(self.selected_session_index) {
+            let current_marker = if self.session_id.as_deref() == Some(session.id.as_str()) {
+                "*"
+            } else {
+                ""
+            };
+            let provider = session.active_provider_id.as_deref().unwrap_or("none");
+            return format!(
+                "> [{}/{}] {}{} {} {}",
+                self.selected_session_index + 1,
+                self.recent_sessions.len(),
+                session.id,
+                current_marker,
+                session.status,
+                provider
+            );
+        }
+
+        self.session_id
+            .as_ref()
+            .map(|id| format!("current {id}"))
+            .unwrap_or_else(|| "none loaded".to_string())
     }
 
     fn permission_status(&self) -> String {
@@ -1217,6 +1343,12 @@ fn task_session_id(value: &Value) -> Option<&str> {
         .or_else(|| value.as_object()?.get("0")?.as_str())
 }
 
+fn workspace_id(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.as_object()?.get("0")?.as_str())
+}
+
 fn workspace_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -1329,6 +1461,7 @@ mod tests {
         assert!(rendered.contains("daemon: not checked"));
         assert!(rendered.contains("Status: idle"));
         assert!(rendered.contains("Providers: >codex:?,  gemini:?,  copilot:?,  opencode:?"));
+        assert!(rendered.contains("Sessions: none loaded"));
         assert!(rendered.contains("Perms: none pending"));
         assert!(rendered.contains("Handoff: none pending"));
         assert!(rendered
@@ -1531,6 +1664,59 @@ mod tests {
         assert!(state
             .transcript_text()
             .contains("objective: continue this task"));
+    }
+
+    #[test]
+    fn set_recent_sessions_selects_latest_and_status_marks_current() {
+        let mut state = TuiState::default();
+        state.set_recent_sessions(vec![
+            SessionView {
+                id: "task_1".to_string(),
+                workspace_id: "ws_1".to_string(),
+                objective: "write docs".to_string(),
+                active_provider_id: Some("codex".to_string()),
+                status: "Running".to_string(),
+            },
+            SessionView {
+                id: "task_2".to_string(),
+                workspace_id: "ws_1".to_string(),
+                objective: "debug tests".to_string(),
+                active_provider_id: Some("gemini".to_string()),
+                status: "Failed".to_string(),
+            },
+        ]);
+        state.session_id = Some("task_2".to_string());
+
+        assert_eq!(state.selected_session_index, 1);
+        assert_eq!(state.session_status(), "> [2/2] task_2* Failed gemini");
+    }
+
+    #[test]
+    fn appends_recent_session_list_with_selected_marker() {
+        let mut state = TuiState::default();
+        state.set_recent_sessions(vec![
+            SessionView {
+                id: "task_1".to_string(),
+                workspace_id: "ws_1".to_string(),
+                objective: "write docs".to_string(),
+                active_provider_id: Some("codex".to_string()),
+                status: "Running".to_string(),
+            },
+            SessionView {
+                id: "task_2".to_string(),
+                workspace_id: "ws_1".to_string(),
+                objective: "debug a very long failing provider session".to_string(),
+                active_provider_id: Some("gemini".to_string()),
+                status: "Failed".to_string(),
+            },
+        ]);
+
+        append_session_list(&mut state);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("sessions:"));
+        assert!(transcript.contains("    task_1 Running codex - write docs"));
+        assert!(transcript.contains("  > task_2 Failed gemini - debug a very long failing provider se..."));
     }
 
     #[test]
@@ -1741,6 +1927,38 @@ mod tests {
         let providers = parse_provider_ids(&response).expect("providers");
 
         assert_eq!(providers, vec!["gemini", "codex"]);
+    }
+
+    #[test]
+    fn parses_session_views_from_daemon_response() {
+        let response = json!({
+            "sessions": [
+                {
+                    "id": "task_1",
+                    "workspace_id": "ws_1",
+                    "objective": "write docs",
+                    "active_provider_id": "codex",
+                    "status": "Running"
+                },
+                {
+                    "id": { "0": "task_2" },
+                    "workspace_id": { "0": "ws_2" },
+                    "objective": "debug tests",
+                    "active_provider_id": { "0": "gemini" },
+                    "status": "Failed"
+                }
+            ]
+        });
+
+        let sessions = parse_session_views(&response).expect("sessions");
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, "task_1");
+        assert_eq!(sessions[0].workspace_id, "ws_1");
+        assert_eq!(sessions[0].active_provider_id.as_deref(), Some("codex"));
+        assert_eq!(sessions[1].id, "task_2");
+        assert_eq!(sessions[1].workspace_id, "ws_2");
+        assert_eq!(sessions[1].active_provider_id.as_deref(), Some("gemini"));
     }
 
     #[test]
