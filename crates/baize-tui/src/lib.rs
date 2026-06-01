@@ -183,6 +183,12 @@ fn run_app(
                     KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         start_new_session(&mut state);
                     }
+                    KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = cancel_current_session(&mut state) {
+                            state.activity_status = "failed".to_string();
+                            state.push_message(format!("cancel error: {error:#}"));
+                        }
+                    }
                     KeyCode::Down => state.select_next_permission(),
                     KeyCode::Up => state.select_previous_permission(),
                     KeyCode::Tab => state.cycle_provider(),
@@ -485,6 +491,42 @@ fn start_new_session(state: &mut TuiState) {
     state.input.clear();
     state.activity_status = "idle".to_string();
     state.push_message("new session: next prompt will create a fresh task");
+}
+
+fn cancel_current_session(state: &mut TuiState) -> Result<()> {
+    let Some(session_id) = state.session_id.clone() else {
+        state.push_message("start a session before canceling");
+        return Ok(());
+    };
+
+    state.activity_status = "canceling session".to_string();
+    let response = post_json(&format!("/sessions/{session_id}/cancel"), json!({}))?;
+    append_cancel_response(state, &response);
+    state.activity_status = "idle".to_string();
+    Ok(())
+}
+
+fn append_cancel_response(state: &mut TuiState, response: &Value) {
+    let session = response.get("session").unwrap_or(&Value::Null);
+    let id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let status = session
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    state.session_id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    state.active_provider = session
+        .get("active_provider_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    state.route_reason = None;
+    state.push_message(format!("session {id}: {status}"));
 }
 
 fn latest_session(response: &Value) -> Option<&Value> {
@@ -951,7 +993,7 @@ impl TuiState {
     }
 
     fn help_text(&self) -> &'static str {
-        "Enter|Tab|Up/Dn perm|^N new|^L load|^H hand|^P pull|^A ok|^D no"
+        "Ent|Tab|Up/Dn|^N new|^L load|^H hand|^P pull|^A ok|^D no|^X stop"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -1081,7 +1123,7 @@ mod tests {
         assert!(rendered.contains("Providers: [codex:?], gemini:?, copilot:?, opencode:?"));
         assert!(rendered.contains("Perms: none pending"));
         assert!(rendered
-            .contains("Help: Enter|Tab|Up/Dn perm|^N new|^L load|^H hand|^P pull|^A ok|^D no"));
+            .contains("Help: Ent|Tab|Up/Dn|^N new|^L load|^H hand|^P pull|^A ok|^D no|^X stop"));
     }
 
     #[test]
@@ -1221,6 +1263,40 @@ mod tests {
         assert!(state.input.is_empty());
         assert_eq!(state.activity_status, "idle");
         assert!(state.session.contains("new session"));
+    }
+
+    #[test]
+    fn cancel_current_session_without_session_is_noop_message() {
+        let mut state = TuiState::default();
+
+        cancel_current_session(&mut state).expect("cancel");
+
+        assert!(state.session_id.is_none());
+        assert!(state.session.contains("start a session before canceling"));
+    }
+
+    #[test]
+    fn appends_cancel_response_and_updates_session_state() {
+        let mut state = TuiState {
+            session_id: Some("task_1".to_string()),
+            active_provider: Some("codex".to_string()),
+            route_reason: Some("old route".to_string()),
+            ..TuiState::default()
+        };
+        let response = json!({
+            "session": {
+                "id": "task_1",
+                "status": "Canceled",
+                "active_provider_id": "gemini"
+            }
+        });
+
+        append_cancel_response(&mut state, &response);
+
+        assert_eq!(state.session_id.as_deref(), Some("task_1"));
+        assert_eq!(state.active_provider.as_deref(), Some("gemini"));
+        assert!(state.route_reason.is_none());
+        assert!(state.session.contains("session task_1: Canceled"));
     }
 
     #[test]
