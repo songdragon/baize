@@ -27,6 +27,17 @@ enum Command {
     Validate {
         provider: Option<String>,
     },
+    Smoke {
+        provider: String,
+        #[arg(long)]
+        run_prompt: bool,
+        #[arg(long, default_value = "Return exactly: baize-smoke")]
+        prompt: String,
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[arg(long, default_value = ".")]
+        path: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -72,6 +83,15 @@ fn plan_cli_action(command: Option<Command>) -> Result<CliAction> {
         Command::Doctor => doctor_output().map(CliAction::Print),
         Command::Providers => providers_output().map(CliAction::Print),
         Command::Validate { provider } => validate_output(provider).map(CliAction::Print),
+        Command::Smoke {
+            provider,
+            run_prompt,
+            prompt,
+            timeout_seconds,
+            path,
+        } => {
+            smoke_output(provider, run_prompt, prompt, timeout_seconds, path).map(CliAction::Print)
+        }
     }
 }
 
@@ -109,6 +129,29 @@ fn validate_output(provider: Option<String>) -> Result<String> {
         let validations = baize_adapters::validate_all_providers();
         Ok(format!("{}\n", serde_json::to_string_pretty(&validations)?))
     }
+}
+
+fn smoke_output(
+    provider: String,
+    run_prompt: bool,
+    prompt: String,
+    timeout_seconds: u64,
+    path: String,
+) -> Result<String> {
+    let providers = baize_adapters::default_provider_profiles();
+    let Some(profile) = providers.iter().find(|profile| profile.id.0 == provider) else {
+        anyhow::bail!("unknown provider: {provider}");
+    };
+    let report = baize_adapters::smoke_provider(
+        profile,
+        baize_adapters::ProviderSmokeOptions {
+            cwd: path.into(),
+            run_prompt,
+            prompt,
+            timeout_seconds: Some(timeout_seconds),
+        },
+    )?;
+    Ok(format!("{}\n", serde_json::to_string_pretty(&report)?))
 }
 
 fn handle_config(command: ConfigCommand) -> Result<String> {
@@ -183,6 +226,37 @@ mod tests {
         let error = validate_output(Some("missing".to_string())).expect_err("error");
 
         assert!(error.to_string().contains("unknown provider: missing"));
+    }
+
+    #[test]
+    fn smoke_unknown_provider_returns_error() {
+        let error = smoke_output(
+            "missing".to_string(),
+            false,
+            "baize smoke".to_string(),
+            5,
+            ".".to_string(),
+        )
+        .expect_err("error");
+
+        assert!(error.to_string().contains("unknown provider: missing"));
+    }
+
+    #[test]
+    fn smoke_output_skips_prompt_by_default() {
+        let output = smoke_output(
+            "codex".to_string(),
+            false,
+            "baize smoke".to_string(),
+            5,
+            ".".to_string(),
+        )
+        .expect("smoke output");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("json");
+
+        assert_eq!(value["provider_id"], "codex");
+        assert_eq!(value["prompt_skipped"], true);
+        assert_eq!(value["parser_native_session_id"], "smoke_codex_session");
     }
 
     #[test]

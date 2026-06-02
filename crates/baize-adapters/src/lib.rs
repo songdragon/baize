@@ -39,6 +39,26 @@ pub struct AcpProof {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSmokeOptions {
+    pub cwd: PathBuf,
+    pub run_prompt: bool,
+    pub prompt: String,
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSmokeReport {
+    pub provider_id: ProviderId,
+    pub version_detected: bool,
+    pub help_detected: bool,
+    pub prompt_command_args: Vec<String>,
+    pub parser_event_count: usize,
+    pub parser_native_session_id: Option<String>,
+    pub prompt_result: Option<AgentRunResult>,
+    pub prompt_skipped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPromptRequest {
     pub provider_id: ProviderId,
     pub prompt: String,
@@ -266,6 +286,59 @@ pub fn run_agent_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
         "codex" => run_codex_prompt(request),
         other => anyhow::bail!("provider execution is not implemented for {other}"),
     }
+}
+
+pub fn smoke_provider(
+    profile: &ProviderProfile,
+    options: ProviderSmokeOptions,
+) -> Result<ProviderSmokeReport> {
+    let provider_id = profile.id.clone();
+    let command = profile
+        .transports
+        .first()
+        .map(command_for_transport)
+        .filter(|command| !command.is_empty())
+        .context("provider has no executable transport")?;
+    let version_detected = command_text(command, &["--version"]).is_some();
+    let help_detected = command_text(command, &["--help"]).is_some();
+    let prompt_request = AgentPromptRequest {
+        provider_id: provider_id.clone(),
+        prompt: options.prompt,
+        cwd: options.cwd,
+        session_id: None,
+        timeout_seconds: options.timeout_seconds,
+    };
+    let prompt_command_args = match provider_id.0.as_str() {
+        "codex" => build_codex_args(&prompt_request),
+        "gemini" => build_gemini_args(&prompt_request),
+        other => anyhow::bail!("provider smoke is not implemented for {other}"),
+    };
+    let fixture = match provider_id.0.as_str() {
+        "codex" => {
+            r#"{"type":"message","session_id":"smoke_codex_session","message":{"content":[{"text":"baize-smoke"}]}}"#
+        }
+        "gemini" => {
+            r#"{"type":"message","conversationId":"smoke_gemini_session","message":{"content":[{"text":"baize-smoke"}]}}"#
+        }
+        _ => unreachable!("provider checked above"),
+    };
+    let parser_events = parse_stream_json_lines(fixture);
+    let parser_native_session_id = extract_native_session_id(fixture);
+    let prompt_result = if options.run_prompt {
+        Some(run_agent_prompt(prompt_request)?)
+    } else {
+        None
+    };
+    Ok(ProviderSmokeReport {
+        provider_id,
+        version_detected,
+        help_detected,
+        prompt_command_args,
+        parser_event_count: parser_events.len(),
+        parser_native_session_id,
+        prompt_skipped: prompt_result.is_none(),
+        prompt_result,
+    })
 }
 
 pub fn build_gemini_args(request: &AgentPromptRequest) -> Vec<String> {
@@ -825,6 +898,87 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--ask-for-approval", "never"]));
         assert_eq!(args.last().expect("prompt"), "hello");
+    }
+
+    #[test]
+    fn codex_smoke_skips_real_prompt_by_default() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "codex")
+            .expect("codex profile");
+
+        let report = smoke_provider(
+            &profile,
+            ProviderSmokeOptions {
+                cwd: PathBuf::from("."),
+                run_prompt: false,
+                prompt: "baize smoke".to_string(),
+                timeout_seconds: Some(5),
+            },
+        )
+        .expect("smoke report");
+
+        assert!(report.prompt_skipped);
+        assert!(report.prompt_result.is_none());
+        assert!(report.prompt_command_args.contains(&"--json".to_string()));
+        assert_eq!(
+            report.parser_native_session_id.as_deref(),
+            Some("smoke_codex_session")
+        );
+        assert_eq!(report.parser_event_count, 1);
+    }
+
+    #[test]
+    fn gemini_smoke_builds_stream_json_command_without_prompt_run() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "gemini")
+            .expect("gemini profile");
+
+        let report = smoke_provider(
+            &profile,
+            ProviderSmokeOptions {
+                cwd: PathBuf::from("."),
+                run_prompt: false,
+                prompt: "baize smoke".to_string(),
+                timeout_seconds: Some(5),
+            },
+        )
+        .expect("smoke report");
+
+        assert!(report.prompt_skipped);
+        assert!(report
+            .prompt_command_args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "stream-json"]));
+        assert_eq!(
+            report.parser_native_session_id.as_deref(),
+            Some("smoke_gemini_session")
+        );
+        assert_eq!(report.parser_event_count, 1);
+    }
+
+    #[test]
+    fn smoke_rejects_provider_without_prompt_adapter() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "opencode")
+            .expect("opencode profile");
+
+        let error = smoke_provider(
+            &profile,
+            ProviderSmokeOptions {
+                cwd: PathBuf::from("."),
+                run_prompt: false,
+                prompt: "baize smoke".to_string(),
+                timeout_seconds: Some(5),
+            },
+        )
+        .expect_err("unsupported smoke");
+
+        assert!(error
+            .to_string()
+            .contains("provider smoke is not implemented for opencode"));
     }
 
     #[test]

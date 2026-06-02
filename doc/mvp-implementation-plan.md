@@ -62,6 +62,7 @@ The MVP target is a single-workspace local agent supervisor:
 - daemon endpoints for provider validation;
 - Gemini `--prompt --output-format stream-json` execution path;
 - Codex `exec --json` execution path;
+- Codex/Gemini smoke validation command for auth, timeout and parser checks;
 - stream-json/JSONL parser behavior;
 - native provider session ID extraction from structured output;
 - structured provider error classification and daemon reporting;
@@ -81,6 +82,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `baize doctor`;
 - `baize providers`;
 - `baize validate [provider]`;
+- `baize smoke <provider>` with gated real-prompt execution;
 - refactored CLI command handling into testable output/action functions.
 
 ### 6. Documentation
@@ -198,7 +200,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 140.
+Current full test count: 145.
 
 Implemented test coverage includes:
 
@@ -206,6 +208,7 @@ Implemented test coverage includes:
 - ACP JSON-RPC request construction;
 - config defaults, TOML parsing, initialization and validation;
 - CLI action planning and output formatting;
+- CLI smoke command output formatting;
 - storage event append/count/session lookup;
 - storage workspace/project/session persistence;
 - storage query indexes for high-volume session/workspace lookups;
@@ -217,6 +220,7 @@ Implemented test coverage includes:
 - provider ACP initialize proof generation;
 - provider validation behavior;
 - Gemini/Codex command construction;
+- Gemini/Codex smoke validation without real prompt execution;
 - stream-json/JSONL parser behavior;
 - adapter native provider session ID extraction;
 - adapter provider error classification;
@@ -293,8 +297,8 @@ These are still in scope for a more usable MVP.
 
 ### 4. Adapter Runtime
 
-- Validate real Codex CLI execution end to end with authentication, timeout and JSON parsing;
-- validate real Gemini CLI execution end to end with authentication, timeout and stream-json parsing;
+- ~~Validate real Codex CLI execution end to end with authentication, timeout and JSON parsing~~ (done as `baize smoke codex`, with real prompt gated by `--run-prompt`);
+- ~~validate real Gemini CLI execution end to end with authentication, timeout and stream-json parsing~~ (done as `baize smoke gemini`, with real prompt gated by `--run-prompt`);
 - ~~preserve provider-native session/resume IDs when available~~ (done for structured output capture);
 - ~~expose adapter stderr and provider errors in a more structured form~~ (done);
 - ~~add Copilot/OpenCode ACP proof-of-life beyond metadata~~ (done with initialize proof generation).

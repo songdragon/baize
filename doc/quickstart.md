@@ -36,9 +36,20 @@ cargo run -p baize-cli -- providers
 cargo run -p baize-cli -- validate
 cargo run -p baize-cli -- validate codex
 cargo run -p baize-cli -- validate gemini
+cargo run -p baize-cli -- smoke codex
+cargo run -p baize-cli -- smoke gemini
 ```
 
 If a provider is not authenticated, Baize will report provider stderr and a structured provider error where possible.
+
+The smoke commands check provider discovery, command construction and structured-output parser behavior without sending a real prompt. To explicitly run a real provider prompt, add `--run-prompt`:
+
+```sh
+cargo run -p baize-cli -- smoke codex --run-prompt --timeout-seconds 30
+cargo run -p baize-cli -- smoke gemini --run-prompt --timeout-seconds 30
+```
+
+Only use `--run-prompt` when the provider CLI is installed, authenticated and you are ready to spend provider quota.
 
 ## TUI Keys
 
