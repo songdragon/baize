@@ -140,8 +140,10 @@ fn run_app(
     health_load: Result<Vec<ProviderHealthView>>,
     permission_load: Result<Vec<PermissionView>>,
 ) -> Result<()> {
-    let mut state = TuiState::default();
-    state.daemon_status = daemon_status;
+    let mut state = TuiState {
+        daemon_status,
+        ..TuiState::default()
+    };
     match provider_load {
         Ok(providers) if !providers.is_empty() => {
             state.providers = providers;
@@ -2473,8 +2475,10 @@ mod tests {
 
     #[test]
     fn push_message_resets_scroll_offset() {
-        let mut state = TuiState::default();
-        state.scroll_offset = 50;
+        let mut state = TuiState {
+            scroll_offset: 50,
+            ..TuiState::default()
+        };
         state.push_message("new message");
         assert_eq!(state.scroll_offset, 0);
     }
@@ -2551,8 +2555,10 @@ mod tests {
 
     #[test]
     fn transcript_text_joins_with_newlines() {
-        let mut state = TuiState::default();
-        state.transcript = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let state = TuiState {
+            transcript: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            ..TuiState::default()
+        };
         assert_eq!(state.transcript_text(), "a\nb\nc");
     }
 }

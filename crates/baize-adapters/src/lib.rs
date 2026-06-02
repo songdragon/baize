@@ -46,6 +46,7 @@ pub struct AgentRunResult {
     pub exit_code: Option<i32>,
     pub events: Vec<AgentExecutionEvent>,
     pub stderr: String,
+    pub error: Option<AgentErrorDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +61,29 @@ pub enum AgentExecutionEventKind {
     Output,
     ToolCall,
     Raw,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentErrorDetail {
+    pub kind: AgentErrorKind,
+    pub message: String,
+    pub source: AgentErrorSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentErrorKind {
+    Authentication,
+    Timeout,
+    RateLimit,
+    QuotaExceeded,
+    ProcessFailure,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentErrorSource {
+    Stderr,
+    Runtime,
 }
 
 pub fn default_provider_profiles() -> Vec<ProviderProfile> {
@@ -293,6 +317,45 @@ pub fn parse_stream_json_lines(raw: &str) -> Vec<AgentExecutionEvent> {
         .collect()
 }
 
+pub fn classify_agent_error(text: &str, source: AgentErrorSource) -> Option<AgentErrorDetail> {
+    let message = text.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let lower = message.to_ascii_lowercase();
+    let kind = if lower.contains("timed out") || lower.contains("timeout") {
+        AgentErrorKind::Timeout
+    } else if lower.contains("unauthorized")
+        || lower.contains("not authenticated")
+        || lower.contains("authentication")
+        || lower.contains("login required")
+        || lower.contains("please login")
+    {
+        AgentErrorKind::Authentication
+    } else if lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("rate limit")
+    {
+        AgentErrorKind::RateLimit
+    } else if lower.contains("quota")
+        || lower.contains("billing")
+        || lower.contains("usage limit")
+        || lower.contains("credit")
+    {
+        AgentErrorKind::QuotaExceeded
+    } else if source == AgentErrorSource::Runtime {
+        AgentErrorKind::ProcessFailure
+    } else {
+        AgentErrorKind::Unknown
+    };
+
+    Some(AgentErrorDetail {
+        kind,
+        message: message.to_string(),
+        source,
+    })
+}
+
 fn run_gemini_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
     let output = run_command_with_timeout(
         "gemini",
@@ -308,6 +371,11 @@ fn run_gemini_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
         success: output.status.success(),
         exit_code: output.status.code(),
         events: parse_stream_json_lines(&stdout),
+        error: if output.status.success() {
+            None
+        } else {
+            classify_agent_error(&stderr, AgentErrorSource::Stderr)
+        },
         stderr,
     })
 }
@@ -327,6 +395,11 @@ fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
         success: output.status.success(),
         exit_code: output.status.code(),
         events: parse_stream_json_lines(&stdout),
+        error: if output.status.success() {
+            None
+        } else {
+            classify_agent_error(&stderr, AgentErrorSource::Stderr)
+        },
         stderr,
     })
 }
@@ -479,8 +552,7 @@ fn clean_version(raw: String) -> String {
     raw.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter(|line| !line.to_ascii_lowercase().starts_with("warning:"))
-        .last()
+        .rfind(|line| !line.to_ascii_lowercase().starts_with("warning:"))
         .unwrap_or_default()
         .to_string()
 }
@@ -655,6 +727,44 @@ mod tests {
         assert_eq!(events[0].text.as_deref(), Some("hello"));
         assert!(matches!(events[1].kind, AgentExecutionEventKind::ToolCall));
         assert!(matches!(events[2].kind, AgentExecutionEventKind::Raw));
+    }
+
+    #[test]
+    fn classifies_authentication_rate_and_quota_errors() {
+        let auth = classify_agent_error(
+            "Please login before using this CLI",
+            AgentErrorSource::Stderr,
+        )
+        .expect("auth error");
+        assert_eq!(auth.kind, AgentErrorKind::Authentication);
+        assert_eq!(auth.source, AgentErrorSource::Stderr);
+
+        let rate = classify_agent_error("HTTP 429 Too Many Requests", AgentErrorSource::Stderr)
+            .expect("rate error");
+        assert_eq!(rate.kind, AgentErrorKind::RateLimit);
+
+        let quota = classify_agent_error(
+            "insufficient quota, check billing",
+            AgentErrorSource::Stderr,
+        )
+        .expect("quota error");
+        assert_eq!(quota.kind, AgentErrorKind::QuotaExceeded);
+    }
+
+    #[test]
+    fn classifies_timeout_runtime_and_empty_error_text() {
+        let timeout = classify_agent_error(
+            "codex timed out after 10 seconds",
+            AgentErrorSource::Runtime,
+        )
+        .expect("timeout error");
+        assert_eq!(timeout.kind, AgentErrorKind::Timeout);
+
+        let runtime = classify_agent_error("failed to spawn codex", AgentErrorSource::Runtime)
+            .expect("runtime error");
+        assert_eq!(runtime.kind, AgentErrorKind::ProcessFailure);
+
+        assert!(classify_agent_error("   ", AgentErrorSource::Stderr).is_none());
     }
 
     #[test]

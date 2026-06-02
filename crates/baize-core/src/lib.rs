@@ -34,9 +34,21 @@ impl WorkspaceId {
     }
 }
 
+impl Default for WorkspaceId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProjectId {
     pub fn new() -> Self {
         Self(format!("prj_{}", Uuid::new_v4()))
+    }
+}
+
+impl Default for ProjectId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -46,9 +58,21 @@ impl TaskSessionId {
     }
 }
 
+impl Default for TaskSessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventId {
     pub fn new() -> Self {
         Self(format!("evt_{}", Uuid::new_v4()))
+    }
+}
+
+impl Default for EventId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -58,15 +82,33 @@ impl RouteDecisionId {
     }
 }
 
+impl Default for RouteDecisionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HandoffId {
     pub fn new() -> Self {
         Self(format!("handoff_{}", Uuid::new_v4()))
     }
 }
 
+impl Default for HandoffId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PermissionId {
     pub fn new() -> Self {
         Self(format!("perm_{}", Uuid::new_v4()))
+    }
+}
+
+impl Default for PermissionId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -330,6 +372,17 @@ mod tests {
         assert!(RouteDecisionId::new().0.starts_with("route_"));
         assert!(HandoffId::new().0.starts_with("handoff_"));
         assert!(PermissionId::new().0.starts_with("perm_"));
+    }
+
+    #[test]
+    fn default_ids_have_expected_prefixes() {
+        assert!(WorkspaceId::default().0.starts_with("ws_"));
+        assert!(ProjectId::default().0.starts_with("prj_"));
+        assert!(TaskSessionId::default().0.starts_with("task_"));
+        assert!(EventId::default().0.starts_with("evt_"));
+        assert!(RouteDecisionId::default().0.starts_with("route_"));
+        assert!(HandoffId::default().0.starts_with("handoff_"));
+        assert!(PermissionId::default().0.starts_with("perm_"));
     }
 
     #[test]

@@ -5,7 +5,8 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use baize_adapters::{
-    AgentExecutionEvent, AgentExecutionEventKind, AgentPromptRequest, AgentRunResult,
+    AgentErrorDetail, AgentErrorKind, AgentErrorSource, AgentExecutionEvent,
+    AgentExecutionEventKind, AgentPromptRequest, AgentRunResult,
 };
 use baize_config::BaizeConfig;
 use baize_core::{
@@ -66,6 +67,7 @@ fn test_app() -> (Router, tempfile::TempDir, tempfile::TempDir) {
                     raw: None,
                 }],
                 stderr: String::new(),
+                error: None,
             },
         }),
     );
@@ -352,6 +354,93 @@ async fn prompt_failure_reports_limit_inference() {
 }
 
 #[tokio::test]
+async fn prompt_failure_reports_structured_provider_error() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let app = router(AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: false,
+                exit_code: Some(1),
+                events: vec![],
+                stderr: "Please login before using Codex".to_string(),
+                error: Some(AgentErrorDetail {
+                    kind: AgentErrorKind::Authentication,
+                    message: "Please login before using Codex".to_string(),
+                    source: AgentErrorSource::Stderr,
+                }),
+            },
+        }),
+    ));
+
+    let workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path() }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+    let session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "auth failure"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let session_id = session["session"]["id"].as_str().expect("session id");
+
+    let (status, prompt) = json_response_with_status(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "fail" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(prompt["status"], "failed");
+    assert_eq!(prompt["provider_error"]["kind"], "Authentication");
+    assert_eq!(prompt["provider_error"]["source"], "Stderr");
+
+    let events = json_response(
+        app,
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/events"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert!(events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["event_type"] == "session.agent.failed"
+            && event["payload"]["provider_error"]["kind"] == "Authentication"));
+}
+
+#[tokio::test]
 async fn creates_handoff_artifact() {
     let (app, data_dir, project_dir) = test_app();
     let workspace = json_response(
@@ -493,6 +582,7 @@ async fn handoff_checkpoint_refs_follow_policy() {
                 exit_code: Some(0),
                 events: vec![],
                 stderr: String::new(),
+                error: None,
             },
         }),
     ));
@@ -689,6 +779,7 @@ async fn providers_follow_configured_order() {
                 exit_code: Some(0),
                 events: Vec::new(),
                 stderr: String::new(),
+                error: None,
             },
         }),
     ));
@@ -724,6 +815,7 @@ async fn provider_health_check_follows_configured_order() {
                 exit_code: Some(0),
                 events: Vec::new(),
                 stderr: String::new(),
+                error: None,
             },
         }),
     ));
@@ -776,6 +868,7 @@ impl AgentExecutor for RecoverableAgentExecutor {
                 raw: None,
             }],
             stderr: String::new(),
+            error: None,
         })
     }
 }
@@ -977,6 +1070,7 @@ fn app_state_recovers_in_flight_sessions_on_startup() {
                 exit_code: Some(0),
                 events: vec![],
                 stderr: String::new(),
+                error: None,
             },
         }),
     );
@@ -1317,6 +1411,7 @@ fn select_provider_returns_requested_override() {
                 exit_code: Some(0),
                 events: vec![],
                 stderr: String::new(),
+                error: None,
             },
         }),
     );
@@ -1339,6 +1434,7 @@ fn is_provider_healthy_returns_false_for_unknown_provider() {
                 exit_code: Some(0),
                 events: vec![],
                 stderr: String::new(),
+                error: None,
             },
         }),
     );
@@ -1510,6 +1606,7 @@ async fn sticky_routing_can_be_disabled_by_config() {
                 exit_code: Some(0),
                 events: vec![],
                 stderr: String::new(),
+                error: None,
             },
         }),
     );
@@ -1589,6 +1686,7 @@ fn select_provider_without_workspace_uses_health_priority() {
                 exit_code: Some(0),
                 events: vec![],
                 stderr: String::new(),
+                error: None,
             },
         }),
     );
@@ -1610,6 +1708,7 @@ fn select_provider_uses_custom_override_reason() {
                 exit_code: Some(0),
                 events: vec![],
                 stderr: String::new(),
+                error: None,
             },
         }),
     );

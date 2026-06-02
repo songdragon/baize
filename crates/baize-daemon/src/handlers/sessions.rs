@@ -208,6 +208,7 @@ pub async fn prompt_session(
                 "session.agent.failed"
             };
             let stderr = result.stderr.clone();
+            let provider_error = result.error.clone();
             let limit_inference = if result.success {
                 None
             } else {
@@ -219,6 +220,7 @@ pub async fn prompt_session(
                     "success": result.success,
                     "exit_code": result.exit_code,
                     "stderr": stderr,
+                    "provider_error": provider_error,
                     "limit_inference": limit_inference,
                 }),
             );
@@ -256,6 +258,7 @@ pub async fn prompt_session(
                     "events": result.events,
                     "exit_code": result.exit_code,
                     "stderr": stderr,
+                    "provider_error": provider_error,
                     "limit_inference": limit_inference,
                 })),
             )
