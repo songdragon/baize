@@ -175,6 +175,7 @@ The MVP target is a single-workspace local agent supervisor:
 - explicit selected provider, permission and handoff markers;
 - handoff preview detail with markdown summary and mechanical facts;
 - provider authentication, timeout and limit hints in prompt failures;
+- command/tool output and test result sections in the transcript;
 - workspace diff display after prompt/handoff;
 - recent session event display;
 - recent route history display;
@@ -222,6 +223,7 @@ Implemented test coverage includes:
 - TUI handoff preview and accept guard behavior;
 - TUI handoff preview detail rendering;
 - TUI permission selection and resolution display;
+- TUI command/tool event and test result sections;
 - TUI workspace diff and route history display.
 
 Last measured coverage snapshot:
@@ -244,7 +246,7 @@ These are still in scope for a more usable MVP.
 - ~~add explicit visual selection for provider, permission and handoff states~~ (done);
 - ~~add a session list view instead of only `Ctrl-L` latest-session loading~~ (done);
 - ~~add a handoff preview detail view with more than the first few markdown lines~~ (done);
-- add clearer command result/test result sections;
+- ~~add clearer command result/test result sections~~ (done);
 - ~~add better error presentation for provider authentication failures and timeouts~~ (done).
 
 ### 2. Daemon And API

@@ -518,7 +518,7 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
     append_prompt_response(state, &response);
 
     let events = get_json(&format!("/sessions/{session_id}/events"))?;
-    append_recent_events(state, &events);
+    append_recent_events_with_sections(state, &events);
     refresh_route_history(state)?;
     refresh_session_diff(state)?;
     state.input.clear();
@@ -1081,14 +1081,14 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
         .get("provider_id")
         .and_then(provider_id)
         .unwrap_or("unknown");
-    state.push_message(format!("result: {status} via {provider}"));
+    state.push_message(format!("prompt result: {status} via {provider}"));
 
     if let Some(error) = response.get("error").and_then(Value::as_str) {
-        state.push_message(format!("error: {error}"));
+        state.push_message(format!("  error: {error}"));
     }
     if let Some(stderr) = response.get("stderr").and_then(Value::as_str) {
         if !stderr.trim().is_empty() {
-            state.push_message(format!("stderr: {}", one_line(stderr)));
+            state.push_message(format!("  stderr: {}", one_line(stderr)));
         }
     }
     if let Some(hint) = provider_error_hint(response) {
@@ -1101,14 +1101,17 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
         return;
     };
 
-    for event in events
+    let recent_events = events
         .iter()
         .rev()
         .take(5)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-    {
+        .collect::<Vec<_>>();
+    let mut tool_lines = Vec::new();
+    let mut output_lines = Vec::new();
+    for event in recent_events {
         let event_type = event
             .get("event_type")
             .and_then(Value::as_str)
@@ -1121,13 +1124,75 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
             .or_else(|| payload.get("stderr").and_then(Value::as_str))
             .map(one_line);
 
-        match detail {
-            Some(detail) if !detail.is_empty() => {
-                state.push_message(format!("{event_type}: {detail}"))
-            }
-            _ => state.push_message(event_type.to_string()),
+        let line = match detail {
+            Some(detail) if !detail.is_empty() => format!("{event_type}: {detail}"),
+            _ => event_type.to_string(),
+        };
+        if event_type == "session.agent.tool_call" {
+            tool_lines.push(line);
+        } else {
+            output_lines.push(line);
         }
     }
+
+    if !tool_lines.is_empty() {
+        state.push_message("command/tool events:".to_string());
+        for line in tool_lines {
+            state.push_message(format!("  {line}"));
+        }
+    }
+    if !output_lines.is_empty() {
+        state.push_message("agent output:".to_string());
+        for line in output_lines {
+            state.push_message(format!("  {line}"));
+        }
+    }
+}
+
+fn append_test_result_section(state: &mut TuiState, response: &Value) {
+    let Some(events) = response.get("events").and_then(Value::as_array) else {
+        return;
+    };
+    let test_lines = events
+        .iter()
+        .filter_map(|event| event.get("payload"))
+        .filter_map(|payload| {
+            payload
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| payload.get("stderr").and_then(Value::as_str))
+        })
+        .map(one_line)
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            contains_any(
+                &lower,
+                &[
+                    "test result",
+                    "test failed",
+                    "test passed",
+                    "tests passed",
+                    "test result:",
+                    "cargo test",
+                    "pytest",
+                ],
+            )
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    if test_lines.is_empty() {
+        return;
+    }
+
+    state.push_message("test results:".to_string());
+    for line in test_lines {
+        state.push_message(format!("  {line}"));
+    }
+}
+
+fn append_recent_events_with_sections(state: &mut TuiState, response: &Value) {
+    append_recent_events(state, response);
+    append_test_result_section(state, response);
 }
 
 impl TuiState {
@@ -1970,10 +2035,66 @@ mod tests {
 
         append_prompt_response(&mut state, &response);
 
-        assert!(state.transcript_text().contains("result: failed via codex"));
+        assert!(state
+            .transcript_text()
+            .contains("prompt result: failed via codex"));
         assert!(state
             .transcript_text()
             .contains("provider hint: rate limit detected"));
+    }
+
+    #[test]
+    fn append_recent_events_groups_tool_and_output_sections() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "events": [
+                {
+                    "event_type": "session.agent.output",
+                    "payload": { "text": "reading files" }
+                },
+                {
+                    "event_type": "session.agent.tool_call",
+                    "payload": { "text": "cargo test" }
+                },
+                {
+                    "event_type": "session.agent.failed",
+                    "payload": { "stderr": "tests failed" }
+                }
+            ]
+        });
+
+        append_recent_events(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("command/tool events:"));
+        assert!(transcript.contains("  session.agent.tool_call: cargo test"));
+        assert!(transcript.contains("agent output:"));
+        assert!(transcript.contains("  session.agent.output: reading files"));
+        assert!(transcript.contains("  session.agent.failed: tests failed"));
+    }
+
+    #[test]
+    fn append_recent_events_with_sections_shows_test_results() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "events": [
+                {
+                    "event_type": "session.agent.output",
+                    "payload": { "text": "cargo test --all passed" }
+                },
+                {
+                    "event_type": "session.agent.output",
+                    "payload": { "text": "ordinary output" }
+                }
+            ]
+        });
+
+        append_recent_events_with_sections(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("agent output:"));
+        assert!(transcript.contains("test results:"));
+        assert!(transcript.contains("  cargo test --all passed"));
     }
 
     #[test]
