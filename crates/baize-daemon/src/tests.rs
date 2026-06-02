@@ -61,6 +61,7 @@ fn test_app() -> (Router, tempfile::TempDir, tempfile::TempDir) {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: vec![AgentExecutionEvent {
                     kind: AgentExecutionEventKind::Output,
                     text: Some("fake output".to_string()),
@@ -170,6 +171,86 @@ async fn creates_workspace_session_prompt_and_events() {
     .await;
     assert_eq!(routes["routes"][0]["selected_provider_id"], "codex");
     assert_eq!(routes["routes"][0]["task_type"], "Testing");
+}
+
+#[tokio::test]
+async fn prompt_response_reports_native_provider_session_id() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let app = router(AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: Some("codex_native_session_1".to_string()),
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+        }),
+    ));
+
+    let workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path() }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+    let session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "preserve native session"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let session_id = session["session"]["id"].as_str().expect("session id");
+
+    let prompt = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "hello" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(prompt["native_session_id"], "codex_native_session_1");
+
+    let events = json_response(
+        app,
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/events"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert!(events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["event_type"] == "session.agent.completed"
+            && event["payload"]["native_session_id"] == "codex_native_session_1"));
 }
 
 #[test]
@@ -366,6 +447,7 @@ async fn prompt_failure_reports_structured_provider_error() {
                 provider_id: ProviderId("codex".to_string()),
                 success: false,
                 exit_code: Some(1),
+                native_session_id: None,
                 events: vec![],
                 stderr: "Please login before using Codex".to_string(),
                 error: Some(AgentErrorDetail {
@@ -580,6 +662,7 @@ async fn handoff_checkpoint_refs_follow_policy() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: vec![],
                 stderr: String::new(),
                 error: None,
@@ -777,6 +860,7 @@ async fn providers_follow_configured_order() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: Vec::new(),
                 stderr: String::new(),
                 error: None,
@@ -813,6 +897,7 @@ async fn provider_health_check_follows_configured_order() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: Vec::new(),
                 stderr: String::new(),
                 error: None,
@@ -862,6 +947,7 @@ impl AgentExecutor for RecoverableAgentExecutor {
             provider_id: ProviderId("codex".to_string()),
             success: true,
             exit_code: Some(0),
+            native_session_id: None,
             events: vec![AgentExecutionEvent {
                 kind: AgentExecutionEventKind::Output,
                 text: Some("recovered output".to_string()),
@@ -1068,6 +1154,7 @@ fn app_state_recovers_in_flight_sessions_on_startup() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: vec![],
                 stderr: String::new(),
                 error: None,
@@ -1409,6 +1496,7 @@ fn select_provider_returns_requested_override() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: vec![],
                 stderr: String::new(),
                 error: None,
@@ -1432,6 +1520,7 @@ fn is_provider_healthy_returns_false_for_unknown_provider() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: vec![],
                 stderr: String::new(),
                 error: None,
@@ -1604,6 +1693,7 @@ async fn sticky_routing_can_be_disabled_by_config() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: vec![],
                 stderr: String::new(),
                 error: None,
@@ -1684,6 +1774,7 @@ fn select_provider_without_workspace_uses_health_priority() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: vec![],
                 stderr: String::new(),
                 error: None,
@@ -1706,6 +1797,7 @@ fn select_provider_uses_custom_override_reason() {
                 provider_id: ProviderId("codex".to_string()),
                 success: true,
                 exit_code: Some(0),
+                native_session_id: None,
                 events: vec![],
                 stderr: String::new(),
                 error: None,

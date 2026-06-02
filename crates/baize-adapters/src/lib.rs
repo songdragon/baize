@@ -44,6 +44,7 @@ pub struct AgentRunResult {
     pub provider_id: ProviderId,
     pub success: bool,
     pub exit_code: Option<i32>,
+    pub native_session_id: Option<String>,
     pub events: Vec<AgentExecutionEvent>,
     pub stderr: String,
     pub error: Option<AgentErrorDetail>,
@@ -317,6 +318,12 @@ pub fn parse_stream_json_lines(raw: &str) -> Vec<AgentExecutionEvent> {
         .collect()
 }
 
+pub fn extract_native_session_id(raw: &str) -> Option<String> {
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .find_map(|value| find_session_id(&value))
+}
+
 pub fn classify_agent_error(text: &str, source: AgentErrorSource) -> Option<AgentErrorDetail> {
     let message = text.trim();
     if message.is_empty() {
@@ -370,6 +377,7 @@ fn run_gemini_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
         provider_id: request.provider_id,
         success: output.status.success(),
         exit_code: output.status.code(),
+        native_session_id: extract_native_session_id(&stdout),
         events: parse_stream_json_lines(&stdout),
         error: if output.status.success() {
             None
@@ -394,6 +402,7 @@ fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
         provider_id: request.provider_id,
         success: output.status.success(),
         exit_code: output.status.code(),
+        native_session_id: extract_native_session_id(&stdout),
         events: parse_stream_json_lines(&stdout),
         error: if output.status.success() {
             None
@@ -508,6 +517,30 @@ fn find_text(value: &Value) -> Option<String> {
                 }
             }
             None
+        }
+        _ => None,
+    }
+}
+
+fn find_session_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(values) => values.iter().find_map(find_session_id),
+        Value::Object(map) => {
+            for key in [
+                "session_id",
+                "sessionId",
+                "conversation_id",
+                "conversationId",
+                "thread_id",
+                "threadId",
+            ] {
+                if let Some(id) = map.get(key).and_then(Value::as_str) {
+                    if !id.trim().is_empty() {
+                        return Some(id.to_string());
+                    }
+                }
+            }
+            map.values().find_map(find_session_id)
         }
         _ => None,
     }
@@ -727,6 +760,42 @@ mod tests {
         assert_eq!(events[0].text.as_deref(), Some("hello"));
         assert!(matches!(events[1].kind, AgentExecutionEventKind::ToolCall));
         assert!(matches!(events[2].kind, AgentExecutionEventKind::Raw));
+    }
+
+    #[test]
+    fn extracts_native_session_id_from_structured_output() {
+        let raw = r#"
+        {"type":"message","session_id":"sess_codex_1","message":"hello"}
+        {"type":"message","session_id":"sess_codex_2","message":"later"}
+        "#;
+
+        assert_eq!(
+            extract_native_session_id(raw).as_deref(),
+            Some("sess_codex_1")
+        );
+    }
+
+    #[test]
+    fn extracts_nested_native_session_id_and_ignores_empty_values() {
+        let raw = r#"
+        {"session_id":"","message":"missing"}
+        {"type":"metadata","payload":{"conversationId":"conv_gemini_1"}}
+        "#;
+
+        assert_eq!(
+            extract_native_session_id(raw).as_deref(),
+            Some("conv_gemini_1")
+        );
+    }
+
+    #[test]
+    fn native_session_id_extraction_returns_none_without_known_fields() {
+        let raw = r#"
+        {"type":"message","message":"hello"}
+        {"type":"metadata","payload":{"id":"too broad to trust"}}
+        "#;
+
+        assert!(extract_native_session_id(raw).is_none());
     }
 
     #[test]

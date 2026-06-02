@@ -209,6 +209,7 @@ pub async fn prompt_session(
             };
             let stderr = result.stderr.clone();
             let provider_error = result.error.clone();
+            let native_session_id = result.native_session_id.clone();
             let limit_inference = if result.success {
                 None
             } else {
@@ -219,6 +220,7 @@ pub async fn prompt_session(
                 serde_json::json!({
                     "success": result.success,
                     "exit_code": result.exit_code,
+                    "native_session_id": native_session_id,
                     "stderr": stderr,
                     "provider_error": provider_error,
                     "limit_inference": limit_inference,
@@ -257,6 +259,7 @@ pub async fn prompt_session(
                     "provider_id": provider_id,
                     "events": result.events,
                     "exit_code": result.exit_code,
+                    "native_session_id": native_session_id,
                     "stderr": stderr,
                     "provider_error": provider_error,
                     "limit_inference": limit_inference,

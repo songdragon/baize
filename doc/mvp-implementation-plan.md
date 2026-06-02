@@ -62,6 +62,7 @@ The MVP target is a single-workspace local agent supervisor:
 - Gemini `--prompt --output-format stream-json` execution path;
 - Codex `exec --json` execution path;
 - stream-json/JSONL parser behavior;
+- native provider session ID extraction from structured output;
 - structured provider error classification and daemon reporting;
 - prompt execution timeout to prevent hanging on provider authentication or interactive prompts.
 
@@ -188,7 +189,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 132.
+Current full test count: 136.
 
 Implemented test coverage includes:
 
@@ -207,9 +208,11 @@ Implemented test coverage includes:
 - provider validation behavior;
 - Gemini/Codex command construction;
 - stream-json/JSONL parser behavior;
+- adapter native provider session ID extraction;
 - adapter provider error classification;
 - command timeout behavior;
 - daemon workspace/session/prompt/events flow;
+- daemon prompt native provider session ID reporting;
 - daemon prompt failure error chain;
 - daemon prompt failure structured provider error reporting;
 - daemon provider ordering and provider health ordering;
@@ -282,7 +285,7 @@ These are still in scope for a more usable MVP.
 
 - Validate real Codex CLI execution end to end with authentication, timeout and JSON parsing;
 - validate real Gemini CLI execution end to end with authentication, timeout and stream-json parsing;
-- preserve provider-native session/resume IDs when available;
+- ~~preserve provider-native session/resume IDs when available~~ (done for structured output capture);
 - ~~expose adapter stderr and provider errors in a more structured form~~ (done);
 - add Copilot/OpenCode ACP proof-of-life beyond metadata.
 
