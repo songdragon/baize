@@ -131,6 +131,7 @@ The MVP target is a single-workspace local agent supervisor:
 - Baize mechanical facts attachment;
 - changed files and user constraints capture;
 - handoff persistence and event emission;
+- handoff markdown artifact persistence;
 - handoff accept flow that updates active provider and emits route decision;
 - TUI handoff preview before accept;
 - TUI pending handoff status line;
@@ -196,6 +197,7 @@ Implemented test coverage includes:
 - storage workspace/project/session persistence;
 - storage query indexes for high-volume session/workspace lookups;
 - storage route decision and permission lookup;
+- storage handoff artifact file writing;
 - workspace inspection for plain directories;
 - workspace inspection for clean and dirty git repositories;
 - provider priority and ACP transport metadata;
@@ -209,6 +211,7 @@ Implemented test coverage includes:
 - daemon task-type inference for route decisions;
 - daemon configurable sticky routing policy;
 - daemon handoff creation and accept flow;
+- daemon handoff artifact path response and event payload;
 - daemon permission listing/filtering/detail lookup;
 - daemon session status transitions (Running, Failed, Canceled, recovery);
 - daemon canceled session prompt rejection;
@@ -280,7 +283,7 @@ These are still in scope for a more usable MVP.
 
 - ~~Add migration version tracking for SQLite schema~~ (done);
 - ~~add query tables or indexes for higher-volume event lookup~~ (done);
-- persist transcript/handoff artifacts as files when useful;
+- ~~persist transcript/handoff artifacts as files when useful~~ (done for handoff artifacts);
 - add crash recovery semantics for in-flight agent runs;
 - add checkpoint references for before-handoff policy.
 

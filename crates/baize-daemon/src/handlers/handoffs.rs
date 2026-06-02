@@ -64,16 +64,28 @@ pub async fn create_handoff(
         status: HandoffStatus::Draft,
         created_at: Utc::now(),
     };
-    if let Err(error) = with_store(&state, |store| store.insert_handoff(&handoff)) {
-        return internal_error(error.to_string());
-    }
-    let mut event =
-        baize_core::BaizeEvent::new("handoff.created", serde_json::json!({ "handoff": handoff }));
+    let artifact_path = match with_store(&state, |store| {
+        store.insert_handoff(&handoff)?;
+        store.write_handoff_artifact(&handoff)
+    }) {
+        Ok(path) => path.display().to_string(),
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let mut event = baize_core::BaizeEvent::new(
+        "handoff.created",
+        serde_json::json!({
+            "handoff": handoff,
+            "artifact_path": artifact_path,
+        }),
+    );
     event.workspace_id = Some(session.workspace_id);
     event.session_id = Some(session.id);
     event.provider_id = Some(to_provider_id);
     state.record_event(event);
-    ok_json(serde_json::json!({ "handoff": handoff }))
+    ok_json(serde_json::json!({
+        "handoff": handoff,
+        "artifact_path": artifact_path,
+    }))
 }
 
 pub async fn accept_handoff(

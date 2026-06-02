@@ -350,7 +350,7 @@ async fn prompt_failure_reports_limit_inference() {
 
 #[tokio::test]
 async fn creates_handoff_artifact() {
-    let (app, _data_dir, project_dir) = test_app();
+    let (app, data_dir, project_dir) = test_app();
     let workspace = json_response(
         app.clone(),
         Request::builder()
@@ -406,6 +406,15 @@ async fn creates_handoff_artifact() {
         handoff["handoff"]["mechanical_facts"]["user_constraints"][0],
         "do not change public API"
     );
+    let artifact_path = handoff["artifact_path"].as_str().expect("artifact path");
+    assert!(artifact_path.contains("artifacts/handoffs"));
+    assert!(std::path::Path::new(artifact_path).starts_with(data_dir.path()));
+    assert_eq!(
+        std::fs::read_to_string(artifact_path).expect("artifact contents"),
+        handoff["handoff"]["summary_markdown"]
+            .as_str()
+            .expect("summary")
+    );
 
     let handoff_id = handoff["handoff"]["id"].as_str().expect("handoff id");
     let accepted = json_response(
@@ -447,6 +456,12 @@ async fn creates_handoff_artifact() {
         .expect("events")
         .iter()
         .any(|event| event["event_type"] == "handoff.accepted"));
+    assert!(events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["event_type"] == "handoff.created"
+            && event["payload"]["artifact_path"] == artifact_path));
 }
 
 #[tokio::test]

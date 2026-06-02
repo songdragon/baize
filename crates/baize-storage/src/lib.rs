@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub struct EventStore {
     conn: Connection,
+    data_dir: PathBuf,
 }
 
 impl EventStore {
@@ -27,7 +28,11 @@ impl EventStore {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open sqlite database {}", path.display()))?;
-        let store = Self { conn };
+        let data_dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let store = Self { conn, data_dir };
         store.migrate()?;
         Ok(store)
     }
@@ -336,6 +341,16 @@ impl EventStore {
         Ok(())
     }
 
+    pub fn write_handoff_artifact(&self, handoff: &HandoffSummary) -> Result<PathBuf> {
+        let artifact_dir = self.data_dir.join("artifacts").join("handoffs");
+        fs::create_dir_all(&artifact_dir)
+            .with_context(|| format!("failed to create {}", artifact_dir.display()))?;
+        let artifact_path = artifact_dir.join(format!("{}.md", handoff.id.0));
+        fs::write(&artifact_path, &handoff.summary_markdown)
+            .with_context(|| format!("failed to write {}", artifact_path.display()))?;
+        Ok(artifact_path)
+    }
+
     pub fn get_handoff(&self, id: &HandoffId) -> Result<Option<HandoffSummary>> {
         self.get_json("handoffs", &id.0)
     }
@@ -468,8 +483,8 @@ pub fn default_data_dir() -> PathBuf {
 mod tests {
     use super::*;
     use baize_core::{
-        BaizeEvent, PermissionStatus, ProjectKind, ProviderId, RoutingMode, TaskSessionStatus,
-        TrustLevel, VcsKind, WorkspaceId,
+        BaizeEvent, HandoffFacts, HandoffStatus, PermissionStatus, ProjectKind, ProviderId,
+        RoutingMode, TaskSessionStatus, TrustLevel, VcsKind, WorkspaceId,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -657,6 +672,32 @@ mod tests {
         assert_eq!(handoffs.len(), 2);
         assert_eq!(handoffs[0].to_provider_id.0, "gemini");
         assert_eq!(handoffs[1].to_provider_id.0, "codex");
+    }
+
+    #[test]
+    fn writes_handoff_markdown_artifact() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let handoff = HandoffSummary {
+            id: HandoffId::new(),
+            session_id: TaskSessionId::new(),
+            from_provider_id: ProviderId("codex".to_string()),
+            to_provider_id: ProviderId("gemini".to_string()),
+            summary_markdown: "# Handoff\n\nObjective: continue task\n".to_string(),
+            mechanical_facts: HandoffFacts::default(),
+            status: HandoffStatus::Draft,
+            created_at: Utc::now(),
+        };
+
+        let artifact_path = store
+            .write_handoff_artifact(&handoff)
+            .expect("artifact write");
+
+        assert!(artifact_path.starts_with(temp.path()));
+        assert_eq!(
+            std::fs::read_to_string(artifact_path).expect("artifact contents"),
+            handoff.summary_markdown
+        );
     }
 
     #[test]
