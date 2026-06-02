@@ -38,6 +38,8 @@ For local sandboxed development, keep Baize data inside the repository:
 BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- daemon
 ```
 
+For TUI usage, provider setup, keyboard shortcuts, local API examples and test commands, see [doc/quickstart.md](doc/quickstart.md).
+
 Useful daemon endpoints:
 
 ```text

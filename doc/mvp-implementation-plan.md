@@ -83,7 +83,15 @@ The MVP target is a single-workspace local agent supervisor:
 - `baize validate [provider]`;
 - refactored CLI command handling into testable output/action functions.
 
-### 6. Daemon API
+### 6. Documentation
+
+- MVP quickstart for TUI usage with `BAIZE_DATA_DIR`;
+- provider CLI setup notes for Codex and Gemini;
+- TUI keyboard shortcut reference;
+- local HTTP API examples with curl;
+- test, lint and coverage command reference.
+
+### 7. Daemon API
 
 - `GET /health`;
 - `GET /providers`;
@@ -117,7 +125,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `session.status.changed` event emission on status transitions.
 - Startup recovery marks in-flight `Running` sessions as `Failed` and emits `session.recovered`.
 
-### 7. Routing
+### 8. Routing
 
 - assisted-mode default route decision;
 - configured provider priority selection;
@@ -129,7 +137,7 @@ The MVP target is a single-workspace local agent supervisor:
 - route history API;
 - TUI display of recent route history.
 
-### 8. Handoff
+### 9. Handoff
 
 - markdown handoff artifact generation;
 - Baize mechanical facts attachment;
@@ -144,7 +152,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `Ctrl-Y` to accept pending handoff;
 - pending handoff is cleared when loading, starting or canceling sessions.
 
-### 9. Permission
+### 10. Permission
 
 - permission request creation;
 - approve/deny resolution;
@@ -159,7 +167,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `Ctrl-A` to approve selected permission;
 - `Ctrl-D` to deny selected permission.
 
-### 10. TUI
+### 11. TUI
 
 - ratatui shell;
 - workspace/session/status panels;
@@ -301,11 +309,11 @@ These are still in scope for a more usable MVP.
 
 ### 6. Documentation
 
-- Write a quickstart for running `baize tui` with local data directory;
-- document required provider CLI setup for Codex and Gemini;
-- document current keyboard shortcuts;
-- document local API examples with curl;
-- document test and coverage commands.
+- ~~Write a quickstart for running `baize tui` with local data directory~~ (done);
+- ~~document required provider CLI setup for Codex and Gemini~~ (done);
+- ~~document current keyboard shortcuts~~ (done);
+- ~~document local API examples with curl~~ (done);
+- ~~document test and coverage commands~~ (done).
 
 ## Post-MVP / Out Of MVP
 
