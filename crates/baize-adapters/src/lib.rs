@@ -17,6 +17,7 @@ pub struct ProviderValidation {
     pub health: ProviderHealth,
     pub version: Option<String>,
     pub detected: DetectedCapabilities,
+    pub acp_proof: Option<AcpProof>,
     pub capability_gaps: Vec<String>,
 }
 
@@ -28,6 +29,13 @@ pub struct DetectedCapabilities {
     pub session_resume: bool,
     pub mcp_server: bool,
     pub app_server: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpProof {
+    pub command: String,
+    pub args: Vec<String>,
+    pub initialize_request: baize_acp::JsonRpcRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +240,7 @@ pub fn validate_provider(profile: &ProviderProfile) -> ProviderValidation {
         exec_help.as_deref(),
         resume_help.as_deref(),
     );
+    let acp_proof = build_acp_proof(profile);
     let capability_gaps = capability_gaps(&profile.capabilities, &detected);
 
     ProviderValidation {
@@ -239,6 +248,7 @@ pub fn validate_provider(profile: &ProviderProfile) -> ProviderValidation {
         health,
         version: version.map(clean_version),
         detected,
+        acp_proof,
         capability_gaps,
     }
 }
@@ -490,6 +500,32 @@ fn detect_capabilities(
     }
 }
 
+fn build_acp_proof(profile: &ProviderProfile) -> Option<AcpProof> {
+    let transport = profile
+        .transports
+        .iter()
+        .find(|transport| matches!(transport, ProviderTransport::Acp { .. }))?;
+    let ProviderTransport::Acp { command, args } = transport else {
+        return None;
+    };
+
+    Some(AcpProof {
+        command: command.clone(),
+        args: args.clone(),
+        initialize_request: baize_acp::request(
+            1,
+            "initialize",
+            serde_json::json!({
+                "client": {
+                    "name": "baize",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {}
+            }),
+        ),
+    })
+}
+
 fn looks_like_tool_call(value: &Value) -> bool {
     value
         .get("type")
@@ -649,6 +685,52 @@ mod tests {
             opencode.transports[0],
             ProviderTransport::Acp { .. }
         ));
+    }
+
+    #[test]
+    fn copilot_and_opencode_validation_include_acp_initialize_proof() {
+        let profiles = default_provider_profiles();
+
+        for provider_id in ["copilot", "opencode"] {
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.id.0 == provider_id)
+                .expect("profile");
+            let proof = build_acp_proof(profile).expect("acp proof");
+
+            assert_eq!(proof.initialize_request.jsonrpc, "2.0");
+            assert_eq!(proof.initialize_request.method, "initialize");
+            assert_eq!(proof.initialize_request.params["client"]["name"], "baize");
+            assert!(!proof.command.is_empty());
+        }
+    }
+
+    #[test]
+    fn acp_proof_serializes_with_initialize_request() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "opencode")
+            .expect("opencode profile");
+        let proof = build_acp_proof(&profile).expect("acp proof");
+
+        let value = serde_json::to_value(&proof).expect("serialized proof");
+
+        assert_eq!(value["initialize_request"]["method"], "initialize");
+        assert_eq!(
+            value["initialize_request"]["params"]["client"]["name"],
+            "baize"
+        );
+        assert_eq!(value["command"], "opencode");
+    }
+
+    #[test]
+    fn cli_only_provider_validation_does_not_include_acp_proof() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "codex")
+            .expect("codex profile");
+
+        assert!(build_acp_proof(&profile).is_none());
     }
 
     #[test]

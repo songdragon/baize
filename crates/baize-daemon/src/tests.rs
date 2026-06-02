@@ -847,6 +847,29 @@ async fn validates_known_provider() {
 }
 
 #[tokio::test]
+async fn validation_reports_acp_initialize_proof() {
+    let (app, _data_dir, _project_dir) = test_app();
+    let validation = json_response(
+        app,
+        Request::builder()
+            .uri("/providers/opencode/validate")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(validation["validation"]["provider_id"], "opencode");
+    assert_eq!(
+        validation["validation"]["acp_proof"]["initialize_request"]["method"],
+        "initialize"
+    );
+    assert_eq!(
+        validation["validation"]["acp_proof"]["initialize_request"]["params"]["client"]["name"],
+        "baize"
+    );
+}
+
+#[tokio::test]
 async fn providers_follow_configured_order() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");

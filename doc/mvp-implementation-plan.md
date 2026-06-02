@@ -56,6 +56,7 @@ The MVP target is a single-workspace local agent supervisor:
 - provider transport registry;
 - health probing via provider command `--version`;
 - ACP transport metadata for Copilot and OpenCode;
+- ACP initialize proof generation for ACP transports;
 - structured validation for Codex/Gemini/Copilot/OpenCode;
 - detected capabilities and capability gap reporting;
 - daemon endpoints for provider validation;
@@ -189,7 +190,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 136.
+Current full test count: 140.
 
 Implemented test coverage includes:
 
@@ -205,6 +206,7 @@ Implemented test coverage includes:
 - workspace inspection for plain directories;
 - workspace inspection for clean and dirty git repositories;
 - provider priority and ACP transport metadata;
+- provider ACP initialize proof generation;
 - provider validation behavior;
 - Gemini/Codex command construction;
 - stream-json/JSONL parser behavior;
@@ -287,7 +289,7 @@ These are still in scope for a more usable MVP.
 - validate real Gemini CLI execution end to end with authentication, timeout and stream-json parsing;
 - ~~preserve provider-native session/resume IDs when available~~ (done for structured output capture);
 - ~~expose adapter stderr and provider errors in a more structured form~~ (done);
-- add Copilot/OpenCode ACP proof-of-life beyond metadata.
+- ~~add Copilot/OpenCode ACP proof-of-life beyond metadata~~ (done with initialize proof generation).
 
 ### 5. Persistence And Recovery
 
