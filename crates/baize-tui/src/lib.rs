@@ -762,17 +762,76 @@ fn append_handoff_preview(state: &mut TuiState, response: &Value) {
     state.push_message(format!(
         "handoff preview: {id} {from_provider} -> {to_provider}"
     ));
+    append_handoff_detail(state, handoff);
+    state.push_message("press Ctrl-Y to accept handoff");
+}
+
+fn append_handoff_detail(state: &mut TuiState, handoff: &Value) {
     if let Some(summary) = handoff.get("summary_markdown").and_then(Value::as_str) {
-        for line in summary
+        let lines = summary
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
-            .take(4)
-        {
-            state.push_message(format!("  {}", one_line(line)));
+            .filter(|line| !line.starts_with('#'))
+            .map(one_line)
+            .collect::<Vec<_>>();
+        if !lines.is_empty() {
+            state.push_message("  summary detail:".to_string());
+            for line in lines.iter().take(10) {
+                state.push_message(format!("    {line}"));
+            }
+            if lines.len() > 10 {
+                state.push_message(format!("    (+{} more summary lines)", lines.len() - 10));
+            }
         }
     }
-    state.push_message("press Ctrl-Y to accept handoff");
+
+    let facts = handoff.get("mechanical_facts").unwrap_or(&Value::Null);
+    append_handoff_fact_list(state, facts, "changed_files", "changed files");
+    append_handoff_fact_list(state, facts, "commands_run", "commands");
+    append_handoff_fact_value(state, facts, "test_result", "test result");
+    append_handoff_fact_list(state, facts, "provider_errors", "provider errors");
+    append_handoff_fact_list(state, facts, "checkpoint_refs", "checkpoints");
+    append_handoff_fact_list(state, facts, "user_constraints", "constraints");
+}
+
+fn append_handoff_fact_list(state: &mut TuiState, facts: &Value, key: &str, label: &str) {
+    let Some(values) = facts.get(key).and_then(Value::as_array) else {
+        return;
+    };
+    if values.is_empty() {
+        return;
+    }
+
+    let rendered = values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .take(5)
+        .collect::<Vec<_>>();
+    if rendered.is_empty() {
+        return;
+    }
+
+    let suffix = values
+        .len()
+        .checked_sub(rendered.len())
+        .filter(|remaining| *remaining > 0)
+        .map(|remaining| format!(" (+{remaining} more)"))
+        .unwrap_or_default();
+    state.push_message(format!("  {label}: {}{}", rendered.join(", "), suffix));
+}
+
+fn append_handoff_fact_value(state: &mut TuiState, facts: &Value, key: &str, label: &str) {
+    let Some(value) = facts.get(key).and_then(Value::as_str) else {
+        return;
+    };
+    if value.trim().is_empty() {
+        return;
+    }
+
+    state.push_message(format!("  {label}: {}", one_line(value)));
 }
 
 fn append_handoff_response(state: &mut TuiState, response: &Value) {
@@ -1581,7 +1640,16 @@ mod tests {
                 "id": "handoff_1",
                 "from_provider_id": "codex",
                 "to_provider_id": "gemini",
-                "summary_markdown": "# Handoff\n\nObjective: continue task\n\nChanged files: none\n"
+                "summary_markdown": "# Handoff\n\nObjective: continue task\n\nChanged files: none\n",
+                "mechanical_facts": {
+                    "changed_files": [],
+                    "commands_run": [],
+                    "test_result": null,
+                    "route_history": [],
+                    "provider_errors": [],
+                    "checkpoint_refs": [],
+                    "user_constraints": []
+                }
             }
         });
 
@@ -1598,6 +1666,41 @@ mod tests {
         assert!(state
             .transcript_text()
             .contains("press Ctrl-Y to accept handoff"));
+    }
+
+    #[test]
+    fn appends_handoff_preview_detail_and_facts() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "handoff": {
+                "id": "handoff_1",
+                "from_provider_id": "codex",
+                "to_provider_id": "gemini",
+                "summary_markdown": "# Handoff\n\nObjective: continue task\n\nContext: keep routing stable\n\nFiles: a.rs\n\nRisk: medium\n\nNext: run tests\n\nNote 1\n\nNote 2\n\nNote 3\n\nNote 4\n\nNote 5\n\nNote 6\n",
+                "mechanical_facts": {
+                    "changed_files": ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"],
+                    "commands_run": ["cargo test", "cargo fmt"],
+                    "test_result": "cargo test passed",
+                    "route_history": ["codex -> gemini"],
+                    "provider_errors": ["429 rate limit"],
+                    "checkpoint_refs": ["checkpoint_1"],
+                    "user_constraints": ["keep TUI simple"]
+                }
+            }
+        });
+
+        append_handoff_preview(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("summary detail:"));
+        assert!(transcript.contains("Objective: continue task"));
+        assert!(transcript.contains("Note 3"));
+        assert!(transcript.contains("(+1 more summary lines)"));
+        assert!(transcript.contains("changed files: a.rs, b.rs, c.rs, d.rs, e.rs (+1 more)"));
+        assert!(transcript.contains("commands: cargo test, cargo fmt"));
+        assert!(transcript.contains("test result: cargo test passed"));
+        assert!(transcript.contains("provider errors: 429 rate limit"));
+        assert!(transcript.contains("constraints: keep TUI simple"));
     }
 
     #[test]
@@ -1716,7 +1819,8 @@ mod tests {
         let transcript = state.transcript_text();
         assert!(transcript.contains("sessions:"));
         assert!(transcript.contains("    task_1 Running codex - write docs"));
-        assert!(transcript.contains("  > task_2 Failed gemini - debug a very long failing provider se..."));
+        assert!(transcript
+            .contains("  > task_2 Failed gemini - debug a very long failing provider se..."));
     }
 
     #[test]
