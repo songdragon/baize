@@ -50,14 +50,21 @@ pub async fn create_handoff(
             changed_files.join(", ")
         }
     );
+    let handoff_id = HandoffId::new();
+    let checkpoint_refs = checkpoint_refs_for_handoff(
+        &state.config.workspace.checkpoint_policy,
+        &session.id,
+        &handoff_id,
+    );
     let handoff = HandoffSummary {
-        id: HandoffId::new(),
+        id: handoff_id,
         session_id: session.id.clone(),
         from_provider_id: from_provider_id.clone(),
         to_provider_id: to_provider_id.clone(),
         summary_markdown,
         mechanical_facts: HandoffFacts {
             changed_files,
+            checkpoint_refs,
             user_constraints,
             ..HandoffFacts::default()
         },
@@ -86,6 +93,18 @@ pub async fn create_handoff(
         "handoff": handoff,
         "artifact_path": artifact_path,
     }))
+}
+
+fn checkpoint_refs_for_handoff(
+    checkpoint_policy: &str,
+    session_id: &baize_core::TaskSessionId,
+    handoff_id: &HandoffId,
+) -> Vec<String> {
+    if checkpoint_policy == "before_handoff" {
+        vec![format!("before_handoff:{}:{}", session_id.0, handoff_id.0)]
+    } else {
+        Vec::new()
+    }
 }
 
 pub async fn accept_handoff(

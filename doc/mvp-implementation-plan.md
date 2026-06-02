@@ -133,6 +133,7 @@ The MVP target is a single-workspace local agent supervisor:
 - changed files and user constraints capture;
 - handoff persistence and event emission;
 - handoff markdown artifact persistence;
+- before-handoff checkpoint references in handoff facts;
 - handoff accept flow that updates active provider and emits route decision;
 - TUI handoff preview before accept;
 - TUI pending handoff status line;
@@ -213,6 +214,7 @@ Implemented test coverage includes:
 - daemon configurable sticky routing policy;
 - daemon handoff creation and accept flow;
 - daemon handoff artifact path response and event payload;
+- daemon checkpoint policy handling for handoff facts;
 - daemon permission listing/filtering/detail lookup;
 - daemon session status transitions (Running, Failed, Canceled, recovery);
 - daemon startup recovery for in-flight sessions;
@@ -287,7 +289,7 @@ These are still in scope for a more usable MVP.
 - ~~add query tables or indexes for higher-volume event lookup~~ (done);
 - ~~persist transcript/handoff artifacts as files when useful~~ (done for handoff artifacts);
 - ~~add crash recovery semantics for in-flight agent runs~~ (done);
-- add checkpoint references for before-handoff policy.
+- ~~add checkpoint references for before-handoff policy~~ (done).
 
 ### 6. Documentation
 

@@ -409,6 +409,15 @@ async fn creates_handoff_artifact() {
         handoff["handoff"]["mechanical_facts"]["user_constraints"][0],
         "do not change public API"
     );
+    assert_eq!(
+        handoff["handoff"]["mechanical_facts"]["checkpoint_refs"][0]
+            .as_str()
+            .expect("checkpoint ref")
+            .split(':')
+            .next()
+            .expect("checkpoint prefix"),
+        "before_handoff"
+    );
     let artifact_path = handoff["artifact_path"].as_str().expect("artifact path");
     assert!(artifact_path.contains("artifacts/handoffs"));
     assert!(std::path::Path::new(artifact_path).starts_with(data_dir.path()));
@@ -465,6 +474,77 @@ async fn creates_handoff_artifact() {
         .iter()
         .any(|event| event["event_type"] == "handoff.created"
             && event["payload"]["artifact_path"] == artifact_path));
+}
+
+#[tokio::test]
+async fn handoff_checkpoint_refs_follow_policy() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let mut config = BaizeConfig::default();
+    config.workspace.checkpoint_policy = "off".to_string();
+    let app = router(AppState::with_executor(
+        config,
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                events: vec![],
+                stderr: String::new(),
+            },
+        }),
+    ));
+    let workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path() }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+    let session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "handoff without checkpoint",
+                    "provider_id": "codex"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let session_id = session["session"]["id"].as_str().expect("session id");
+
+    let handoff = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/handoff"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "to_provider_id": "gemini" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    assert!(handoff["handoff"]["mechanical_facts"]["checkpoint_refs"]
+        .as_array()
+        .expect("checkpoint refs")
+        .is_empty());
 }
 
 #[tokio::test]
