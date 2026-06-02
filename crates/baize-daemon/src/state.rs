@@ -1,7 +1,7 @@
 use anyhow::Result;
 use baize_adapters::{AgentPromptRequest, AgentRunResult};
 use baize_config::BaizeConfig;
-use baize_core::BaizeEvent;
+use baize_core::{BaizeEvent, TaskSessionStatus};
 use baize_storage::EventStore;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -105,12 +105,14 @@ impl AppState {
         executor: Arc<dyn AgentExecutor>,
     ) -> Self {
         let (events, _) = broadcast::channel(256);
-        Self {
+        let state = Self {
             config,
             store: Arc::new(Mutex::new(store)),
             events,
             executor,
-        }
+        };
+        state.recover_in_flight_sessions();
+        state
     }
 
     pub fn record_event(&self, event: BaizeEvent) {
@@ -118,5 +120,35 @@ impl AppState {
             let _ = store.append_event(&event);
         }
         let _ = self.events.send(event);
+    }
+
+    fn recover_in_flight_sessions(&self) {
+        let sessions = match self.store.lock() {
+            Ok(store) => store.list_task_sessions(None, None).unwrap_or_default(),
+            Err(_) => return,
+        };
+
+        for mut session in sessions {
+            if !matches!(session.status, TaskSessionStatus::Running) {
+                continue;
+            }
+            session.status = TaskSessionStatus::Failed;
+            session.updated_at = chrono::Utc::now();
+            if let Ok(store) = self.store.lock() {
+                let _ = store.upsert_task_session(&session);
+            }
+
+            let mut event = BaizeEvent::new(
+                "session.recovered",
+                serde_json::json!({
+                    "status": "Failed",
+                    "reason": "Recovered in-flight session after daemon startup.",
+                }),
+            );
+            event.workspace_id = Some(session.workspace_id.clone());
+            event.session_id = Some(session.id.clone());
+            event.provider_id = session.active_provider_id.clone();
+            self.record_event(event);
+        }
     }
 }

@@ -112,6 +112,7 @@ The MVP target is a single-workspace local agent supervisor:
 - Session status transitions: `Running` stays on prompt success, transitions to `Failed` on prompt failure or executor error, recovers from `Failed` on next successful prompt.
 - Canceled sessions reject new prompt requests.
 - `session.status.changed` event emission on status transitions.
+- Startup recovery marks in-flight `Running` sessions as `Failed` and emits `session.recovered`.
 
 ### 7. Routing
 
@@ -214,6 +215,7 @@ Implemented test coverage includes:
 - daemon handoff artifact path response and event payload;
 - daemon permission listing/filtering/detail lookup;
 - daemon session status transitions (Running, Failed, Canceled, recovery);
+- daemon startup recovery for in-flight sessions;
 - daemon canceled session prompt rejection;
 - TUI dashboard rendering;
 - TUI prompt input rendering;
@@ -284,7 +286,7 @@ These are still in scope for a more usable MVP.
 - ~~Add migration version tracking for SQLite schema~~ (done);
 - ~~add query tables or indexes for higher-volume event lookup~~ (done);
 - ~~persist transcript/handoff artifacts as files when useful~~ (done for handoff artifacts);
-- add crash recovery semantics for in-flight agent runs;
+- ~~add crash recovery semantics for in-flight agent runs~~ (done);
 - add checkpoint references for before-handoff policy.
 
 ### 6. Documentation

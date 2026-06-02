@@ -8,7 +8,10 @@ use baize_adapters::{
     AgentExecutionEvent, AgentExecutionEventKind, AgentPromptRequest, AgentRunResult,
 };
 use baize_config::BaizeConfig;
-use baize_core::{ProviderId, QuotaConfidence, QuotaSource, TaskType};
+use baize_core::{
+    ProviderId, QuotaConfidence, QuotaSource, TaskSession, TaskSessionId, TaskSessionStatus,
+    TaskType, WorkspaceId,
+};
 use baize_storage::EventStore;
 use serde_json::json;
 use std::sync::Arc;
@@ -852,6 +855,70 @@ async fn failed_session_recovers_on_successful_prompt() {
     )
     .await;
     assert_eq!(session_after_recover["session"]["status"], "Running");
+}
+
+#[test]
+fn app_state_recovers_in_flight_sessions_on_startup() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let now = chrono::Utc::now();
+    let running = TaskSession {
+        id: TaskSessionId("task_running".to_string()),
+        workspace_id: WorkspaceId("ws_1".to_string()),
+        objective: "recover this".to_string(),
+        active_provider_id: Some(ProviderId("codex".to_string())),
+        status: TaskSessionStatus::Running,
+        created_at: now,
+        updated_at: now,
+    };
+    let canceled = TaskSession {
+        id: TaskSessionId("task_canceled".to_string()),
+        workspace_id: WorkspaceId("ws_1".to_string()),
+        objective: "leave canceled".to_string(),
+        active_provider_id: Some(ProviderId("gemini".to_string())),
+        status: TaskSessionStatus::Canceled,
+        created_at: now,
+        updated_at: now,
+    };
+    store
+        .upsert_task_session(&running)
+        .expect("running session");
+    store
+        .upsert_task_session(&canceled)
+        .expect("canceled session");
+
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                events: vec![],
+                stderr: String::new(),
+            },
+        }),
+    );
+
+    let recovered = crate::helpers::with_store(&state, |store| store.get_task_session(&running.id))
+        .expect("lookup")
+        .expect("running exists");
+    let still_canceled =
+        crate::helpers::with_store(&state, |store| store.get_task_session(&canceled.id))
+            .expect("lookup")
+            .expect("canceled exists");
+    let events = crate::helpers::with_store(&state, |store| {
+        store.list_events_for_session(&running.id, None, None)
+    })
+    .expect("events");
+
+    assert!(matches!(recovered.status, TaskSessionStatus::Failed));
+    assert!(matches!(still_canceled.status, TaskSessionStatus::Canceled));
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "session.recovered"
+            && event.payload["reason"] == "Recovered in-flight session after daemon startup."));
 }
 
 #[tokio::test]
