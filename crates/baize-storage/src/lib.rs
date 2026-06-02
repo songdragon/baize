@@ -91,6 +91,19 @@ impl EventStore {
                 "#,
             ),
             ("v2", "alter table permissions add column session_id text;"),
+            (
+                "v3",
+                r#"
+                create index if not exists events_session_timestamp_idx on events(session_id, timestamp);
+                create index if not exists events_workspace_timestamp_idx on events(workspace_id, timestamp);
+                create index if not exists events_provider_timestamp_idx on events(provider_id, timestamp);
+                create index if not exists projects_workspace_idx on projects(workspace_id);
+                create index if not exists task_sessions_workspace_idx on task_sessions(workspace_id);
+                create index if not exists route_decisions_session_idx on route_decisions(session_id);
+                create index if not exists handoffs_session_idx on handoffs(session_id);
+                create index if not exists permissions_session_idx on permissions(session_id);
+                "#,
+            ),
         ];
         for (index, (label, sql)) in migrations.iter().enumerate() {
             let version = (index + 1) as i64;
@@ -461,6 +474,17 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
 
+    fn index_names(store: &EventStore) -> Vec<String> {
+        let mut stmt = store
+            .conn
+            .prepare("select name from sqlite_master where type = 'index' order by name")
+            .expect("index query");
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .expect("index rows")
+            .map(|row| row.expect("index name"))
+            .collect()
+    }
+
     #[test]
     fn creates_database_and_appends_events() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -749,7 +773,7 @@ mod tests {
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
 
         let version = store.schema_version().expect("schema version");
-        assert!(version >= 2, "expected at least version 2, got {version}");
+        assert!(version >= 3, "expected at least version 3, got {version}");
     }
 
     #[test]
@@ -790,6 +814,91 @@ mod tests {
             .expect("list by session");
         assert_eq!(by_session.len(), 1);
         assert_eq!(by_session[0].command, "ls");
+    }
+
+    #[test]
+    fn v3_query_indexes_exist() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let indexes = index_names(&store);
+
+        for expected in [
+            "events_session_timestamp_idx",
+            "events_workspace_timestamp_idx",
+            "events_provider_timestamp_idx",
+            "projects_workspace_idx",
+            "task_sessions_workspace_idx",
+            "route_decisions_session_idx",
+            "handoffs_session_idx",
+            "permissions_session_idx",
+        ] {
+            assert!(
+                indexes.iter().any(|index| index == expected),
+                "missing index {expected}; found {indexes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_database_migrates_to_v3_indexes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("baize.db");
+        {
+            let conn = Connection::open(&db_path).expect("open raw db");
+            conn.execute_batch(
+                r#"
+                create table schema_version (version integer primary key);
+                insert into schema_version (version) values (1);
+                insert into schema_version (version) values (2);
+                create table events (
+                    id text primary key,
+                    event_type text not null,
+                    timestamp text not null,
+                    workspace_id text,
+                    session_id text,
+                    provider_id text,
+                    payload text not null
+                );
+                create table workspaces (
+                    id text primary key,
+                    json text not null
+                );
+                create table projects (
+                    id text primary key,
+                    workspace_id text not null,
+                    json text not null
+                );
+                create table task_sessions (
+                    id text primary key,
+                    workspace_id text not null,
+                    json text not null
+                );
+                create table route_decisions (
+                    id text primary key,
+                    session_id text not null,
+                    json text not null
+                );
+                create table handoffs (
+                    id text primary key,
+                    session_id text not null,
+                    json text not null
+                );
+                create table permissions (
+                    id text primary key,
+                    json text not null,
+                    session_id text
+                );
+                "#,
+            )
+            .expect("seed v2 schema");
+        }
+
+        let store = EventStore::open(&db_path).expect("store should migrate");
+
+        assert_eq!(store.schema_version().expect("schema version"), 3);
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "events_session_timestamp_idx"));
     }
 
     #[test]

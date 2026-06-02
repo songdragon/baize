@@ -194,6 +194,7 @@ Implemented test coverage includes:
 - CLI action planning and output formatting;
 - storage event append/count/session lookup;
 - storage workspace/project/session persistence;
+- storage query indexes for high-volume session/workspace lookups;
 - storage route decision and permission lookup;
 - workspace inspection for plain directories;
 - workspace inspection for clean and dirty git repositories;
@@ -278,7 +279,7 @@ These are still in scope for a more usable MVP.
 ### 5. Persistence And Recovery
 
 - ~~Add migration version tracking for SQLite schema~~ (done);
-- add query tables or indexes for higher-volume event lookup;
+- ~~add query tables or indexes for higher-volume event lookup~~ (done);
 - persist transcript/handoff artifacts as files when useful;
 - add crash recovery semantics for in-flight agent runs;
 - add checkpoint references for before-handoff policy.
