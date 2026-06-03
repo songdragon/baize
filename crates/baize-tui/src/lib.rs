@@ -59,6 +59,7 @@ pub struct PermissionView {
     pub command: String,
     pub reason: String,
     pub status: String,
+    pub risk_level: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,6 +434,11 @@ fn parse_permissions(response: &Value) -> Result<Vec<PermissionView>> {
                 .get("status")
                 .and_then(Value::as_str)
                 .unwrap_or("Pending");
+            let risk_level = permission
+                .get("risk")
+                .and_then(|risk| risk.get("level"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
             Some(PermissionView {
                 id: id.to_string(),
                 session_id: permission
@@ -442,6 +448,7 @@ fn parse_permissions(response: &Value) -> Result<Vec<PermissionView>> {
                 command: command.to_string(),
                 reason: reason.to_string(),
                 status: status.to_string(),
+                risk_level,
             })
         })
         .collect())
@@ -1330,11 +1337,17 @@ impl TuiState {
             .as_deref()
             .map(|session_id| format!(" {session_id}"))
             .unwrap_or_default();
+        let risk = permission
+            .risk_level
+            .as_deref()
+            .map(|risk| format!(" risk {risk}"))
+            .unwrap_or_default();
         format!(
-            "> [{}/{}] {}{}",
+            "> [{}/{}] {}{}{}",
             self.selected_permission_index + 1,
             self.pending_permissions.len(),
             short_text(&permission.command, 36),
+            risk,
             session
         )
     }
@@ -2233,7 +2246,8 @@ mod tests {
                     "session_id": "task_1",
                     "command": "cargo test",
                     "reason": "verify changes",
-                    "status": "Pending"
+                    "status": "Pending",
+                    "risk": { "level": "Low" }
                 },
                 {
                     "id": { "0": "perm_2" },
@@ -2256,6 +2270,7 @@ mod tests {
                     command: "cargo test".to_string(),
                     reason: "verify changes".to_string(),
                     status: "Pending".to_string(),
+                    risk_level: Some("Low".to_string()),
                 },
                 PermissionView {
                     id: "perm_2".to_string(),
@@ -2263,6 +2278,7 @@ mod tests {
                     command: "cargo fmt".to_string(),
                     reason: "format changes".to_string(),
                     status: "Pending".to_string(),
+                    risk_level: None,
                 },
             ]
         );
@@ -2277,13 +2293,14 @@ mod tests {
                 command: "cargo test --all-features".to_string(),
                 reason: "verify changes".to_string(),
                 status: "Pending".to_string(),
+                risk_level: Some("Low".to_string()),
             }],
             ..TuiState::default()
         };
 
         assert_eq!(
             state.permission_status(),
-            "> [1/1] cargo test --all-features task_1"
+            "> [1/1] cargo test --all-features risk Low task_1"
         );
     }
 
@@ -2300,6 +2317,7 @@ mod tests {
             command: "cargo test".to_string(),
             reason: "verify".to_string(),
             status: "Pending".to_string(),
+            risk_level: None,
         }]);
 
         assert_eq!(state.selected_permission_index, 0);
@@ -2319,6 +2337,7 @@ mod tests {
                     command: "cargo test".to_string(),
                     reason: "verify".to_string(),
                     status: "Pending".to_string(),
+                    risk_level: None,
                 },
                 PermissionView {
                     id: "perm_2".to_string(),
@@ -2326,6 +2345,7 @@ mod tests {
                     command: "cargo fmt".to_string(),
                     reason: "format".to_string(),
                     status: "Pending".to_string(),
+                    risk_level: None,
                 },
             ],
             ..TuiState::default()

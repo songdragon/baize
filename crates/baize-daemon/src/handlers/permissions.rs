@@ -1,7 +1,7 @@
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::Json;
-use baize_core::{PermissionId, PermissionRequest, PermissionStatus};
+use baize_core::{assess_permission_command, PermissionId, PermissionRequest, PermissionStatus};
 use chrono::Utc;
 
 use crate::helpers::{
@@ -54,6 +54,7 @@ pub async fn create_permission(
         id: PermissionId::new(),
         workspace_id: request.workspace_id.map(baize_core::WorkspaceId),
         session_id: request.session_id.map(baize_core::TaskSessionId),
+        risk: assess_permission_command(&request.command),
         command: request.command,
         reason: request.reason,
         status: PermissionStatus::Pending,

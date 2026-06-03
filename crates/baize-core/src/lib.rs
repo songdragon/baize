@@ -321,9 +321,37 @@ pub struct PermissionRequest {
     pub session_id: Option<TaskSessionId>,
     pub command: String,
     pub reason: String,
+    #[serde(default)]
+    pub risk: PermissionRiskAssessment,
     pub status: PermissionStatus,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionRiskAssessment {
+    pub level: PermissionRiskLevel,
+    pub reasons: Vec<String>,
+    pub recommendation: String,
+}
+
+impl Default for PermissionRiskAssessment {
+    fn default() -> Self {
+        Self {
+            level: PermissionRiskLevel::Low,
+            reasons: Vec::new(),
+            recommendation: "Approve if the command matches the requested task.".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionRiskLevel {
+    #[default]
+    Low,
+    Medium,
+    High,
+    Blocked,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +359,85 @@ pub enum PermissionStatus {
     Pending,
     Approved,
     Denied,
+}
+
+pub fn assess_permission_command(command: &str) -> PermissionRiskAssessment {
+    let normalized = command.to_ascii_lowercase();
+    let mut reasons = Vec::new();
+
+    if contains_any(
+        &normalized,
+        &[
+            "rm -rf /", "mkfs", "dd if=", "dd of=", ":(){", "shutdown", "reboot",
+        ],
+    ) {
+        reasons.push("destructive system-level command pattern".to_string());
+        return PermissionRiskAssessment {
+            level: PermissionRiskLevel::Blocked,
+            reasons,
+            recommendation:
+                "Deny unless the user explicitly requested this exact destructive operation."
+                    .to_string(),
+        };
+    }
+
+    if contains_any(
+        &normalized,
+        &[
+            "sudo ",
+            "chmod -r",
+            "chmod 777",
+            "chown -r",
+            "git reset --hard",
+            "git clean",
+            " rm ",
+            "rm -",
+        ],
+    ) {
+        reasons.push("command can delete, overwrite or elevate privileges".to_string());
+        return PermissionRiskAssessment {
+            level: PermissionRiskLevel::High,
+            reasons,
+            recommendation: "Ask for explicit user confirmation before approving.".to_string(),
+        };
+    }
+
+    if contains_any(
+        &normalized,
+        &[
+            "cargo test",
+            "cargo fmt",
+            "cargo clippy",
+            "git status",
+            "git diff",
+            "ls",
+        ],
+    ) {
+        return PermissionRiskAssessment::default();
+    }
+
+    if contains_any(
+        &normalized,
+        &["cargo run", "npm ", "pnpm ", "yarn ", "python "],
+    ) {
+        reasons.push("command may execute project code or install/run scripts".to_string());
+        return PermissionRiskAssessment {
+            level: PermissionRiskLevel::Medium,
+            reasons,
+            recommendation: "Approve when the command is expected for the current task."
+                .to_string(),
+        };
+    }
+
+    PermissionRiskAssessment {
+        level: PermissionRiskLevel::Medium,
+        reasons: vec!["unknown command pattern".to_string()],
+        recommendation: "Review the command before approving.".to_string(),
+    }
+}
+
+fn contains_any(text: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|pattern| text.contains(pattern))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,5 +520,43 @@ mod tests {
         let decision: RouteDecision = serde_json::from_value(raw).expect("route decision");
 
         assert!(decision.task_type.is_none());
+    }
+
+    #[test]
+    fn assesses_permission_command_risk_levels() {
+        let low = assess_permission_command("cargo test --workspace");
+        assert_eq!(low.level, PermissionRiskLevel::Low);
+        assert!(low.reasons.is_empty());
+
+        let medium = assess_permission_command("npm run build");
+        assert_eq!(medium.level, PermissionRiskLevel::Medium);
+        assert!(!medium.reasons.is_empty());
+
+        let high = assess_permission_command("sudo chmod 777 /tmp/file");
+        assert_eq!(high.level, PermissionRiskLevel::High);
+        assert!(!high.reasons.is_empty());
+
+        let blocked = assess_permission_command("rm -rf /");
+        assert_eq!(blocked.level, PermissionRiskLevel::Blocked);
+        assert!(!blocked.reasons.is_empty());
+    }
+
+    #[test]
+    fn permission_deserializes_without_risk_for_legacy_records() {
+        let raw = json!({
+            "id": "perm_1",
+            "workspace_id": null,
+            "session_id": null,
+            "command": "cargo test",
+            "reason": "verify",
+            "status": "Pending",
+            "created_at": Utc::now(),
+            "resolved_at": null
+        });
+
+        let permission: PermissionRequest = serde_json::from_value(raw).expect("legacy permission");
+
+        assert_eq!(permission.risk.level, PermissionRiskLevel::Low);
+        assert!(permission.risk.reasons.is_empty());
     }
 }

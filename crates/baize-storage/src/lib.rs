@@ -483,8 +483,8 @@ pub fn default_data_dir() -> PathBuf {
 mod tests {
     use super::*;
     use baize_core::{
-        BaizeEvent, HandoffFacts, HandoffStatus, PermissionStatus, ProjectKind, ProviderId,
-        RoutingMode, TaskSessionStatus, TrustLevel, VcsKind, WorkspaceId,
+        BaizeEvent, HandoffFacts, HandoffStatus, PermissionRiskAssessment, PermissionStatus,
+        ProjectKind, ProviderId, RoutingMode, TaskSessionStatus, TrustLevel, VcsKind, WorkspaceId,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -598,6 +598,7 @@ mod tests {
             session_id: Some(session_id),
             command: "cargo test".to_string(),
             reason: "verify changes".to_string(),
+            risk: PermissionRiskAssessment::default(),
             status: PermissionStatus::Pending,
             created_at: Utc::now(),
             resolved_at: None,
@@ -608,6 +609,7 @@ mod tests {
             session_id: None,
             command: "cargo fmt".to_string(),
             reason: "format changes".to_string(),
+            risk: PermissionRiskAssessment::default(),
             status: PermissionStatus::Approved,
             created_at: Utc::now(),
             resolved_at: Some(Utc::now()),
@@ -712,6 +714,7 @@ mod tests {
             session_id: Some(session_id.clone()),
             command: "cargo test".to_string(),
             reason: "verify".to_string(),
+            risk: PermissionRiskAssessment::default(),
             status: PermissionStatus::Pending,
             created_at: Utc::now(),
             resolved_at: None,
@@ -722,6 +725,7 @@ mod tests {
             session_id: Some(session_id.clone()),
             command: "cargo fmt".to_string(),
             reason: "format".to_string(),
+            risk: PermissionRiskAssessment::default(),
             status: PermissionStatus::Approved,
             created_at: Utc::now(),
             resolved_at: Some(Utc::now()),
@@ -732,6 +736,7 @@ mod tests {
             session_id: Some(other_session_id),
             command: "rm -rf".to_string(),
             reason: "cleanup".to_string(),
+            risk: PermissionRiskAssessment::default(),
             status: PermissionStatus::Pending,
             created_at: Utc::now(),
             resolved_at: None,
@@ -844,6 +849,7 @@ mod tests {
             session_id: Some(session_id.clone()),
             command: "ls".to_string(),
             reason: "list".to_string(),
+            risk: PermissionRiskAssessment::default(),
             status: PermissionStatus::Pending,
             created_at: Utc::now(),
             resolved_at: None,

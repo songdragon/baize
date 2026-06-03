@@ -867,6 +867,36 @@ async fn lists_and_filters_permissions() {
 }
 
 #[tokio::test]
+async fn create_permission_reports_command_risk() {
+    let (app, _data_dir, _project_dir) = test_app();
+    let permission = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/permissions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "session_id": "task_risky",
+                    "command": "sudo chmod 777 /tmp/file",
+                    "reason": "change permissions"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(permission["permission"]["risk"]["level"], "High");
+    assert_eq!(permission["permission"]["status"], "Pending");
+    assert!(permission["permission"]["risk"]["reasons"]
+        .as_array()
+        .expect("risk reasons")
+        .iter()
+        .any(|reason| reason == "command can delete, overwrite or elevate privileges"));
+}
+
+#[tokio::test]
 async fn validates_known_provider() {
     let (app, _data_dir, _project_dir) = test_app();
     let validation = json_response(

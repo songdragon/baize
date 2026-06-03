@@ -23,6 +23,7 @@ The MVP target is a single-workspace local agent supervisor:
 - Workspace and project identity;
 - task session identity and lifecycle state;
 - provider identity, priority, transport and capabilities;
+- permission command risk assessment model;
 - route decision model;
 - handoff summary and mechanical facts;
 - permission request and resolution model;
@@ -159,6 +160,7 @@ The MVP target is a single-workspace local agent supervisor:
 ### 10. Permission
 
 - permission request creation;
+- command risk assessment for permission requests;
 - approve/deny resolution;
 - permission persistence and event emission;
 - list permissions;
@@ -166,6 +168,7 @@ The MVP target is a single-workspace local agent supervisor:
 - filter permissions by session ID;
 - fetch permission detail by ID;
 - TUI pending permission status line;
+- TUI permission risk display when daemon provides risk data;
 - `Ctrl-P` to refresh pending permissions;
 - `Up`/`Down` to select pending permission;
 - `Ctrl-A` to approve selected permission;
@@ -202,11 +205,12 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 148.
+Current full test count: 151.
 
 Implemented test coverage includes:
 
 - core ID and event construction;
+- core permission command risk assessment;
 - ACP JSON-RPC request construction;
 - config defaults, TOML parsing, initialization and validation;
 - CLI action planning and output formatting;
@@ -240,6 +244,7 @@ Implemented test coverage includes:
 - daemon handoff artifact path response and event payload;
 - daemon checkpoint policy handling for handoff facts;
 - daemon permission listing/filtering/detail lookup;
+- daemon permission command risk reporting;
 - daemon session status transitions (Running, Failed, Canceled, recovery);
 - daemon startup recovery for in-flight sessions;
 - daemon canceled session prompt rejection;
@@ -255,6 +260,7 @@ Implemented test coverage includes:
 - TUI handoff preview and accept guard behavior;
 - TUI handoff preview detail rendering;
 - TUI permission selection and resolution display;
+- TUI permission risk parsing and status display;
 - TUI command/tool event and test result sections;
 - TUI workspace diff and route history display.
 
@@ -331,6 +337,6 @@ These are still in scope for a more usable MVP.
 - desktop app shell;
 - final relational schema hardening;
 - ~~hunk attribution~~ (done for tracked-file diff hunk extraction);
-- full command permission sandbox;
+- ~~full command permission sandbox~~ (done as first-pass command risk assessment and surfacing);
 - multi-agent concurrent execution;
 - cloud sync or team collaboration.
