@@ -46,6 +46,7 @@ The MVP target is a single-workspace local agent supervisor:
 - git root detection;
 - branch detection;
 - dirty state and changed files;
+- git diff hunk parsing for tracked file changes;
 - clean git repository inspection;
 - dirty git repository inspection with tracked and untracked files;
 - fixed `git status --porcelain` parsing so changed file names do not lose the first character.
@@ -126,6 +127,7 @@ The MVP target is a single-workspace local agent supervisor:
 - Canceled sessions reject new prompt requests.
 - `session.status.changed` event emission on status transitions.
 - Startup recovery marks in-flight `Running` sessions as `Failed` and emits `session.recovered`.
+- Session diff API includes changed files and tracked-file diff hunks.
 
 ### 8. Routing
 
@@ -200,7 +202,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 145.
+Current full test count: 148.
 
 Implemented test coverage includes:
 
@@ -216,6 +218,7 @@ Implemented test coverage includes:
 - storage handoff artifact file writing;
 - workspace inspection for plain directories;
 - workspace inspection for clean and dirty git repositories;
+- workspace diff hunk parsing and git extraction;
 - provider priority and ACP transport metadata;
 - provider ACP initialize proof generation;
 - provider validation behavior;
@@ -226,6 +229,7 @@ Implemented test coverage includes:
 - adapter provider error classification;
 - command timeout behavior;
 - daemon workspace/session/prompt/events flow;
+- daemon session diff hunk reporting;
 - daemon prompt native provider session ID reporting;
 - daemon prompt failure error chain;
 - daemon prompt failure structured provider error reporting;
@@ -326,7 +330,7 @@ These are still in scope for a more usable MVP.
 - multi-workspace TUI switching;
 - desktop app shell;
 - final relational schema hardening;
-- hunk attribution;
+- ~~hunk attribution~~ (done for tracked-file diff hunk extraction);
 - full command permission sandbox;
 - multi-agent concurrent execution;
 - cloud sync or team collaboration.

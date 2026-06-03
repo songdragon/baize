@@ -366,13 +366,20 @@ pub async fn session_diff(
         Ok(Some(project)) => project,
         _ => return not_found("project not found"),
     };
-    match baize_workspace::inspect(project.root) {
-        Ok(status) => ok_json(serde_json::json!({ "diff": {
-            "dirty": status.dirty,
-            "changed_files": status.changed_files,
-        }})),
-        Err(error) => internal_error(error.to_string()),
-    }
+    let root = project.root;
+    let status = match baize_workspace::inspect(&root) {
+        Ok(status) => status,
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let hunks = match baize_workspace::diff_hunks(&root) {
+        Ok(hunks) => hunks,
+        Err(error) => return internal_error(error.to_string()),
+    };
+    ok_json(serde_json::json!({ "diff": {
+        "dirty": status.dirty,
+        "changed_files": status.changed_files,
+        "hunks": hunks,
+    }}))
 }
 
 use crate::helpers::not_found;

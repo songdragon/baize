@@ -15,7 +15,7 @@ use baize_core::{
 };
 use baize_storage::EventStore;
 use serde_json::json;
-use std::sync::Arc;
+use std::{fs, process::Command, sync::Arc};
 use tower::ServiceExt;
 
 #[derive(Clone)]
@@ -251,6 +251,42 @@ async fn prompt_response_reports_native_provider_session_id() {
         .iter()
         .any(|event| event["event_type"] == "session.agent.completed"
             && event["payload"]["native_session_id"] == "codex_native_session_1"));
+}
+
+#[tokio::test]
+async fn session_diff_reports_git_hunks() {
+    let (app, _data_dir, project_dir) = test_app();
+    run_git(project_dir.path(), &["init", "-b", "main"]);
+    fs::write(project_dir.path().join("tracked.txt"), "before\nsame\n").expect("write tracked");
+    run_git(project_dir.path(), &["add", "tracked.txt"]);
+    run_git(project_dir.path(), &["commit", "-m", "initial"]);
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    fs::write(project_dir.path().join("tracked.txt"), "after\nsame\n").expect("modify tracked");
+
+    let diff = json_response(
+        app,
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/diff"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(diff["diff"]["dirty"], true);
+    assert_eq!(diff["diff"]["changed_files"][0], "tracked.txt");
+    assert_eq!(diff["diff"]["hunks"][0]["file_path"], "tracked.txt");
+    assert_eq!(diff["diff"]["hunks"][0]["old_start"], 1);
+    assert!(diff["diff"]["hunks"][0]["lines"]
+        .as_array()
+        .expect("hunk lines")
+        .iter()
+        .any(|line| line == "-before"));
+    assert!(diff["diff"]["hunks"][0]["lines"]
+        .as_array()
+        .expect("hunk lines")
+        .iter()
+        .any(|line| line == "+after"));
 }
 
 #[test]
@@ -1836,4 +1872,22 @@ fn select_provider_uses_custom_override_reason() {
     assert_eq!(result.provider_id.0, "gemini");
     assert_eq!(result.reason, "Gemini handles multi-file edits better");
     assert!((result.confidence - 1.0).abs() < 0.01);
+}
+
+fn run_git(cwd: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "Baize Test")
+        .env("GIT_AUTHOR_EMAIL", "baize@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Baize Test")
+        .env("GIT_COMMITTER_EMAIL", "baize@example.invalid")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
