@@ -205,7 +205,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 155.
+Current full test count: 157.
 
 Implemented test coverage includes:
 
@@ -218,6 +218,7 @@ Implemented test coverage includes:
 - storage event append/count/session lookup;
 - storage workspace/project/session persistence;
 - storage query indexes for high-volume session/workspace lookups;
+- storage task session status/provider query columns and indexes;
 - storage permission risk-level query column and index;
 - storage route decision and permission lookup;
 - storage handoff artifact file writing;
@@ -240,6 +241,7 @@ Implemented test coverage includes:
 - daemon prompt failure structured provider error reporting;
 - daemon provider ordering and provider health ordering;
 - daemon task-type inference for route decisions;
+- daemon session status/provider/workspace filtering;
 - daemon configurable sticky routing policy;
 - daemon handoff creation and accept flow;
 - daemon handoff artifact path response and event payload;
@@ -338,6 +340,7 @@ These are still in scope for a more usable MVP.
 - multi-workspace TUI switching;
 - desktop app shell;
 - final relational schema hardening;
+- ~~task session status/provider query columns/indexes~~ (done as one schema hardening step);
 - ~~permission risk-level query column/index~~ (done as one schema hardening step);
 - ~~hunk attribution~~ (done for tracked-file diff hunk extraction);
 - ~~full command permission sandbox~~ (done as first-pass command risk assessment and surfacing);

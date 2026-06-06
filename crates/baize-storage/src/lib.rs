@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use baize_core::{
     BaizeEvent, HandoffId, HandoffSummary, PermissionId, PermissionRequest, PermissionRiskLevel,
-    Project, ProjectId, RouteDecision, RouteDecisionId, TaskSession, TaskSessionId, Workspace,
-    WorkspaceId,
+    Project, ProjectId, ProviderId, RouteDecision, RouteDecisionId, TaskSession, TaskSessionId,
+    TaskSessionStatus, Workspace, WorkspaceId,
 };
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
@@ -115,6 +115,15 @@ impl EventStore {
                 r#"
                 alter table permissions add column risk_level text;
                 create index if not exists permissions_risk_level_idx on permissions(risk_level);
+                "#,
+            ),
+            (
+                "v5",
+                r#"
+                alter table task_sessions add column status text;
+                alter table task_sessions add column active_provider_id text;
+                create index if not exists task_sessions_status_idx on task_sessions(status);
+                create index if not exists task_sessions_active_provider_idx on task_sessions(active_provider_id);
                 "#,
             ),
         ];
@@ -260,13 +269,19 @@ impl EventStore {
     pub fn upsert_task_session(&self, session: &TaskSession) -> Result<()> {
         self.conn.execute(
             r#"
-            insert into task_sessions (id, workspace_id, json)
-            values (?1, ?2, ?3)
-            on conflict(id) do update set workspace_id = excluded.workspace_id, json = excluded.json
+            insert into task_sessions (id, workspace_id, status, active_provider_id, json)
+            values (?1, ?2, ?3, ?4, ?5)
+            on conflict(id) do update set
+                workspace_id = excluded.workspace_id,
+                status = excluded.status,
+                active_provider_id = excluded.active_provider_id,
+                json = excluded.json
             "#,
             params![
                 &session.id.0,
                 &session.workspace_id.0,
+                task_session_status(&session.status),
+                session.active_provider_id.as_ref().map(|id| id.0.as_str()),
                 serde_json::to_string(session)?,
             ],
         )?;
@@ -279,6 +294,48 @@ impl EventStore {
         offset: Option<u64>,
     ) -> Result<Vec<TaskSession>> {
         self.list_json_paginated("task_sessions", limit, offset)
+    }
+
+    pub fn list_task_sessions_by_status(
+        &self,
+        status: &str,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<TaskSession>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select json from task_sessions where status = ?1 order by rowid limit ?2 offset ?3",
+        )?;
+        let rows = stmt.query_map(params![status, limit, offset], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(serde_json::from_str(&row?)?);
+        }
+        Ok(sessions)
+    }
+
+    pub fn list_task_sessions_by_active_provider(
+        &self,
+        provider_id: &ProviderId,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<TaskSession>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select json from task_sessions where active_provider_id = ?1 order by rowid limit ?2 offset ?3",
+        )?;
+        let rows = stmt.query_map(params![&provider_id.0, limit, offset], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(serde_json::from_str(&row?)?);
+        }
+        Ok(sessions)
     }
 
     pub fn get_task_session(&self, id: &TaskSessionId) -> Result<Option<TaskSession>> {
@@ -508,6 +565,16 @@ fn permission_risk_level(level: &PermissionRiskLevel) -> &'static str {
         PermissionRiskLevel::Medium => "Medium",
         PermissionRiskLevel::High => "High",
         PermissionRiskLevel::Blocked => "Blocked",
+    }
+}
+
+fn task_session_status(status: &TaskSessionStatus) -> &'static str {
+    match status {
+        TaskSessionStatus::Running => "Running",
+        TaskSessionStatus::WaitingForPermission => "WaitingForPermission",
+        TaskSessionStatus::Completed => "Completed",
+        TaskSessionStatus::Failed => "Failed",
+        TaskSessionStatus::Canceled => "Canceled",
     }
 }
 
@@ -900,12 +967,56 @@ mod tests {
     }
 
     #[test]
+    fn lists_task_sessions_by_status_and_active_provider() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let workspace_id = WorkspaceId::new();
+        let now = Utc::now();
+        let running = TaskSession {
+            id: TaskSessionId::new(),
+            workspace_id: workspace_id.clone(),
+            objective: "running".to_string(),
+            active_provider_id: Some(ProviderId("codex".to_string())),
+            status: TaskSessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+        };
+        let failed = TaskSession {
+            id: TaskSessionId::new(),
+            workspace_id,
+            objective: "failed".to_string(),
+            active_provider_id: Some(ProviderId("gemini".to_string())),
+            status: TaskSessionStatus::Failed,
+            created_at: now,
+            updated_at: now,
+        };
+
+        store.upsert_task_session(&running).expect("running");
+        store.upsert_task_session(&failed).expect("failed");
+
+        let running_sessions = store
+            .list_task_sessions_by_status("Running", None, None)
+            .expect("running sessions");
+        assert_eq!(running_sessions.len(), 1);
+        assert_eq!(running_sessions[0].objective, "running");
+
+        let gemini_sessions = store
+            .list_task_sessions_by_active_provider(&ProviderId("gemini".to_string()), None, None)
+            .expect("gemini sessions");
+        assert_eq!(gemini_sessions.len(), 1);
+        assert!(matches!(
+            gemini_sessions[0].status,
+            TaskSessionStatus::Failed
+        ));
+    }
+
+    #[test]
     fn fresh_database_gets_latest_schema_version() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
 
         let version = store.schema_version().expect("schema version");
-        assert!(version >= 4, "expected at least version 4, got {version}");
+        assert!(version >= 5, "expected at least version 5, got {version}");
     }
 
     #[test]
@@ -989,6 +1100,8 @@ mod tests {
             "events_provider_timestamp_idx",
             "projects_workspace_idx",
             "task_sessions_workspace_idx",
+            "task_sessions_status_idx",
+            "task_sessions_active_provider_idx",
             "route_decisions_session_idx",
             "handoffs_session_idx",
             "permissions_session_idx",
@@ -1057,13 +1170,19 @@ mod tests {
 
         let store = EventStore::open(&db_path).expect("store should migrate");
 
-        assert_eq!(store.schema_version().expect("schema version"), 4);
+        assert_eq!(store.schema_version().expect("schema version"), 5);
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "events_session_timestamp_idx"));
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "permissions_risk_level_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "task_sessions_status_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "task_sessions_active_provider_idx"));
     }
 
     #[test]

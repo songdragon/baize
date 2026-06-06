@@ -11,16 +11,92 @@ use crate::helpers::{
     bad_request, format_error_chain, infer_provider_limit, infer_task_type, internal_error,
     json_result, json_result_option, ok_json, select_provider, with_store,
 };
-use crate::state::{AppState, CreateSessionRequest, PaginationQuery, PromptRequest};
+use crate::state::{AppState, CreateSessionRequest, PaginationQuery, PromptRequest, SessionsQuery};
 
 pub async fn sessions(
     State(state): State<AppState>,
-    axum::extract::Query(query): axum::extract::Query<PaginationQuery>,
+    axum::extract::Query(query): axum::extract::Query<SessionsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let sessions = with_store(&state, |store| {
-        store.list_task_sessions(query.limit, query.offset)
-    });
-    json_result("sessions", sessions)
+    let status = match query.status.as_deref().map(parse_session_status) {
+        Some(Some(status)) => Some(status),
+        Some(None) => return bad_request("invalid session status"),
+        None => None,
+    };
+    let provider_id = query
+        .active_provider_id
+        .as_ref()
+        .map(|id| ProviderId(id.clone()));
+    let sessions = match with_store(&state, |store| match (&status, &provider_id) {
+        (Some(status), _) => store.list_task_sessions_by_status(
+            session_status_label(status),
+            query.limit,
+            query.offset,
+        ),
+        (None, Some(provider_id)) => {
+            store.list_task_sessions_by_active_provider(provider_id, query.limit, query.offset)
+        }
+        (None, None) => store.list_task_sessions(query.limit, query.offset),
+    }) {
+        Ok(sessions) => sessions,
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let workspace_id = query.workspace_id.as_deref();
+    let sessions = sessions
+        .into_iter()
+        .filter(|session| {
+            status
+                .as_ref()
+                .is_none_or(|status| session_status_eq(&session.status, status))
+        })
+        .filter(|session| {
+            provider_id.as_ref().is_none_or(|provider_id| {
+                session
+                    .active_provider_id
+                    .as_ref()
+                    .is_some_and(|session_provider| session_provider.0 == provider_id.0)
+            })
+        })
+        .filter(|session| {
+            workspace_id.is_none_or(|workspace_id| session.workspace_id.0 == workspace_id)
+        })
+        .collect::<Vec<_>>();
+
+    ok_json(serde_json::json!({ "sessions": sessions }))
+}
+
+fn parse_session_status(value: &str) -> Option<TaskSessionStatus> {
+    match value.to_ascii_lowercase().replace('_', "").as_str() {
+        "running" => Some(TaskSessionStatus::Running),
+        "waitingforpermission" => Some(TaskSessionStatus::WaitingForPermission),
+        "completed" => Some(TaskSessionStatus::Completed),
+        "failed" => Some(TaskSessionStatus::Failed),
+        "canceled" | "cancelled" => Some(TaskSessionStatus::Canceled),
+        _ => None,
+    }
+}
+
+fn session_status_label(status: &TaskSessionStatus) -> &'static str {
+    match status {
+        TaskSessionStatus::Running => "Running",
+        TaskSessionStatus::WaitingForPermission => "WaitingForPermission",
+        TaskSessionStatus::Completed => "Completed",
+        TaskSessionStatus::Failed => "Failed",
+        TaskSessionStatus::Canceled => "Canceled",
+    }
+}
+
+fn session_status_eq(left: &TaskSessionStatus, right: &TaskSessionStatus) -> bool {
+    matches!(
+        (left, right),
+        (TaskSessionStatus::Running, TaskSessionStatus::Running)
+            | (
+                TaskSessionStatus::WaitingForPermission,
+                TaskSessionStatus::WaitingForPermission
+            )
+            | (TaskSessionStatus::Completed, TaskSessionStatus::Completed)
+            | (TaskSessionStatus::Failed, TaskSessionStatus::Failed)
+            | (TaskSessionStatus::Canceled, TaskSessionStatus::Canceled)
+    )
 }
 
 pub async fn session(

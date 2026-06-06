@@ -80,6 +80,15 @@ pub struct PermissionsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SessionsQuery {
+    pub status: Option<String>,
+    pub workspace_id: Option<String>,
+    pub active_provider_id: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PaginationQuery {
     pub limit: Option<u64>,
     pub offset: Option<u64>,

@@ -174,6 +174,138 @@ async fn creates_workspace_session_prompt_and_events() {
 }
 
 #[tokio::test]
+async fn filters_sessions_by_status_provider_and_workspace() {
+    let (app, _data_dir, project_dir) = test_app();
+    let other_project_dir = tempfile::tempdir().expect("other project dir");
+    let first_workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path(), "name": "first" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let first_workspace_id = first_workspace["workspace"]["id"]
+        .as_str()
+        .expect("workspace id");
+    let second_workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": other_project_dir.path(), "name": "second" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let second_workspace_id = second_workspace["workspace"]["id"]
+        .as_str()
+        .expect("workspace id");
+
+    let first_session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": first_workspace_id,
+                    "objective": "write tests",
+                    "provider_id": "codex"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let first_session_id = first_session["session"]["id"].as_str().expect("session id");
+    let second_session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": second_workspace_id,
+                    "objective": "debug failure",
+                    "provider_id": "gemini"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let second_session_id = second_session["session"]["id"]
+        .as_str()
+        .expect("session id");
+
+    let _canceled = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{second_session_id}/cancel"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    let canceled = json_response(
+        app.clone(),
+        Request::builder()
+            .uri("/sessions?status=canceled")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let canceled_items = canceled["sessions"].as_array().expect("sessions");
+    assert_eq!(canceled_items.len(), 1);
+    assert_eq!(canceled_items[0]["id"], second_session_id);
+
+    let codex = json_response(
+        app.clone(),
+        Request::builder()
+            .uri("/sessions?active_provider_id=codex")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let codex_items = codex["sessions"].as_array().expect("sessions");
+    assert_eq!(codex_items.len(), 1);
+    assert_eq!(codex_items[0]["id"], first_session_id);
+
+    let by_workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/sessions?workspace_id={second_workspace_id}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let workspace_items = by_workspace["sessions"].as_array().expect("sessions");
+    assert_eq!(workspace_items.len(), 1);
+    assert_eq!(workspace_items[0]["id"], second_session_id);
+
+    let (status, invalid) = json_response_with_status(
+        app,
+        Request::builder()
+            .uri("/sessions?status=paused")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid["error"], "invalid session status");
+}
+
+#[tokio::test]
 async fn prompt_response_reports_native_provider_session_id() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let project_dir = tempfile::tempdir().expect("project dir");
