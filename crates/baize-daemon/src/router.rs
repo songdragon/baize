@@ -16,6 +16,10 @@ pub fn router(state: AppState) -> Router {
             "/workspaces/:id/status",
             get(handlers::workspaces::workspace_status_by_id),
         )
+        .route(
+            "/workspaces/:id/projects",
+            get(handlers::workspaces::workspace_projects),
+        )
         .route("/providers", get(handlers::providers::providers))
         .route(
             "/providers/:id/health",

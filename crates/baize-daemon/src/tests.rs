@@ -1770,6 +1770,52 @@ async fn successful_operations_return_200() {
 }
 
 #[tokio::test]
+async fn workspace_projects_lists_projects_for_workspace() {
+    let (app, _data_dir, project_dir) = test_app();
+    let workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path(), "name": "project-list" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("id");
+    let primary_project_id = workspace["workspace"]["primary_project_id"]
+        .as_str()
+        .expect("project id");
+
+    let list = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/workspaces/{workspace_id}/projects"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let projects = list["projects"].as_array().expect("projects array");
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["id"], primary_project_id);
+
+    let (status, missing) = json_response_with_status(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/workspaces/ws_missing/projects")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["error"], "workspace not found");
+}
+
+#[tokio::test]
 async fn session_handoffs_lists_handoffs_for_session() {
     let (app, _data_dir, project_dir) = test_app();
     let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;

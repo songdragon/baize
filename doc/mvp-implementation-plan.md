@@ -105,6 +105,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `POST /providers/validate`;
 - `GET /workspaces`;
 - `POST /workspaces`;
+- `GET /workspaces/:id/projects`;
 - `GET /workspaces/:id/status`;
 - `GET /workspaces/status?path=...`;
 - `GET /sessions`;
@@ -206,7 +207,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 158.
+Current full test count: 159.
 
 Implemented test coverage includes:
 
@@ -240,6 +241,7 @@ Implemented test coverage includes:
 - adapter provider error classification;
 - command timeout behavior;
 - daemon workspace/session/prompt/events flow;
+- daemon workspace project listing;
 - daemon event history filtering;
 - daemon session diff hunk reporting;
 - daemon prompt native provider session ID reporting;

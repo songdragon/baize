@@ -104,3 +104,19 @@ pub async fn workspace_status_by_id(
     }))
     .await
 }
+
+pub async fn workspace_projects(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let workspace_id = WorkspaceId(id);
+    let workspace = match with_store(&state, |store| store.get_workspace(&workspace_id)) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return not_found("workspace not found"),
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let projects = with_store(&state, |store| {
+        store.list_projects_for_workspace(&workspace.id)
+    });
+    json_result("projects", projects)
+}
