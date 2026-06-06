@@ -63,6 +63,12 @@ pub struct HandoffRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct HandoffsQuery {
+    pub status: Option<String>,
+    pub to_provider_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreatePermissionRequest {
     pub workspace_id: Option<String>,
     pub session_id: Option<String>,

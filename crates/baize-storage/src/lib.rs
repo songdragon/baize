@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use baize_core::{
-    BaizeEvent, HandoffId, HandoffSummary, PermissionId, PermissionRequest, PermissionRiskLevel,
-    Project, ProjectId, ProviderId, RouteDecision, RouteDecisionId, TaskSession, TaskSessionId,
-    TaskSessionStatus, Workspace, WorkspaceId,
+    BaizeEvent, HandoffId, HandoffStatus, HandoffSummary, PermissionId, PermissionRequest,
+    PermissionRiskLevel, Project, ProjectId, ProviderId, RouteDecision, RouteDecisionId,
+    TaskSession, TaskSessionId, TaskSessionStatus, Workspace, WorkspaceId,
 };
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
@@ -124,6 +124,15 @@ impl EventStore {
                 alter table task_sessions add column active_provider_id text;
                 create index if not exists task_sessions_status_idx on task_sessions(status);
                 create index if not exists task_sessions_active_provider_idx on task_sessions(active_provider_id);
+                "#,
+            ),
+            (
+                "v6",
+                r#"
+                alter table handoffs add column status text;
+                alter table handoffs add column to_provider_id text;
+                create index if not exists handoffs_status_idx on handoffs(status);
+                create index if not exists handoffs_to_provider_idx on handoffs(to_provider_id);
                 "#,
             ),
         ];
@@ -393,13 +402,19 @@ impl EventStore {
     pub fn insert_handoff(&self, handoff: &HandoffSummary) -> Result<()> {
         self.conn.execute(
             r#"
-            insert into handoffs (id, session_id, json)
-            values (?1, ?2, ?3)
-            on conflict(id) do update set session_id = excluded.session_id, json = excluded.json
+            insert into handoffs (id, session_id, status, to_provider_id, json)
+            values (?1, ?2, ?3, ?4, ?5)
+            on conflict(id) do update set
+                session_id = excluded.session_id,
+                status = excluded.status,
+                to_provider_id = excluded.to_provider_id,
+                json = excluded.json
             "#,
             params![
                 &handoff.id.0,
                 &handoff.session_id.0,
+                handoff_status(&handoff.status),
+                &handoff.to_provider_id.0,
                 serde_json::to_string(handoff)?,
             ],
         )?;
@@ -428,6 +443,42 @@ impl EventStore {
             .conn
             .prepare("select json from handoffs where session_id = ?1 order by rowid")?;
         let rows = stmt.query_map(params![&session_id.0], |row| row.get::<_, String>(0))?;
+        let mut handoffs = Vec::new();
+        for row in rows {
+            handoffs.push(serde_json::from_str(&row?)?);
+        }
+        Ok(handoffs)
+    }
+
+    pub fn list_handoffs_for_session_by_status(
+        &self,
+        session_id: &TaskSessionId,
+        status: &str,
+    ) -> Result<Vec<HandoffSummary>> {
+        let mut stmt = self.conn.prepare(
+            "select json from handoffs where session_id = ?1 and status = ?2 order by rowid",
+        )?;
+        let rows = stmt.query_map(params![&session_id.0, status], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut handoffs = Vec::new();
+        for row in rows {
+            handoffs.push(serde_json::from_str(&row?)?);
+        }
+        Ok(handoffs)
+    }
+
+    pub fn list_handoffs_for_session_by_to_provider(
+        &self,
+        session_id: &TaskSessionId,
+        provider_id: &ProviderId,
+    ) -> Result<Vec<HandoffSummary>> {
+        let mut stmt = self.conn.prepare(
+            "select json from handoffs where session_id = ?1 and to_provider_id = ?2 order by rowid",
+        )?;
+        let rows = stmt.query_map(params![&session_id.0, &provider_id.0], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut handoffs = Vec::new();
         for row in rows {
             handoffs.push(serde_json::from_str(&row?)?);
@@ -575,6 +626,14 @@ fn task_session_status(status: &TaskSessionStatus) -> &'static str {
         TaskSessionStatus::Completed => "Completed",
         TaskSessionStatus::Failed => "Failed",
         TaskSessionStatus::Canceled => "Canceled",
+    }
+}
+
+fn handoff_status(status: &HandoffStatus) -> &'static str {
+    match status {
+        HandoffStatus::Draft => "Draft",
+        HandoffStatus::Accepted => "Accepted",
+        HandoffStatus::Failed => "Failed",
     }
 }
 
@@ -830,6 +889,48 @@ mod tests {
     }
 
     #[test]
+    fn lists_handoffs_for_session_by_status_and_to_provider() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let session_id = TaskSessionId::new();
+        let draft = HandoffSummary {
+            id: HandoffId::new(),
+            session_id: session_id.clone(),
+            from_provider_id: ProviderId("codex".to_string()),
+            to_provider_id: ProviderId("gemini".to_string()),
+            summary_markdown: "# Draft".to_string(),
+            mechanical_facts: HandoffFacts::default(),
+            status: HandoffStatus::Draft,
+            created_at: Utc::now(),
+        };
+        let accepted = HandoffSummary {
+            id: HandoffId::new(),
+            session_id: session_id.clone(),
+            from_provider_id: ProviderId("gemini".to_string()),
+            to_provider_id: ProviderId("codex".to_string()),
+            summary_markdown: "# Accepted".to_string(),
+            mechanical_facts: HandoffFacts::default(),
+            status: HandoffStatus::Accepted,
+            created_at: Utc::now(),
+        };
+
+        store.insert_handoff(&draft).expect("draft handoff");
+        store.insert_handoff(&accepted).expect("accepted handoff");
+
+        let drafts = store
+            .list_handoffs_for_session_by_status(&session_id, "Draft")
+            .expect("drafts");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].to_provider_id.0, "gemini");
+
+        let to_codex = store
+            .list_handoffs_for_session_by_to_provider(&session_id, &ProviderId("codex".to_string()))
+            .expect("codex handoffs");
+        assert_eq!(to_codex.len(), 1);
+        assert!(matches!(to_codex[0].status, HandoffStatus::Accepted));
+    }
+
+    #[test]
     fn writes_handoff_markdown_artifact() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
@@ -1016,7 +1117,7 @@ mod tests {
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
 
         let version = store.schema_version().expect("schema version");
-        assert!(version >= 5, "expected at least version 5, got {version}");
+        assert!(version >= 6, "expected at least version 6, got {version}");
     }
 
     #[test]
@@ -1104,6 +1205,8 @@ mod tests {
             "task_sessions_active_provider_idx",
             "route_decisions_session_idx",
             "handoffs_session_idx",
+            "handoffs_status_idx",
+            "handoffs_to_provider_idx",
             "permissions_session_idx",
             "permissions_risk_level_idx",
         ] {
@@ -1170,7 +1273,7 @@ mod tests {
 
         let store = EventStore::open(&db_path).expect("store should migrate");
 
-        assert_eq!(store.schema_version().expect("schema version"), 5);
+        assert_eq!(store.schema_version().expect("schema version"), 6);
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "events_session_timestamp_idx"));
@@ -1183,6 +1286,12 @@ mod tests {
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "task_sessions_active_provider_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "handoffs_status_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "handoffs_to_provider_idx"));
     }
 
     #[test]

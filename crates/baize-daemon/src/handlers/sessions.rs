@@ -2,8 +2,8 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::Json;
 use baize_core::{
-    ProviderId, RouteDecision, RouteDecisionId, RoutingMode, TaskSession, TaskSessionId,
-    TaskSessionStatus,
+    HandoffStatus, ProviderId, RouteDecision, RouteDecisionId, RoutingMode, TaskSession,
+    TaskSessionId, TaskSessionStatus,
 };
 use chrono::Utc;
 
@@ -11,7 +11,9 @@ use crate::helpers::{
     bad_request, format_error_chain, infer_provider_limit, infer_task_type, internal_error,
     json_result, json_result_option, ok_json, select_provider, with_store,
 };
-use crate::state::{AppState, CreateSessionRequest, PaginationQuery, PromptRequest, SessionsQuery};
+use crate::state::{
+    AppState, CreateSessionRequest, HandoffsQuery, PaginationQuery, PromptRequest, SessionsQuery,
+};
 
 pub async fn sessions(
     State(state): State<AppState>,
@@ -99,6 +101,32 @@ fn session_status_eq(left: &TaskSessionStatus, right: &TaskSessionStatus) -> boo
     )
 }
 
+fn parse_handoff_status(value: &str) -> Option<HandoffStatus> {
+    match value.to_ascii_lowercase().as_str() {
+        "draft" => Some(HandoffStatus::Draft),
+        "accepted" => Some(HandoffStatus::Accepted),
+        "failed" => Some(HandoffStatus::Failed),
+        _ => None,
+    }
+}
+
+fn handoff_status_label(status: &HandoffStatus) -> &'static str {
+    match status {
+        HandoffStatus::Draft => "Draft",
+        HandoffStatus::Accepted => "Accepted",
+        HandoffStatus::Failed => "Failed",
+    }
+}
+
+fn handoff_status_eq(left: &HandoffStatus, right: &HandoffStatus) -> bool {
+    matches!(
+        (left, right),
+        (HandoffStatus::Draft, HandoffStatus::Draft)
+            | (HandoffStatus::Accepted, HandoffStatus::Accepted)
+            | (HandoffStatus::Failed, HandoffStatus::Failed)
+    )
+}
+
 pub async fn session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -120,11 +148,45 @@ pub async fn session_routes(
 pub async fn session_handoffs(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<HandoffsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let handoffs = with_store(&state, |store| {
-        store.list_handoffs_for_session(&TaskSessionId(id))
-    });
-    json_result("handoffs", handoffs)
+    let session_id = TaskSessionId(id);
+    let status = match query.status.as_deref().map(parse_handoff_status) {
+        Some(Some(status)) => Some(status),
+        Some(None) => return bad_request("invalid handoff status"),
+        None => None,
+    };
+    let to_provider_id = query
+        .to_provider_id
+        .as_ref()
+        .map(|id| ProviderId(id.clone()));
+    let handoffs = match with_store(&state, |store| match (&status, &to_provider_id) {
+        (Some(status), _) => {
+            store.list_handoffs_for_session_by_status(&session_id, handoff_status_label(status))
+        }
+        (None, Some(provider_id)) => {
+            store.list_handoffs_for_session_by_to_provider(&session_id, provider_id)
+        }
+        (None, None) => store.list_handoffs_for_session(&session_id),
+    }) {
+        Ok(handoffs) => handoffs,
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let handoffs = handoffs
+        .into_iter()
+        .filter(|handoff| {
+            status
+                .as_ref()
+                .is_none_or(|status| handoff_status_eq(&handoff.status, status))
+        })
+        .filter(|handoff| {
+            to_provider_id
+                .as_ref()
+                .is_none_or(|provider_id| handoff.to_provider_id.0 == provider_id.0)
+        })
+        .collect::<Vec<_>>();
+
+    ok_json(serde_json::json!({ "handoffs": handoffs }))
 }
 
 pub async fn session_permissions(

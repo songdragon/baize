@@ -1701,6 +1701,29 @@ async fn session_handoffs_lists_handoffs_for_session() {
 
     let handoff_id = handoff["handoff"]["id"].as_str().expect("handoff id");
 
+    let _accepted = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/sessions/{session_id}/handoff/{handoff_id}/accept"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let second = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/handoff"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "to_provider_id": "codex" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+    let second_handoff_id = second["handoff"]["id"].as_str().expect("handoff id");
+
     let list = json_response(
         app.clone(),
         Request::builder()
@@ -1710,9 +1733,47 @@ async fn session_handoffs_lists_handoffs_for_session() {
     )
     .await;
     let handoffs = list["handoffs"].as_array().expect("handoffs array");
-    assert_eq!(handoffs.len(), 1);
+    assert_eq!(handoffs.len(), 2);
     assert_eq!(handoffs[0]["id"], handoff_id);
     assert_eq!(handoffs[0]["to_provider_id"], "gemini");
+    assert_eq!(handoffs[0]["status"], "Accepted");
+
+    let accepted = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/handoffs?status=accepted"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let accepted_handoffs = accepted["handoffs"].as_array().expect("handoffs array");
+    assert_eq!(accepted_handoffs.len(), 1);
+    assert_eq!(accepted_handoffs[0]["id"], handoff_id);
+
+    let to_codex = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/sessions/{session_id}/handoffs?to_provider_id=codex"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let codex_handoffs = to_codex["handoffs"].as_array().expect("handoffs array");
+    assert_eq!(codex_handoffs.len(), 1);
+    assert_eq!(codex_handoffs[0]["id"], second_handoff_id);
+
+    let (status, invalid) = json_response_with_status(
+        app,
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/handoffs?status=paused"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid["error"], "invalid handoff status");
 }
 
 #[tokio::test]
