@@ -69,6 +69,13 @@ pub struct HandoffsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RoutesQuery {
+    pub selected_provider_id: Option<String>,
+    pub task_type: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreatePermissionRequest {
     pub workspace_id: Option<String>,
     pub session_id: Option<String>,

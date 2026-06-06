@@ -171,6 +171,66 @@ async fn creates_workspace_session_prompt_and_events() {
     .await;
     assert_eq!(routes["routes"][0]["selected_provider_id"], "codex");
     assert_eq!(routes["routes"][0]["task_type"], "Testing");
+
+    let codex_routes = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/sessions/{session_id}/routes?selected_provider_id=codex"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(
+        codex_routes["routes"]
+            .as_array()
+            .expect("routes array")
+            .len(),
+        1
+    );
+
+    let testing_routes = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/routes?task_type=testing"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(testing_routes["routes"][0]["selected_provider_id"], "codex");
+
+    let assisted_routes = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/routes?mode=assisted"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(assisted_routes["routes"][0]["mode"], "Assisted");
+
+    let (task_status, invalid_task) = json_response_with_status(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/routes?task_type=unknown"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(task_status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_task["error"], "invalid route task type");
+
+    let (mode_status, invalid_mode) = json_response_with_status(
+        app,
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/routes?mode=background"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(mode_status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_mode["error"], "invalid route mode");
 }
 
 #[tokio::test]

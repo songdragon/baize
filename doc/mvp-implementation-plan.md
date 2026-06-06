@@ -218,6 +218,7 @@ Implemented test coverage includes:
 - storage event append/count/session lookup;
 - storage workspace/project/session persistence;
 - storage query indexes for high-volume session/workspace lookups;
+- storage route decision provider/task/mode query columns and indexes;
 - storage task session status/provider query columns and indexes;
 - storage handoff status/provider query columns and indexes;
 - storage permission risk-level query column and index;
@@ -242,6 +243,7 @@ Implemented test coverage includes:
 - daemon prompt failure structured provider error reporting;
 - daemon provider ordering and provider health ordering;
 - daemon task-type inference for route decisions;
+- daemon route decision provider/task/mode filtering;
 - daemon session status/provider/workspace filtering;
 - daemon configurable sticky routing policy;
 - daemon handoff creation and accept flow;
@@ -342,6 +344,7 @@ These are still in scope for a more usable MVP.
 - multi-workspace TUI switching;
 - desktop app shell;
 - final relational schema hardening;
+- ~~route decision provider/task/mode query columns/indexes~~ (done as one schema hardening step);
 - ~~handoff status/provider query columns/indexes~~ (done as one schema hardening step);
 - ~~task session status/provider query columns/indexes~~ (done as one schema hardening step);
 - ~~permission risk-level query column/index~~ (done as one schema hardening step);

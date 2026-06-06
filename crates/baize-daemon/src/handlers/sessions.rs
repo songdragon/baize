@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use baize_core::{
     HandoffStatus, ProviderId, RouteDecision, RouteDecisionId, RoutingMode, TaskSession,
-    TaskSessionId, TaskSessionStatus,
+    TaskSessionId, TaskSessionStatus, TaskType,
 };
 use chrono::Utc;
 
@@ -12,7 +12,8 @@ use crate::helpers::{
     json_result, json_result_option, ok_json, select_provider, with_store,
 };
 use crate::state::{
-    AppState, CreateSessionRequest, HandoffsQuery, PaginationQuery, PromptRequest, SessionsQuery,
+    AppState, CreateSessionRequest, HandoffsQuery, PaginationQuery, PromptRequest, RoutesQuery,
+    SessionsQuery,
 };
 
 pub async fn sessions(
@@ -101,6 +102,64 @@ fn session_status_eq(left: &TaskSessionStatus, right: &TaskSessionStatus) -> boo
     )
 }
 
+fn parse_task_type(value: &str) -> Option<TaskType> {
+    match value.to_ascii_lowercase().as_str() {
+        "testing" | "test" => Some(TaskType::Testing),
+        "debugging" | "debug" => Some(TaskType::Debugging),
+        "refactor" => Some(TaskType::Refactor),
+        "documentation" | "docs" | "doc" => Some(TaskType::Documentation),
+        "implementation" | "implement" => Some(TaskType::Implementation),
+        _ => None,
+    }
+}
+
+fn task_type_label(task_type: &TaskType) -> &'static str {
+    match task_type {
+        TaskType::Testing => "Testing",
+        TaskType::Debugging => "Debugging",
+        TaskType::Refactor => "Refactor",
+        TaskType::Documentation => "Documentation",
+        TaskType::Implementation => "Implementation",
+    }
+}
+
+fn task_type_eq(left: &TaskType, right: &TaskType) -> bool {
+    matches!(
+        (left, right),
+        (TaskType::Testing, TaskType::Testing)
+            | (TaskType::Debugging, TaskType::Debugging)
+            | (TaskType::Refactor, TaskType::Refactor)
+            | (TaskType::Documentation, TaskType::Documentation)
+            | (TaskType::Implementation, TaskType::Implementation)
+    )
+}
+
+fn parse_routing_mode(value: &str) -> Option<RoutingMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "manual" => Some(RoutingMode::Manual),
+        "assisted" => Some(RoutingMode::Assisted),
+        "autopilot" => Some(RoutingMode::Autopilot),
+        _ => None,
+    }
+}
+
+fn routing_mode_label(mode: &RoutingMode) -> &'static str {
+    match mode {
+        RoutingMode::Manual => "Manual",
+        RoutingMode::Assisted => "Assisted",
+        RoutingMode::Autopilot => "Autopilot",
+    }
+}
+
+fn routing_mode_eq(left: &RoutingMode, right: &RoutingMode) -> bool {
+    matches!(
+        (left, right),
+        (RoutingMode::Manual, RoutingMode::Manual)
+            | (RoutingMode::Assisted, RoutingMode::Assisted)
+            | (RoutingMode::Autopilot, RoutingMode::Autopilot)
+    )
+}
+
 fn parse_handoff_status(value: &str) -> Option<HandoffStatus> {
     match value.to_ascii_lowercase().as_str() {
         "draft" => Some(HandoffStatus::Draft),
@@ -138,11 +197,59 @@ pub async fn session(
 pub async fn session_routes(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<RoutesQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let routes = with_store(&state, |store| {
-        store.list_route_decisions_for_session(&TaskSessionId(id))
-    });
-    json_result("routes", routes)
+    let session_id = TaskSessionId(id);
+    let task_type = match query.task_type.as_deref().map(parse_task_type) {
+        Some(Some(task_type)) => Some(task_type),
+        Some(None) => return bad_request("invalid route task type"),
+        None => None,
+    };
+    let mode = match query.mode.as_deref().map(parse_routing_mode) {
+        Some(Some(mode)) => Some(mode),
+        Some(None) => return bad_request("invalid route mode"),
+        None => None,
+    };
+    let provider_id = query
+        .selected_provider_id
+        .as_ref()
+        .map(|id| ProviderId(id.clone()));
+    let routes = match with_store(&state, |store| match (&provider_id, &task_type, &mode) {
+        (Some(provider_id), _, _) => {
+            store.list_route_decisions_for_session_by_selected_provider(&session_id, provider_id)
+        }
+        (None, Some(task_type), _) => store
+            .list_route_decisions_for_session_by_task_type(&session_id, task_type_label(task_type)),
+        (None, None, Some(mode)) => {
+            store.list_route_decisions_for_session_by_mode(&session_id, routing_mode_label(mode))
+        }
+        (None, None, None) => store.list_route_decisions_for_session(&session_id),
+    }) {
+        Ok(routes) => routes,
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let routes = routes
+        .into_iter()
+        .filter(|route| {
+            provider_id
+                .as_ref()
+                .is_none_or(|provider_id| route.selected_provider_id.0 == provider_id.0)
+        })
+        .filter(|route| {
+            task_type.as_ref().is_none_or(|task_type| {
+                route
+                    .task_type
+                    .as_ref()
+                    .is_some_and(|route_task_type| task_type_eq(route_task_type, task_type))
+            })
+        })
+        .filter(|route| {
+            mode.as_ref()
+                .is_none_or(|mode| routing_mode_eq(&route.mode, mode))
+        })
+        .collect::<Vec<_>>();
+
+    ok_json(serde_json::json!({ "routes": routes }))
 }
 
 pub async fn session_handoffs(

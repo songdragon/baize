@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use baize_core::{
     BaizeEvent, HandoffId, HandoffStatus, HandoffSummary, PermissionId, PermissionRequest,
     PermissionRiskLevel, Project, ProjectId, ProviderId, RouteDecision, RouteDecisionId,
-    TaskSession, TaskSessionId, TaskSessionStatus, Workspace, WorkspaceId,
+    RoutingMode, TaskSession, TaskSessionId, TaskSessionStatus, TaskType, Workspace, WorkspaceId,
 };
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
@@ -133,6 +133,17 @@ impl EventStore {
                 alter table handoffs add column to_provider_id text;
                 create index if not exists handoffs_status_idx on handoffs(status);
                 create index if not exists handoffs_to_provider_idx on handoffs(to_provider_id);
+                "#,
+            ),
+            (
+                "v7",
+                r#"
+                alter table route_decisions add column selected_provider_id text;
+                alter table route_decisions add column task_type text;
+                alter table route_decisions add column mode text;
+                create index if not exists route_decisions_selected_provider_idx on route_decisions(selected_provider_id);
+                create index if not exists route_decisions_task_type_idx on route_decisions(task_type);
+                create index if not exists route_decisions_mode_idx on route_decisions(mode);
                 "#,
             ),
         ];
@@ -370,10 +381,17 @@ impl EventStore {
 
     pub fn insert_route_decision(&self, decision: &RouteDecision) -> Result<()> {
         self.conn.execute(
-            "insert into route_decisions (id, session_id, json) values (?1, ?2, ?3)",
+            r#"
+            insert into route_decisions (
+                id, session_id, selected_provider_id, task_type, mode, json
+            ) values (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
             params![
                 &decision.id.0,
                 &decision.session_id.0,
+                &decision.selected_provider_id.0,
+                decision.task_type.as_ref().map(task_type_label),
+                routing_mode_label(&decision.mode),
                 serde_json::to_string(decision)?,
             ],
         )?;
@@ -392,6 +410,58 @@ impl EventStore {
             .conn
             .prepare("select json from route_decisions where session_id = ?1 order by rowid")?;
         let rows = stmt.query_map(params![&session_id.0], |row| row.get::<_, String>(0))?;
+        let mut decisions = Vec::new();
+        for row in rows {
+            decisions.push(serde_json::from_str(&row?)?);
+        }
+        Ok(decisions)
+    }
+
+    pub fn list_route_decisions_for_session_by_selected_provider(
+        &self,
+        session_id: &TaskSessionId,
+        provider_id: &ProviderId,
+    ) -> Result<Vec<RouteDecision>> {
+        let mut stmt = self.conn.prepare(
+            "select json from route_decisions where session_id = ?1 and selected_provider_id = ?2 order by rowid",
+        )?;
+        let rows = stmt.query_map(params![&session_id.0, &provider_id.0], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut decisions = Vec::new();
+        for row in rows {
+            decisions.push(serde_json::from_str(&row?)?);
+        }
+        Ok(decisions)
+    }
+
+    pub fn list_route_decisions_for_session_by_task_type(
+        &self,
+        session_id: &TaskSessionId,
+        task_type: &str,
+    ) -> Result<Vec<RouteDecision>> {
+        let mut stmt = self.conn.prepare(
+            "select json from route_decisions where session_id = ?1 and task_type = ?2 order by rowid",
+        )?;
+        let rows = stmt.query_map(params![&session_id.0, task_type], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut decisions = Vec::new();
+        for row in rows {
+            decisions.push(serde_json::from_str(&row?)?);
+        }
+        Ok(decisions)
+    }
+
+    pub fn list_route_decisions_for_session_by_mode(
+        &self,
+        session_id: &TaskSessionId,
+        mode: &str,
+    ) -> Result<Vec<RouteDecision>> {
+        let mut stmt = self.conn.prepare(
+            "select json from route_decisions where session_id = ?1 and mode = ?2 order by rowid",
+        )?;
+        let rows = stmt.query_map(params![&session_id.0, mode], |row| row.get::<_, String>(0))?;
         let mut decisions = Vec::new();
         for row in rows {
             decisions.push(serde_json::from_str(&row?)?);
@@ -629,6 +699,24 @@ fn task_session_status(status: &TaskSessionStatus) -> &'static str {
     }
 }
 
+fn task_type_label(task_type: &TaskType) -> &'static str {
+    match task_type {
+        TaskType::Testing => "Testing",
+        TaskType::Debugging => "Debugging",
+        TaskType::Refactor => "Refactor",
+        TaskType::Documentation => "Documentation",
+        TaskType::Implementation => "Implementation",
+    }
+}
+
+fn routing_mode_label(mode: &RoutingMode) -> &'static str {
+    match mode {
+        RoutingMode::Manual => "Manual",
+        RoutingMode::Assisted => "Assisted",
+        RoutingMode::Autopilot => "Autopilot",
+    }
+}
+
 fn handoff_status(status: &HandoffStatus) -> &'static str {
     match status {
         HandoffStatus::Draft => "Draft",
@@ -715,7 +803,7 @@ mod tests {
             selected_provider_id: ProviderId("codex".to_string()),
             previous_provider_id: None,
             reason: "initial".to_string(),
-            task_type: None,
+            task_type: Some(TaskType::Testing),
             confidence: 0.75,
             mode: RoutingMode::Assisted,
             created_at: now,
@@ -726,9 +814,9 @@ mod tests {
             selected_provider_id: ProviderId("gemini".to_string()),
             previous_provider_id: Some(ProviderId("codex".to_string())),
             reason: "handoff".to_string(),
-            task_type: None,
+            task_type: Some(TaskType::Debugging),
             confidence: 0.9,
-            mode: RoutingMode::Assisted,
+            mode: RoutingMode::Manual,
             created_at: now,
         };
         let other = RouteDecision {
@@ -754,6 +842,27 @@ mod tests {
         assert_eq!(decisions.len(), 2);
         assert_eq!(decisions[0].selected_provider_id.0, "codex");
         assert_eq!(decisions[1].selected_provider_id.0, "gemini");
+
+        let gemini = store
+            .list_route_decisions_for_session_by_selected_provider(
+                &session_id,
+                &ProviderId("gemini".to_string()),
+            )
+            .expect("gemini decisions");
+        assert_eq!(gemini.len(), 1);
+        assert_eq!(gemini[0].reason, "handoff");
+
+        let testing = store
+            .list_route_decisions_for_session_by_task_type(&session_id, "Testing")
+            .expect("testing decisions");
+        assert_eq!(testing.len(), 1);
+        assert_eq!(testing[0].selected_provider_id.0, "codex");
+
+        let manual = store
+            .list_route_decisions_for_session_by_mode(&session_id, "Manual")
+            .expect("manual decisions");
+        assert_eq!(manual.len(), 1);
+        assert_eq!(manual[0].selected_provider_id.0, "gemini");
     }
 
     #[test]
@@ -1117,7 +1226,7 @@ mod tests {
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
 
         let version = store.schema_version().expect("schema version");
-        assert!(version >= 6, "expected at least version 6, got {version}");
+        assert!(version >= 7, "expected at least version 7, got {version}");
     }
 
     #[test]
@@ -1204,6 +1313,9 @@ mod tests {
             "task_sessions_status_idx",
             "task_sessions_active_provider_idx",
             "route_decisions_session_idx",
+            "route_decisions_selected_provider_idx",
+            "route_decisions_task_type_idx",
+            "route_decisions_mode_idx",
             "handoffs_session_idx",
             "handoffs_status_idx",
             "handoffs_to_provider_idx",
@@ -1273,7 +1385,7 @@ mod tests {
 
         let store = EventStore::open(&db_path).expect("store should migrate");
 
-        assert_eq!(store.schema_version().expect("schema version"), 6);
+        assert_eq!(store.schema_version().expect("schema version"), 7);
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "events_session_timestamp_idx"));
@@ -1286,6 +1398,15 @@ mod tests {
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "task_sessions_active_provider_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "route_decisions_selected_provider_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "route_decisions_task_type_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "route_decisions_mode_idx"));
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "handoffs_status_idx"));
