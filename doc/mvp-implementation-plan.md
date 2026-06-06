@@ -218,6 +218,7 @@ Implemented test coverage includes:
 - storage event append/count/session lookup;
 - storage workspace/project/session persistence;
 - storage query indexes for high-volume session/workspace lookups;
+- storage workspace name/primary-project query columns and indexes;
 - storage project root/kind/vcs query columns and indexes;
 - storage route decision provider/task/mode query columns and indexes;
 - storage task session status/provider query columns and indexes;
@@ -345,6 +346,7 @@ These are still in scope for a more usable MVP.
 - multi-workspace TUI switching;
 - desktop app shell;
 - final relational schema hardening;
+- ~~workspace name/primary-project query columns/indexes~~ (done as one schema hardening step);
 - ~~project root/kind/vcs query columns/indexes~~ (done as one schema hardening step);
 - ~~route decision provider/task/mode query columns/indexes~~ (done as one schema hardening step);
 - ~~handoff status/provider query columns/indexes~~ (done as one schema hardening step);

@@ -6,7 +6,6 @@ use baize_core::{
 };
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -157,6 +156,15 @@ impl EventStore {
                 create index if not exists projects_vcs_idx on projects(vcs);
                 "#,
             ),
+            (
+                "v9",
+                r#"
+                alter table workspaces add column name text;
+                alter table workspaces add column primary_project_id text;
+                create index if not exists workspaces_name_idx on workspaces(name);
+                create index if not exists workspaces_primary_project_idx on workspaces(primary_project_id);
+                "#,
+            ),
         ];
         for (index, (label, sql)) in migrations.iter().enumerate() {
             let version = (index + 1) as i64;
@@ -262,7 +270,23 @@ impl EventStore {
     }
 
     pub fn upsert_workspace(&self, workspace: &Workspace) -> Result<()> {
-        self.upsert_json("workspaces", &workspace.id.0, workspace)
+        self.conn.execute(
+            r#"
+            insert into workspaces (id, name, primary_project_id, json)
+            values (?1, ?2, ?3, ?4)
+            on conflict(id) do update set
+                name = excluded.name,
+                primary_project_id = excluded.primary_project_id,
+                json = excluded.json
+            "#,
+            params![
+                &workspace.id.0,
+                &workspace.name,
+                &workspace.primary_project_id.0,
+                serde_json::to_string(workspace)?,
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn list_workspaces(&self) -> Result<Vec<Workspace>> {
@@ -271,6 +295,33 @@ impl EventStore {
 
     pub fn get_workspace(&self, id: &WorkspaceId) -> Result<Option<Workspace>> {
         self.get_json("workspaces", &id.0)
+    }
+
+    pub fn list_workspaces_by_name(&self, name: &str) -> Result<Vec<Workspace>> {
+        let mut stmt = self
+            .conn
+            .prepare("select json from workspaces where name = ?1 order by rowid")?;
+        let rows = stmt.query_map(params![name], |row| row.get::<_, String>(0))?;
+        let mut workspaces = Vec::new();
+        for row in rows {
+            workspaces.push(serde_json::from_str(&row?)?);
+        }
+        Ok(workspaces)
+    }
+
+    pub fn get_workspace_by_primary_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<Workspace>> {
+        let mut stmt = self
+            .conn
+            .prepare("select json from workspaces where primary_project_id = ?1 limit 1")?;
+        let mut rows = stmt.query(params![&project_id.0])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let raw: String = row.get(0)?;
+        Ok(Some(serde_json::from_str(&raw)?))
     }
 
     pub fn upsert_project(&self, project: &Project) -> Result<()> {
@@ -683,15 +734,6 @@ impl EventStore {
             permissions.push(serde_json::from_str(&row?)?);
         }
         Ok(permissions)
-    }
-
-    fn upsert_json<T: Serialize>(&self, table: &str, id: &str, value: &T) -> Result<()> {
-        let sql = format!(
-            "insert into {table} (id, json) values (?1, ?2) on conflict(id) do update set json = excluded.json"
-        );
-        self.conn
-            .execute(&sql, params![id, serde_json::to_string(value)?])?;
-        Ok(())
     }
 
     fn get_json<T: DeserializeOwned>(&self, table: &str, id: &str) -> Result<Option<T>> {
@@ -1227,6 +1269,20 @@ mod tests {
         store.upsert_task_session(&session).expect("session");
 
         assert_eq!(store.list_workspaces().expect("workspaces").len(), 1);
+        let named_workspaces = store
+            .list_workspaces_by_name("test")
+            .expect("named workspaces");
+        assert_eq!(named_workspaces.len(), 1);
+        assert_eq!(named_workspaces[0].id.0, workspace.id.0);
+        assert_eq!(
+            store
+                .get_workspace_by_primary_project(&workspace.primary_project_id)
+                .expect("workspace by primary project")
+                .expect("workspace exists")
+                .id
+                .0,
+            workspace.id.0
+        );
         assert_eq!(
             store
                 .get_primary_project(&workspace)
@@ -1312,7 +1368,7 @@ mod tests {
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
 
         let version = store.schema_version().expect("schema version");
-        assert!(version >= 8, "expected at least version 8, got {version}");
+        assert!(version >= 9, "expected at least version 9, got {version}");
     }
 
     #[test]
@@ -1394,6 +1450,8 @@ mod tests {
             "events_session_timestamp_idx",
             "events_workspace_timestamp_idx",
             "events_provider_timestamp_idx",
+            "workspaces_name_idx",
+            "workspaces_primary_project_idx",
             "projects_workspace_idx",
             "projects_root_idx",
             "projects_kind_idx",
@@ -1474,10 +1532,16 @@ mod tests {
 
         let store = EventStore::open(&db_path).expect("store should migrate");
 
-        assert_eq!(store.schema_version().expect("schema version"), 8);
+        assert_eq!(store.schema_version().expect("schema version"), 9);
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "events_session_timestamp_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "workspaces_name_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "workspaces_primary_project_idx"));
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "permissions_risk_level_idx"));
