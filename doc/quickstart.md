@@ -116,6 +116,19 @@ Read session events:
 curl -s http://127.0.0.1:7878/sessions/SESSION_ID/events
 ```
 
+Read historical events as JSON:
+
+```sh
+curl -s 'http://127.0.0.1:7878/events/history?session_id=SESSION_ID&limit=20'
+curl -s 'http://127.0.0.1:7878/events/history?provider_id=codex&event_type=session.agent.output'
+```
+
+Subscribe to the live event stream:
+
+```sh
+curl -N http://127.0.0.1:7878/events
+```
+
 ## Test And Coverage Commands
 
 ```sh
