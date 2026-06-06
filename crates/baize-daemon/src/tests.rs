@@ -1802,6 +1802,60 @@ async fn workspace_projects_lists_projects_for_workspace() {
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["id"], primary_project_id);
 
+    let directories = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/workspaces/{workspace_id}/projects?kind=directory"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let directory_projects = directories["projects"].as_array().expect("projects array");
+    assert_eq!(directory_projects.len(), 1);
+    assert_eq!(directory_projects[0]["id"], primary_project_id);
+
+    let no_vcs = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/workspaces/{workspace_id}/projects?vcs=none"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let no_vcs_projects = no_vcs["projects"].as_array().expect("projects array");
+    assert_eq!(no_vcs_projects.len(), 1);
+    assert_eq!(no_vcs_projects[0]["id"], primary_project_id);
+
+    let (status, invalid_kind) = json_response_with_status(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/workspaces/{workspace_id}/projects?kind=spaceship"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_kind["error"], "invalid project kind");
+
+    let (status, invalid_vcs) = json_response_with_status(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/workspaces/{workspace_id}/projects?vcs=svn"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_vcs["error"], "invalid project vcs");
+
     let (status, missing) = json_response_with_status(
         app,
         Request::builder()

@@ -5,7 +5,9 @@ use baize_core::{Project, ProjectId, ProjectKind, TrustLevel, VcsKind, Workspace
 use chrono::Utc;
 
 use crate::helpers::{bad_request, internal_error, json_result, not_found, ok_json, with_store};
-use crate::state::{AppState, CreateWorkspaceRequest, WorkspaceStatusQuery};
+use crate::state::{
+    AppState, CreateWorkspaceRequest, WorkspaceProjectsQuery, WorkspaceStatusQuery,
+};
 
 pub async fn workspaces(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let workspaces = with_store(&state, |store| store.list_workspaces());
@@ -108,6 +110,7 @@ pub async fn workspace_status_by_id(
 pub async fn workspace_projects(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<WorkspaceProjectsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let workspace_id = WorkspaceId(id);
     let workspace = match with_store(&state, |store| store.get_workspace(&workspace_id)) {
@@ -115,8 +118,66 @@ pub async fn workspace_projects(
         Ok(None) => return not_found("workspace not found"),
         Err(error) => return internal_error(error.to_string()),
     };
-    let projects = with_store(&state, |store| {
-        store.list_projects_for_workspace(&workspace.id)
-    });
-    json_result("projects", projects)
+    let kind = match query.kind.as_deref().map(normalize_project_kind) {
+        Some(Some(kind)) => Some(kind),
+        Some(None) => return bad_request("invalid project kind"),
+        None => None,
+    };
+    let vcs = match query.vcs.as_deref().map(normalize_vcs_kind) {
+        Some(Some(vcs)) => Some(vcs),
+        Some(None) => return bad_request("invalid project vcs"),
+        None => None,
+    };
+    let projects = match with_store(&state, |store| {
+        if let Some(kind) = kind {
+            store.list_projects_by_kind(kind)
+        } else if let Some(vcs) = vcs {
+            store.list_projects_by_vcs(vcs)
+        } else {
+            store.list_projects_for_workspace(&workspace.id)
+        }
+    }) {
+        Ok(projects) => projects,
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let projects = projects
+        .into_iter()
+        .filter(|project| project.workspace_id.0 == workspace.id.0)
+        .filter(|project| {
+            kind.is_none_or(|kind| project_kind_eq(&project.kind, kind))
+                && vcs.is_none_or(|vcs| vcs_kind_eq(&project.vcs, vcs))
+        })
+        .collect::<Vec<_>>();
+
+    ok_json(serde_json::json!({ "projects": projects }))
+}
+
+fn normalize_project_kind(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().replace('-', "_").as_str() {
+        "gitrepo" | "git_repo" => Some("GitRepo"),
+        "directory" => Some("Directory"),
+        _ => None,
+    }
+}
+
+fn normalize_vcs_kind(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "git" => Some("Git"),
+        "none" => Some("None"),
+        _ => None,
+    }
+}
+
+fn project_kind_eq(kind: &ProjectKind, label: &str) -> bool {
+    matches!(
+        (kind, label),
+        (ProjectKind::GitRepo, "GitRepo") | (ProjectKind::Directory, "Directory")
+    )
+}
+
+fn vcs_kind_eq(vcs: &VcsKind, label: &str) -> bool {
+    matches!(
+        (vcs, label),
+        (VcsKind::Git, "Git") | (VcsKind::None, "None")
+    )
 }

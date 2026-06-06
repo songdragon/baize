@@ -37,6 +37,12 @@ pub struct WorkspaceStatusQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct WorkspaceProjectsQuery {
+    pub kind: Option<String>,
+    pub vcs: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateWorkspaceRequest {
     pub path: PathBuf,
     pub name: Option<String>,
