@@ -146,6 +146,17 @@ impl EventStore {
                 create index if not exists route_decisions_mode_idx on route_decisions(mode);
                 "#,
             ),
+            (
+                "v8",
+                r#"
+                alter table projects add column root text;
+                alter table projects add column kind text;
+                alter table projects add column vcs text;
+                create index if not exists projects_root_idx on projects(root);
+                create index if not exists projects_kind_idx on projects(kind);
+                create index if not exists projects_vcs_idx on projects(vcs);
+                "#,
+            ),
         ];
         for (index, (label, sql)) in migrations.iter().enumerate() {
             let version = (index + 1) as i64;
@@ -265,13 +276,21 @@ impl EventStore {
     pub fn upsert_project(&self, project: &Project) -> Result<()> {
         self.conn.execute(
             r#"
-            insert into projects (id, workspace_id, json)
-            values (?1, ?2, ?3)
-            on conflict(id) do update set workspace_id = excluded.workspace_id, json = excluded.json
+            insert into projects (id, workspace_id, root, kind, vcs, json)
+            values (?1, ?2, ?3, ?4, ?5, ?6)
+            on conflict(id) do update set
+                workspace_id = excluded.workspace_id,
+                root = excluded.root,
+                kind = excluded.kind,
+                vcs = excluded.vcs,
+                json = excluded.json
             "#,
             params![
                 &project.id.0,
                 &project.workspace_id.0,
+                project.root.to_string_lossy().as_ref(),
+                project_kind_label(&project.kind),
+                vcs_kind_label(&project.vcs),
                 serde_json::to_string(project)?,
             ],
         )?;
@@ -280,6 +299,42 @@ impl EventStore {
 
     pub fn get_project(&self, id: &ProjectId) -> Result<Option<Project>> {
         self.get_json("projects", &id.0)
+    }
+
+    pub fn list_projects_for_workspace(&self, workspace_id: &WorkspaceId) -> Result<Vec<Project>> {
+        let mut stmt = self
+            .conn
+            .prepare("select json from projects where workspace_id = ?1 order by rowid")?;
+        let rows = stmt.query_map(params![&workspace_id.0], |row| row.get::<_, String>(0))?;
+        let mut projects = Vec::new();
+        for row in rows {
+            projects.push(serde_json::from_str(&row?)?);
+        }
+        Ok(projects)
+    }
+
+    pub fn list_projects_by_kind(&self, kind: &str) -> Result<Vec<Project>> {
+        let mut stmt = self
+            .conn
+            .prepare("select json from projects where kind = ?1 order by rowid")?;
+        let rows = stmt.query_map(params![kind], |row| row.get::<_, String>(0))?;
+        let mut projects = Vec::new();
+        for row in rows {
+            projects.push(serde_json::from_str(&row?)?);
+        }
+        Ok(projects)
+    }
+
+    pub fn list_projects_by_vcs(&self, vcs: &str) -> Result<Vec<Project>> {
+        let mut stmt = self
+            .conn
+            .prepare("select json from projects where vcs = ?1 order by rowid")?;
+        let rows = stmt.query_map(params![vcs], |row| row.get::<_, String>(0))?;
+        let mut projects = Vec::new();
+        for row in rows {
+            projects.push(serde_json::from_str(&row?)?);
+        }
+        Ok(projects)
     }
 
     pub fn get_primary_project(&self, workspace: &Workspace) -> Result<Option<Project>> {
@@ -686,6 +741,20 @@ fn permission_risk_level(level: &PermissionRiskLevel) -> &'static str {
         PermissionRiskLevel::Medium => "Medium",
         PermissionRiskLevel::High => "High",
         PermissionRiskLevel::Blocked => "Blocked",
+    }
+}
+
+fn project_kind_label(kind: &baize_core::ProjectKind) -> &'static str {
+    match kind {
+        baize_core::ProjectKind::GitRepo => "GitRepo",
+        baize_core::ProjectKind::Directory => "Directory",
+    }
+}
+
+fn vcs_kind_label(vcs: &baize_core::VcsKind) -> &'static str {
+    match vcs {
+        baize_core::VcsKind::Git => "Git",
+        baize_core::VcsKind::None => "None",
     }
 }
 
@@ -1166,6 +1235,23 @@ mod tests {
                 .root,
             temp.path()
         );
+        let workspace_projects = store
+            .list_projects_for_workspace(&workspace.id)
+            .expect("workspace projects");
+        assert_eq!(workspace_projects.len(), 1);
+        assert_eq!(workspace_projects[0].root, temp.path());
+
+        let directories = store
+            .list_projects_by_kind("Directory")
+            .expect("directory projects");
+        assert_eq!(directories.len(), 1);
+        assert_eq!(directories[0].id.0, workspace.primary_project_id.0);
+
+        let no_vcs = store
+            .list_projects_by_vcs("None")
+            .expect("non-vcs projects");
+        assert_eq!(no_vcs.len(), 1);
+        assert_eq!(no_vcs[0].id.0, workspace.primary_project_id.0);
         assert_eq!(
             store
                 .get_task_session(&session.id)
@@ -1226,7 +1312,7 @@ mod tests {
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
 
         let version = store.schema_version().expect("schema version");
-        assert!(version >= 7, "expected at least version 7, got {version}");
+        assert!(version >= 8, "expected at least version 8, got {version}");
     }
 
     #[test]
@@ -1309,6 +1395,9 @@ mod tests {
             "events_workspace_timestamp_idx",
             "events_provider_timestamp_idx",
             "projects_workspace_idx",
+            "projects_root_idx",
+            "projects_kind_idx",
+            "projects_vcs_idx",
             "task_sessions_workspace_idx",
             "task_sessions_status_idx",
             "task_sessions_active_provider_idx",
@@ -1385,13 +1474,22 @@ mod tests {
 
         let store = EventStore::open(&db_path).expect("store should migrate");
 
-        assert_eq!(store.schema_version().expect("schema version"), 7);
+        assert_eq!(store.schema_version().expect("schema version"), 8);
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "events_session_timestamp_idx"));
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "permissions_risk_level_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "projects_root_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "projects_kind_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "projects_vcs_idx"));
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "task_sessions_status_idx"));
