@@ -14,8 +14,20 @@ pub async fn permissions(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<PermissionsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let permissions = match with_store(&state, |store| {
-        store.list_permissions(query.limit, query.offset)
+    let risk_level = match query
+        .risk_level
+        .as_deref()
+        .map(normalize_permission_risk_level)
+    {
+        Some(Some(risk_level)) => Some(risk_level),
+        Some(None) => return bad_request("invalid permission risk level"),
+        None => None,
+    };
+    let permissions = match with_store(&state, |store| match risk_level {
+        Some(risk_level) => {
+            store.list_permissions_by_risk_level(risk_level, query.limit, query.offset)
+        }
+        None => store.list_permissions(query.limit, query.offset),
     }) {
         Ok(permissions) => permissions,
         Err(error) => return internal_error(error.to_string()),
@@ -44,6 +56,16 @@ pub async fn permissions(
         .collect::<Vec<_>>();
 
     ok_json(serde_json::json!({ "permissions": permissions }))
+}
+
+fn normalize_permission_risk_level(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "low" => Some("Low"),
+        "medium" => Some("Medium"),
+        "high" => Some("High"),
+        "blocked" => Some("Blocked"),
+        _ => None,
+    }
 }
 
 pub async fn create_permission(

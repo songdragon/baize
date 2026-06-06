@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use baize_core::{
-    BaizeEvent, HandoffId, HandoffSummary, PermissionId, PermissionRequest, Project, ProjectId,
-    RouteDecision, RouteDecisionId, TaskSession, TaskSessionId, Workspace, WorkspaceId,
+    BaizeEvent, HandoffId, HandoffSummary, PermissionId, PermissionRequest, PermissionRiskLevel,
+    Project, ProjectId, RouteDecision, RouteDecisionId, TaskSession, TaskSessionId, Workspace,
+    WorkspaceId,
 };
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
@@ -107,6 +108,13 @@ impl EventStore {
                 create index if not exists route_decisions_session_idx on route_decisions(session_id);
                 create index if not exists handoffs_session_idx on handoffs(session_id);
                 create index if not exists permissions_session_idx on permissions(session_id);
+                "#,
+            ),
+            (
+                "v4",
+                r#"
+                alter table permissions add column risk_level text;
+                create index if not exists permissions_risk_level_idx on permissions(risk_level);
                 "#,
             ),
         ];
@@ -373,13 +381,17 @@ impl EventStore {
     pub fn upsert_permission(&self, permission: &PermissionRequest) -> Result<()> {
         self.conn.execute(
             r#"
-            insert into permissions (id, session_id, json)
-            values (?1, ?2, ?3)
-            on conflict(id) do update set session_id = excluded.session_id, json = excluded.json
+            insert into permissions (id, session_id, risk_level, json)
+            values (?1, ?2, ?3, ?4)
+            on conflict(id) do update set
+                session_id = excluded.session_id,
+                risk_level = excluded.risk_level,
+                json = excluded.json
             "#,
             params![
                 &permission.id.0,
                 permission.session_id.as_ref().map(|id| id.0.as_str()),
+                permission_risk_level(&permission.risk.level),
                 serde_json::to_string(permission)?,
             ],
         )?;
@@ -410,6 +422,27 @@ impl EventStore {
             "select json from permissions where session_id = ?1 order by rowid limit ?2 offset ?3",
         )?;
         let rows = stmt.query_map(params![&session_id.0, limit, offset], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut permissions = Vec::new();
+        for row in rows {
+            permissions.push(serde_json::from_str(&row?)?);
+        }
+        Ok(permissions)
+    }
+
+    pub fn list_permissions_by_risk_level(
+        &self,
+        risk_level: &str,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<PermissionRequest>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select json from permissions where risk_level = ?1 order by rowid limit ?2 offset ?3",
+        )?;
+        let rows = stmt.query_map(params![risk_level, limit, offset], |row| {
             row.get::<_, String>(0)
         })?;
         let mut permissions = Vec::new();
@@ -469,6 +502,15 @@ impl EventStore {
     }
 }
 
+fn permission_risk_level(level: &PermissionRiskLevel) -> &'static str {
+    match level {
+        PermissionRiskLevel::Low => "Low",
+        PermissionRiskLevel::Medium => "Medium",
+        PermissionRiskLevel::High => "High",
+        PermissionRiskLevel::Blocked => "Blocked",
+    }
+}
+
 pub fn default_data_dir() -> PathBuf {
     if let Ok(path) = std::env::var("BAIZE_DATA_DIR") {
         return PathBuf::from(path);
@@ -483,8 +525,9 @@ pub fn default_data_dir() -> PathBuf {
 mod tests {
     use super::*;
     use baize_core::{
-        BaizeEvent, HandoffFacts, HandoffStatus, PermissionRiskAssessment, PermissionStatus,
-        ProjectKind, ProviderId, RoutingMode, TaskSessionStatus, TrustLevel, VcsKind, WorkspaceId,
+        BaizeEvent, HandoffFacts, HandoffStatus, PermissionRiskAssessment, PermissionRiskLevel,
+        PermissionStatus, ProjectKind, ProviderId, RoutingMode, TaskSessionStatus, TrustLevel,
+        VcsKind, WorkspaceId,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -623,6 +666,49 @@ mod tests {
         assert_eq!(permissions.len(), 2);
         assert_eq!(permissions[0].command, "cargo test");
         assert!(matches!(permissions[1].status, PermissionStatus::Approved));
+    }
+
+    #[test]
+    fn lists_permissions_by_risk_level() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let low = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: None,
+            session_id: None,
+            command: "cargo test".to_string(),
+            reason: "verify".to_string(),
+            risk: PermissionRiskAssessment::default(),
+            status: PermissionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        let high = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: None,
+            session_id: None,
+            command: "sudo chmod 777 /tmp/file".to_string(),
+            reason: "change permissions".to_string(),
+            risk: PermissionRiskAssessment {
+                level: PermissionRiskLevel::High,
+                reasons: vec!["elevated privileges".to_string()],
+                recommendation: "Review before approving.".to_string(),
+            },
+            status: PermissionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+
+        store.upsert_permission(&low).expect("low permission");
+        store.upsert_permission(&high).expect("high permission");
+
+        let high_risk = store
+            .list_permissions_by_risk_level("High", None, None)
+            .expect("high risk permissions");
+
+        assert_eq!(high_risk.len(), 1);
+        assert_eq!(high_risk[0].command, "sudo chmod 777 /tmp/file");
+        assert_eq!(high_risk[0].risk.level, PermissionRiskLevel::High);
     }
 
     #[test]
@@ -819,7 +905,7 @@ mod tests {
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
 
         let version = store.schema_version().expect("schema version");
-        assert!(version >= 3, "expected at least version 3, got {version}");
+        assert!(version >= 4, "expected at least version 4, got {version}");
     }
 
     #[test]
@@ -864,7 +950,35 @@ mod tests {
     }
 
     #[test]
-    fn v3_query_indexes_exist() {
+    fn v4_permissions_risk_level_column_exists() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let permission = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: None,
+            session_id: None,
+            command: "sudo chmod 777 /tmp/file".to_string(),
+            reason: "change permissions".to_string(),
+            risk: PermissionRiskAssessment {
+                level: PermissionRiskLevel::High,
+                reasons: vec!["elevated privileges".to_string()],
+                recommendation: "Review before approving.".to_string(),
+            },
+            status: PermissionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        store.upsert_permission(&permission).expect("upsert");
+
+        let by_risk = store
+            .list_permissions_by_risk_level("High", None, None)
+            .expect("list by risk");
+        assert_eq!(by_risk.len(), 1);
+        assert_eq!(by_risk[0].command, "sudo chmod 777 /tmp/file");
+    }
+
+    #[test]
+    fn query_indexes_exist() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
         let indexes = index_names(&store);
@@ -878,6 +992,7 @@ mod tests {
             "route_decisions_session_idx",
             "handoffs_session_idx",
             "permissions_session_idx",
+            "permissions_risk_level_idx",
         ] {
             assert!(
                 indexes.iter().any(|index| index == expected),
@@ -887,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_database_migrates_to_v3_indexes() {
+    fn v2_database_migrates_to_latest_indexes() {
         let temp = tempfile::tempdir().expect("temp dir");
         let db_path = temp.path().join("baize.db");
         {
@@ -942,10 +1057,13 @@ mod tests {
 
         let store = EventStore::open(&db_path).expect("store should migrate");
 
-        assert_eq!(store.schema_version().expect("schema version"), 3);
+        assert_eq!(store.schema_version().expect("schema version"), 4);
         assert!(index_names(&store)
             .iter()
             .any(|index| index == "events_session_timestamp_idx"));
+        assert!(index_names(&store)
+            .iter()
+            .any(|index| index == "permissions_risk_level_idx"));
     }
 
     #[test]

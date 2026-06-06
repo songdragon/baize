@@ -74,6 +74,7 @@ pub struct CreatePermissionRequest {
 pub struct PermissionsQuery {
     pub status: Option<String>,
     pub session_id: Option<String>,
+    pub risk_level: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
 }

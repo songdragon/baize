@@ -897,6 +897,70 @@ async fn create_permission_reports_command_risk() {
 }
 
 #[tokio::test]
+async fn filters_permissions_by_risk_level() {
+    let (app, _data_dir, _project_dir) = test_app();
+    let _low = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/permissions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "session_id": "task_low",
+                    "command": "cargo test",
+                    "reason": "verify changes"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let high = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/permissions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "session_id": "task_high",
+                    "command": "sudo chmod 777 /tmp/file",
+                    "reason": "change permissions"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let high_id = high["permission"]["id"].as_str().expect("permission id");
+
+    let filtered = json_response(
+        app.clone(),
+        Request::builder()
+            .uri("/permissions?risk_level=high")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let permissions = filtered["permissions"].as_array().expect("permissions");
+    assert_eq!(permissions.len(), 1);
+    assert_eq!(permissions[0]["id"], high_id);
+    assert_eq!(permissions[0]["risk"]["level"], "High");
+
+    let (status, invalid) = json_response_with_status(
+        app,
+        Request::builder()
+            .uri("/permissions?risk_level=surprising")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid["error"], "invalid permission risk level");
+}
+
+#[tokio::test]
 async fn validates_known_provider() {
     let (app, _data_dir, _project_dir) = test_app();
     let validation = json_response(
