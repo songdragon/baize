@@ -161,6 +161,34 @@ async fn creates_workspace_session_prompt_and_events() {
         .any(|event| event["event_type"] == "session.agent.output"
             && event["payload"]["text"] == "fake output"));
 
+    let history = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/events/history?session_id={session_id}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let history_events = history["events"].as_array().expect("history events");
+    assert!(history_events
+        .iter()
+        .any(|event| event["event_type"] == "session.agent.completed"));
+
+    let provider_history = json_response(
+        app.clone(),
+        Request::builder()
+            .uri("/events/history?provider_id=codex&event_type=session.agent.output")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let provider_events = provider_history["events"]
+        .as_array()
+        .expect("provider history events");
+    assert!(provider_events
+        .iter()
+        .any(|event| event["payload"]["text"] == "fake output"));
+
     let routes = json_response(
         app.clone(),
         Request::builder()

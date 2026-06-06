@@ -123,7 +123,8 @@ The MVP target is a single-workspace local agent supervisor:
 - `GET /permissions/:id`;
 - `POST /permissions/:id/approve`;
 - `POST /permissions/:id/deny`;
-- `GET /events`.
+- `GET /events` (SSE stream);
+- `GET /events/history`.
 - Session status transitions: `Running` stays on prompt success, transitions to `Failed` on prompt failure or executor error, recovers from `Failed` on next successful prompt.
 - Canceled sessions reject new prompt requests.
 - `session.status.changed` event emission on status transitions.
@@ -239,6 +240,7 @@ Implemented test coverage includes:
 - adapter provider error classification;
 - command timeout behavior;
 - daemon workspace/session/prompt/events flow;
+- daemon event history filtering;
 - daemon session diff hunk reporting;
 - daemon prompt native provider session ID reporting;
 - daemon prompt failure error chain;

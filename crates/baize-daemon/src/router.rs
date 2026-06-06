@@ -93,6 +93,7 @@ pub fn router(state: AppState) -> Router {
             post(handlers::permissions::deny_permission),
         )
         .route("/events", get(handlers::events::events))
+        .route("/events/history", get(handlers::events::history))
         .with_state(state)
         .layer(CorsLayer::permissive())
 }

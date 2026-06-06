@@ -76,6 +76,16 @@ pub struct RoutesQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct EventHistoryQuery {
+    pub event_type: Option<String>,
+    pub workspace_id: Option<String>,
+    pub session_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreatePermissionRequest {
     pub workspace_id: Option<String>,
     pub session_id: Option<String>,

@@ -235,38 +235,63 @@ impl EventStore {
         let mut stmt = self.conn.prepare(
             "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where session_id = ?1 order by timestamp limit ?2 offset ?3",
         )?;
-        let rows = stmt.query_map(params![&session_id.0, limit, offset], |row| {
-            let timestamp: String = row.get(2)?;
-            let payload: String = row.get(6)?;
-            Ok(BaizeEvent {
-                id: baize_core::EventId(row.get(0)?),
-                event_type: row.get(1)?,
-                timestamp: chrono::DateTime::parse_from_rfc3339(&timestamp)
-                    .map(|ts| ts.with_timezone(&chrono::Utc))
-                    .map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                workspace_id: row.get::<_, Option<String>>(3)?.map(WorkspaceId),
-                session_id: row.get::<_, Option<String>>(4)?.map(TaskSessionId),
-                provider_id: row.get::<_, Option<String>>(5)?.map(baize_core::ProviderId),
-                payload: serde_json::from_str(&payload).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        6,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-            })
-        })?;
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row?);
-        }
-        Ok(events)
+        let rows = stmt.query_map(params![&session_id.0, limit, offset], event_from_row)?;
+        collect_events(rows)
+    }
+
+    pub fn list_events(&self, limit: Option<u64>, offset: Option<u64>) -> Result<Vec<BaizeEvent>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events order by timestamp limit ?1 offset ?2",
+        )?;
+        let rows = stmt.query_map(params![limit, offset], event_from_row)?;
+        collect_events(rows)
+    }
+
+    pub fn list_events_for_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<BaizeEvent>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where workspace_id = ?1 order by timestamp limit ?2 offset ?3",
+        )?;
+        let rows = stmt.query_map(params![&workspace_id.0, limit, offset], event_from_row)?;
+        collect_events(rows)
+    }
+
+    pub fn list_events_for_provider(
+        &self,
+        provider_id: &ProviderId,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<BaizeEvent>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where provider_id = ?1 order by timestamp limit ?2 offset ?3",
+        )?;
+        let rows = stmt.query_map(params![&provider_id.0, limit, offset], event_from_row)?;
+        collect_events(rows)
+    }
+
+    pub fn list_events_by_type(
+        &self,
+        event_type: &str,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<BaizeEvent>> {
+        let limit = limit.unwrap_or(100);
+        let offset = offset.unwrap_or(0);
+        let mut stmt = self.conn.prepare(
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where event_type = ?1 order by timestamp limit ?2 offset ?3",
+        )?;
+        let rows = stmt.query_map(params![event_type, limit, offset], event_from_row)?;
+        collect_events(rows)
     }
 
     pub fn upsert_workspace(&self, workspace: &Workspace) -> Result<()> {
@@ -800,6 +825,45 @@ fn vcs_kind_label(vcs: &baize_core::VcsKind) -> &'static str {
     }
 }
 
+fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BaizeEvent> {
+    let timestamp: String = row.get(2)?;
+    let payload: String = row.get(6)?;
+    Ok(BaizeEvent {
+        id: baize_core::EventId(row.get(0)?),
+        event_type: row.get(1)?,
+        timestamp: chrono::DateTime::parse_from_rfc3339(&timestamp)
+            .map(|ts| ts.with_timezone(&chrono::Utc))
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        workspace_id: row.get::<_, Option<String>>(3)?.map(WorkspaceId),
+        session_id: row.get::<_, Option<String>>(4)?.map(TaskSessionId),
+        provider_id: row.get::<_, Option<String>>(5)?.map(ProviderId),
+        payload: serde_json::from_str(&payload).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+    })
+}
+
+fn collect_events<F>(rows: rusqlite::MappedRows<'_, F>) -> Result<Vec<BaizeEvent>>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<BaizeEvent>,
+{
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
+    Ok(events)
+}
+
 fn task_session_status(status: &TaskSessionStatus) -> &'static str {
     match status {
         TaskSessionStatus::Running => "Running",
@@ -888,10 +952,18 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
         let session_id = TaskSessionId::new();
+        let workspace_id = WorkspaceId::new();
+        let provider_id = ProviderId("codex".to_string());
         let mut event = BaizeEvent::new("session.agent.completed", json!({ "status": "ok" }));
         event.session_id = Some(session_id.clone());
+        event.workspace_id = Some(workspace_id.clone());
+        event.provider_id = Some(provider_id.clone());
+        let mut other = BaizeEvent::new("session.agent.output", json!({ "text": "hello" }));
+        other.workspace_id = Some(WorkspaceId::new());
+        other.provider_id = Some(ProviderId("gemini".to_string()));
 
         store.append_event(&event).expect("append should work");
+        store.append_event(&other).expect("append other event");
         let events = store
             .list_events_for_session(&session_id, None, None)
             .expect("events should load");
@@ -899,6 +971,27 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "session.agent.completed");
         assert_eq!(events[0].payload["status"], "ok");
+
+        let all = store.list_events(None, None).expect("all events");
+        assert_eq!(all.len(), 2);
+
+        let workspace_events = store
+            .list_events_for_workspace(&workspace_id, None, None)
+            .expect("workspace events");
+        assert_eq!(workspace_events.len(), 1);
+        assert_eq!(workspace_events[0].session_id.as_ref(), Some(&session_id));
+
+        let provider_events = store
+            .list_events_for_provider(&provider_id, None, None)
+            .expect("provider events");
+        assert_eq!(provider_events.len(), 1);
+        assert_eq!(provider_events[0].event_type, "session.agent.completed");
+
+        let typed = store
+            .list_events_by_type("session.agent.output", None, None)
+            .expect("typed events");
+        assert_eq!(typed.len(), 1);
+        assert_eq!(typed[0].payload["text"], "hello");
     }
 
     #[test]
