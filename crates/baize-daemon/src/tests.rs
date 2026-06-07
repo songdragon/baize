@@ -1352,6 +1352,24 @@ async fn validation_reports_acp_initialize_proof() {
 }
 
 #[tokio::test]
+async fn diagnoses_known_provider() {
+    let (app, _data_dir, _project_dir) = test_app();
+    let diagnostic = json_response(
+        app,
+        Request::builder()
+            .uri("/providers/gemini/diagnose")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(diagnostic["diagnostic"]["provider_id"], "gemini");
+    assert!(diagnostic["diagnostic"]["readiness"].is_string());
+    assert!(diagnostic["diagnostic"]["issues"].is_array());
+    assert!(diagnostic["diagnostic"]["suggested_actions"].is_array());
+}
+
+#[tokio::test]
 async fn providers_follow_configured_order() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
@@ -1422,6 +1440,49 @@ async fn provider_health_check_follows_configured_order() {
 
     assert_eq!(health["health"][0]["provider_id"], "gemini");
     assert_eq!(health["health"][1]["provider_id"], "codex");
+}
+
+#[tokio::test]
+async fn provider_diagnostics_follow_configured_order_and_emit_event() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let mut config = BaizeConfig::default();
+    config.providers.order = vec!["gemini".to_string(), "codex".to_string()];
+    let state = AppState::with_executor(
+        config,
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: Vec::new(),
+                stderr: String::new(),
+                error: None,
+            },
+        }),
+    );
+    let app = router(state.clone());
+
+    let diagnostics = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/providers/diagnose")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(diagnostics["diagnostics"][0]["provider_id"], "gemini");
+    assert_eq!(diagnostics["diagnostics"][1]["provider_id"], "codex");
+
+    let events = crate::helpers::with_store(&state, |store| {
+        store.list_events_by_type("provider.diagnostic.completed", None, None)
+    })
+    .expect("events");
+    assert_eq!(events.len(), 1);
 }
 
 fn failing_app() -> (Router, tempfile::TempDir, tempfile::TempDir) {

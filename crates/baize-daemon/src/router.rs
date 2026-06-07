@@ -31,12 +31,20 @@ pub fn router(state: AppState) -> Router {
             get(handlers::providers::provider_validate),
         )
         .route(
+            "/providers/:id/diagnose",
+            get(handlers::providers::provider_diagnose),
+        )
+        .route(
             "/providers/check",
             post(handlers::providers::check_providers),
         )
         .route(
             "/providers/validate",
             post(handlers::providers::validate_providers),
+        )
+        .route(
+            "/providers/diagnose",
+            post(handlers::providers::diagnose_providers),
         )
         .route(
             "/workspaces/status",

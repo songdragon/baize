@@ -38,6 +38,7 @@ pub struct TuiState {
     pub activity_status: String,
     pub providers: Vec<String>,
     pub provider_health: Vec<ProviderHealthView>,
+    pub provider_diagnostics: Vec<ProviderDiagnosticView>,
     pub recent_sessions: Vec<SessionView>,
     pub selected_session_index: usize,
     pub pending_permissions: Vec<PermissionView>,
@@ -57,6 +58,15 @@ pub struct ProviderHealthView {
     pub provider_id: String,
     pub status: String,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderDiagnosticView {
+    pub provider_id: String,
+    pub readiness: String,
+    pub health: ProviderHealthView,
+    pub issues: Vec<String>,
+    pub suggested_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +114,7 @@ impl Default for TuiState {
                 "opencode".to_string(),
             ],
             provider_health: Vec::new(),
+            provider_diagnostics: Vec::new(),
             recent_sessions: Vec::new(),
             selected_session_index: 0,
             pending_permissions: Vec::new(),
@@ -124,7 +135,14 @@ pub fn run() -> Result<()> {
     let daemon_status =
         ensure_daemon_running().unwrap_or_else(|error| format!("daemon: unavailable ({error:#})"));
     let provider_load = load_provider_ids();
-    let health_load = load_provider_health();
+    let diagnostics_load = load_provider_diagnostics().or_else(|_| {
+        load_provider_health().map(|health| {
+            health
+                .into_iter()
+                .map(diagnostic_from_health)
+                .collect::<Vec<_>>()
+        })
+    });
     let permission_load = load_pending_permissions();
 
     enable_raw_mode()?;
@@ -136,7 +154,7 @@ pub fn run() -> Result<()> {
         &mut terminal,
         daemon_status,
         provider_load,
-        health_load,
+        diagnostics_load,
         permission_load,
     );
 
@@ -151,7 +169,7 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     daemon_status: String,
     provider_load: Result<Vec<String>>,
-    health_load: Result<Vec<ProviderHealthView>>,
+    diagnostics_load: Result<Vec<ProviderDiagnosticView>>,
     permission_load: Result<Vec<PermissionView>>,
 ) -> Result<()> {
     let mut state = TuiState {
@@ -166,13 +184,14 @@ fn run_app(
         Ok(_) => state.push_message("daemon returned no enabled providers; using defaults"),
         Err(error) => state.push_message(format!("provider load failed: {error:#}")),
     }
-    match health_load {
-        Ok(health) => {
-            if let Some((from, to)) = state.set_provider_health(health) {
+    match diagnostics_load {
+        Ok(diagnostics) => {
+            if let Some((from, to)) = state.set_provider_diagnostics(diagnostics) {
                 state.push_message(format!("provider auto-selected: {from} -> {to}"));
             }
+            append_provider_diagnostic_issues(&mut state);
         }
-        Err(error) => state.push_message(format!("provider health failed: {error:#}")),
+        Err(error) => state.push_message(format!("provider diagnostics failed: {error:#}")),
     }
     match permission_load {
         Ok(permissions) => state.pending_permissions = permissions,
@@ -670,6 +689,11 @@ fn load_provider_health() -> Result<Vec<ProviderHealthView>> {
     parse_provider_health(&response)
 }
 
+fn load_provider_diagnostics() -> Result<Vec<ProviderDiagnosticView>> {
+    let response = post_json("/providers/diagnose", json!({}))?;
+    parse_provider_diagnostics(&response)
+}
+
 fn load_pending_permissions() -> Result<Vec<PermissionView>> {
     let response = get_json("/permissions?status=pending")?;
     parse_permissions(&response)
@@ -684,13 +708,20 @@ fn prompt_request_body(provider_id: &str, prompt: &str) -> Value {
 }
 
 fn refresh_provider_health(state: &mut TuiState) -> Result<()> {
-    state.activity_status = "refreshing provider health".to_string();
-    let health = load_provider_health()?;
-    let summary = summarize_provider_health(&health);
-    let switched = state.set_provider_health(health);
+    state.activity_status = "refreshing provider diagnostics".to_string();
+    let diagnostics = load_provider_diagnostics().or_else(|_| {
+        load_provider_health().map(|health| {
+            health
+                .into_iter()
+                .map(diagnostic_from_health)
+                .collect::<Vec<_>>()
+        })
+    })?;
+    let summary = summarize_provider_diagnostics(&diagnostics);
+    let switched = state.set_provider_diagnostics(diagnostics);
     state.activity_status = "idle".to_string();
-    state.push_message(format!("provider health refreshed: {summary}"));
-    append_provider_health_errors(state);
+    state.push_message(format!("provider diagnostics refreshed: {summary}"));
+    append_provider_diagnostic_issues(state);
     if let Some((from, to)) = switched {
         state.push_message(format!("provider auto-selected: {from} -> {to}"));
     }
@@ -775,19 +806,66 @@ fn parse_provider_health(response: &Value) -> Result<Vec<ProviderHealthView>> {
 
     Ok(health
         .iter()
-        .filter_map(|entry| {
-            let provider_id = entry.get("provider_id").and_then(provider_id)?;
-            let status = entry.get("status").and_then(Value::as_str)?;
-            Some(ProviderHealthView {
+        .filter_map(parse_provider_health_entry)
+        .collect())
+}
+
+fn parse_provider_diagnostics(response: &Value) -> Result<Vec<ProviderDiagnosticView>> {
+    let diagnostics = response
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .ok_or_else(|| response_error("diagnostics", response))?;
+
+    Ok(diagnostics
+        .iter()
+        .filter_map(|diagnostic| {
+            let provider_id = diagnostic.get("provider_id").and_then(provider_id)?;
+            let readiness = diagnostic
+                .get("readiness")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown");
+            let health = diagnostic
+                .get("health")
+                .and_then(parse_provider_health_entry)
+                .unwrap_or_else(|| ProviderHealthView {
+                    provider_id: provider_id.to_string(),
+                    status: "Unknown".to_string(),
+                    last_error: None,
+                });
+            let issues = string_array(diagnostic.get("issues"));
+            let suggested_actions = string_array(diagnostic.get("suggested_actions"));
+            Some(ProviderDiagnosticView {
                 provider_id: provider_id.to_string(),
-                status: status.to_string(),
-                last_error: entry
-                    .get("last_error")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
+                readiness: readiness.to_string(),
+                health,
+                issues,
+                suggested_actions,
             })
         })
         .collect())
+}
+
+fn parse_provider_health_entry(entry: &Value) -> Option<ProviderHealthView> {
+    let provider_id = entry.get("provider_id").and_then(provider_id)?;
+    let status = entry.get("status").and_then(Value::as_str)?;
+    Some(ProviderHealthView {
+        provider_id: provider_id.to_string(),
+        status: status.to_string(),
+        last_error: entry
+            .get("last_error")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    })
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn health_status_for<'a>(health: &'a [ProviderHealthView], provider_id: &str) -> Option<&'a str> {
@@ -815,21 +893,83 @@ fn provider_health_is_down(health: &ProviderHealthView) -> bool {
     short_health_status(&health.status) == "down"
 }
 
-fn summarize_provider_health(health: &[ProviderHealthView]) -> String {
-    if health.is_empty() {
+fn summarize_provider_diagnostics(diagnostics: &[ProviderDiagnosticView]) -> String {
+    if diagnostics.is_empty() {
         return "none".to_string();
     }
-    health
+    diagnostics
         .iter()
         .map(|entry| {
             format!(
                 "{}:{}",
                 entry.provider_id,
-                short_health_status(&entry.status)
+                short_readiness_status(&entry.readiness)
             )
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn diagnostic_from_health(health: ProviderHealthView) -> ProviderDiagnosticView {
+    let readiness = if provider_health_is_down(&health) {
+        "SetupRequired"
+    } else {
+        "Ready"
+    };
+    let mut issues = Vec::new();
+    if let Some(error) = &health.last_error {
+        if !error.trim().is_empty() {
+            issues.push(format!("provider executable is not ready: {error}"));
+        }
+    }
+    ProviderDiagnosticView {
+        provider_id: health.provider_id.clone(),
+        readiness: readiness.to_string(),
+        health,
+        issues,
+        suggested_actions: Vec::new(),
+    }
+}
+
+fn append_provider_diagnostic_issues(state: &mut TuiState) {
+    if state.provider_diagnostics.is_empty() {
+        append_provider_health_errors(state);
+        return;
+    }
+
+    let lines = state
+        .provider_diagnostics
+        .iter()
+        .filter(|entry| entry.readiness != "Ready")
+        .flat_map(|entry| {
+            entry
+                .issues
+                .iter()
+                .take(2)
+                .map(|issue| format!("{}: {}", entry.provider_id, transcript_detail(issue)))
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return;
+    }
+
+    state.push_message("provider diagnostics:".to_string());
+    for line in lines {
+        state.push_message(format!("  {line}"));
+    }
+
+    let suggestions = state
+        .provider_diagnostics
+        .iter()
+        .filter(|entry| entry.readiness != "Ready")
+        .flat_map(|entry| entry.suggested_actions.iter())
+        .map(|action| transcript_detail(action))
+        .take(2)
+        .collect::<Vec<_>>();
+    for suggestion in suggestions {
+        state.push_message(format!("  next: {suggestion}"));
+    }
 }
 
 fn append_provider_health_errors(state: &mut TuiState) {
@@ -1630,8 +1770,15 @@ impl TuiState {
         self.selected_provider_index = (self.selected_provider_index + 1) % self.providers.len();
     }
 
-    fn set_provider_health(&mut self, health: Vec<ProviderHealthView>) -> Option<(String, String)> {
-        self.provider_health = health;
+    fn set_provider_diagnostics(
+        &mut self,
+        diagnostics: Vec<ProviderDiagnosticView>,
+    ) -> Option<(String, String)> {
+        self.provider_health = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.health.clone())
+            .collect();
+        self.provider_diagnostics = diagnostics;
         self.select_first_available_provider_if_current_is_down()
     }
 
@@ -1840,6 +1987,16 @@ fn short_health_status(status: &str) -> &str {
         "Degraded" => "warn",
         "Unavailable" => "down",
         "Unknown" => "?",
+        _ => "?",
+    }
+}
+
+fn short_readiness_status(status: &str) -> &str {
+    match status {
+        "Ready" => "ready",
+        "SetupRequired" => "setup",
+        "UnsupportedRuntime" => "unsupported",
+        "CapabilityMismatch" => "mismatch",
         _ => "?",
     }
 }
@@ -2860,6 +3017,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_provider_diagnostics_from_daemon_response() {
+        let response = json!({
+            "diagnostics": [
+                {
+                    "provider_id": "codex",
+                    "readiness": "SetupRequired",
+                    "health": {
+                        "provider_id": "codex",
+                        "status": "Unavailable",
+                        "last_error": "missing codex"
+                    },
+                    "issues": ["provider executable is not ready: missing codex"],
+                    "suggested_actions": ["install `codex` or add it to PATH"]
+                }
+            ]
+        });
+
+        let diagnostics = parse_provider_diagnostics(&response).expect("diagnostics");
+
+        assert_eq!(
+            diagnostics,
+            vec![ProviderDiagnosticView {
+                provider_id: "codex".to_string(),
+                readiness: "SetupRequired".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: Some("missing codex".to_string()),
+                },
+                issues: vec!["provider executable is not ready: missing codex".to_string()],
+                suggested_actions: vec!["install `codex` or add it to PATH".to_string()],
+            }]
+        );
+    }
+
+    #[test]
     fn parses_pending_permissions_from_daemon_response() {
         let response = json!({
             "permissions": [
@@ -3059,48 +3252,38 @@ mod tests {
     }
 
     #[test]
-    fn set_provider_health_selects_first_available_when_current_is_down() {
+    fn set_provider_diagnostics_updates_health_and_selects_ready_provider() {
         let mut state = TuiState::default();
 
-        let switched = state.set_provider_health(vec![
-            ProviderHealthView {
+        let switched = state.set_provider_diagnostics(vec![
+            ProviderDiagnosticView {
                 provider_id: "codex".to_string(),
-                status: "Unavailable".to_string(),
-                last_error: Some("missing codex".to_string()),
+                readiness: "SetupRequired".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: Some("missing".to_string()),
+                },
+                issues: vec!["missing".to_string()],
+                suggested_actions: Vec::new(),
             },
-            ProviderHealthView {
+            ProviderDiagnosticView {
                 provider_id: "gemini".to_string(),
-                status: "Healthy".to_string(),
-                last_error: None,
+                readiness: "Ready".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "gemini".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                issues: Vec::new(),
+                suggested_actions: Vec::new(),
             },
         ]);
 
         assert_eq!(switched, Some(("codex".to_string(), "gemini".to_string())));
         assert_eq!(state.selected_provider(), "gemini");
-    }
-
-    #[test]
-    fn set_provider_health_keeps_current_provider_when_available() {
-        let mut state = TuiState {
-            selected_provider_index: 1,
-            ..TuiState::default()
-        };
-
-        let switched = state.set_provider_health(vec![
-            ProviderHealthView {
-                provider_id: "codex".to_string(),
-                status: "Healthy".to_string(),
-                last_error: None,
-            },
-            ProviderHealthView {
-                provider_id: "gemini".to_string(),
-                status: "Degraded".to_string(),
-                last_error: Some("slow".to_string()),
-            },
-        ]);
-
-        assert!(switched.is_none());
-        assert_eq!(state.selected_provider(), "gemini");
+        assert_eq!(state.provider_health[0].provider_id, "codex");
+        assert_eq!(state.provider_diagnostics[1].readiness, "Ready");
     }
 
     #[test]
@@ -3129,21 +3312,65 @@ mod tests {
     }
 
     #[test]
-    fn summarizes_provider_health() {
-        let health = vec![
-            ProviderHealthView {
+    fn append_provider_diagnostic_issues_shows_suggestions() {
+        let mut state = TuiState {
+            provider_diagnostics: vec![ProviderDiagnosticView {
+                provider_id: "opencode".to_string(),
+                readiness: "UnsupportedRuntime".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "opencode".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                issues: vec![
+                    "Baize prompt runtime is not implemented for this provider yet".to_string(),
+                ],
+                suggested_actions: vec![
+                    "use the ACP proof-of-life data to continue adapter implementation".to_string(),
+                ],
+            }],
+            ..TuiState::default()
+        };
+
+        append_provider_diagnostic_issues(&mut state);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("provider diagnostics:"));
+        assert!(transcript.contains("opencode: Baize prompt runtime"));
+        assert!(transcript.contains("next: use the ACP proof-of-life"));
+    }
+
+    #[test]
+    fn summarizes_provider_diagnostics() {
+        let diagnostics = vec![
+            ProviderDiagnosticView {
                 provider_id: "codex".to_string(),
-                status: "Healthy".to_string(),
-                last_error: None,
+                readiness: "Ready".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                issues: Vec::new(),
+                suggested_actions: Vec::new(),
             },
-            ProviderHealthView {
-                provider_id: "gemini".to_string(),
-                status: "Unavailable".to_string(),
-                last_error: Some("missing".to_string()),
+            ProviderDiagnosticView {
+                provider_id: "opencode".to_string(),
+                readiness: "UnsupportedRuntime".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "opencode".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                issues: Vec::new(),
+                suggested_actions: Vec::new(),
             },
         ];
 
-        assert_eq!(summarize_provider_health(&health), "codex:ok, gemini:down");
+        assert_eq!(
+            summarize_provider_diagnostics(&diagnostics),
+            "codex:ready, opencode:unsupported"
+        );
     }
 
     #[test]

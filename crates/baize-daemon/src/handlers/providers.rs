@@ -39,6 +39,16 @@ pub async fn provider_validate(
     ok_json(serde_json::json!({ "validation": baize_adapters::validate_provider(&provider) }))
 }
 
+pub async fn provider_diagnose(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let providers = baize_adapters::default_provider_profiles();
+    let Some(provider) = providers.into_iter().find(|provider| provider.id.0 == id) else {
+        return crate::helpers::not_found("provider not found");
+    };
+    ok_json(serde_json::json!({ "diagnostic": baize_adapters::diagnose_provider(&provider) }))
+}
+
 pub async fn check_providers(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -65,4 +75,20 @@ pub async fn validate_providers(
     );
     state.record_event(event);
     ok_json(serde_json::json!({ "validations": validations }))
+}
+
+pub async fn diagnose_providers(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let providers = ordered_provider_profiles(&state.config);
+    let diagnostics = providers
+        .iter()
+        .map(baize_adapters::diagnose_provider)
+        .collect::<Vec<_>>();
+    let event = baize_core::BaizeEvent::new(
+        "provider.diagnostic.completed",
+        serde_json::json!({ "diagnostics": diagnostics }),
+    );
+    state.record_event(event);
+    ok_json(serde_json::json!({ "diagnostics": diagnostics }))
 }

@@ -83,6 +83,8 @@ In another terminal:
 ```sh
 curl -s http://127.0.0.1:7878/health
 curl -s http://127.0.0.1:7878/providers
+curl -s -X POST http://127.0.0.1:7878/providers/diagnose
+curl -s http://127.0.0.1:7878/providers/gemini/diagnose
 curl -s http://127.0.0.1:7878/providers/opencode/validate
 curl -s "http://127.0.0.1:7878/workspaces/status?path=."
 ```
