@@ -208,7 +208,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 159.
+Current full test count: 161.
 
 Implemented test coverage includes:
 
@@ -241,6 +241,8 @@ Implemented test coverage includes:
 - adapter native provider session ID extraction;
 - adapter provider error classification;
 - command timeout behavior;
+- adapter terminal success detection for stream-json output that completes before CLI process exit;
+- adapter timeout handling that treats an already-emitted terminal success result as a successful prompt turn;
 - daemon workspace/session/prompt/events flow;
 - daemon workspace project listing;
 - daemon event history filtering;

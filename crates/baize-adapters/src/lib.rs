@@ -527,12 +527,13 @@ fn agent_result_from_command_run(
 ) -> AgentRunResult {
     let stdout = String::from_utf8_lossy(&run.output.stdout);
     let raw_stderr = String::from_utf8_lossy(&run.output.stderr).to_string();
-    let stderr = if run.timed_out {
+    let stream_completed = stream_reports_success(&stdout);
+    let success = run.output.status.success() || (run.timed_out && stream_completed);
+    let stderr = if run.timed_out && !stream_completed {
         timeout_stderr(command, run.timeout, &raw_stderr)
     } else {
         raw_stderr
     };
-    let success = !run.timed_out && run.output.status.success();
     let error = if success {
         None
     } else if run.timed_out {
@@ -549,6 +550,32 @@ fn agent_result_from_command_run(
         error,
         stderr,
     }
+}
+
+fn stream_reports_success(raw: &str) -> bool {
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .any(|value| {
+            let Some(object) = value.as_object() else {
+                return false;
+            };
+            let type_is_result = object
+                .get("type")
+                .and_then(Value::as_str)
+                .map(|kind| kind.eq_ignore_ascii_case("result"))
+                .unwrap_or(false);
+            let status_is_success = object
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|status| {
+                    matches!(
+                        status.to_ascii_lowercase().as_str(),
+                        "success" | "succeeded" | "completed"
+                    )
+                })
+                .unwrap_or(false);
+            type_is_result && status_is_success
+        })
 }
 
 fn timeout_for(request: &AgentPromptRequest) -> Duration {
@@ -1286,6 +1313,44 @@ mod tests {
         assert_eq!(events[0].text.as_deref(), Some("hello"));
         assert!(matches!(events[1].kind, AgentExecutionEventKind::ToolCall));
         assert!(matches!(events[2].kind, AgentExecutionEventKind::Raw));
+    }
+
+    #[test]
+    fn detects_terminal_success_result_in_stream_json() {
+        let raw = r#"
+        {"type":"message","content":"working"}
+        {"type":"result","status":"success","stats":{"total_tokens":42}}
+        "#;
+
+        assert!(stream_reports_success(raw));
+        assert!(!stream_reports_success(
+            r#"{"type":"message","content":"success is just text"}"#
+        ));
+        assert!(!stream_reports_success(
+            r#"{"type":"result","status":"failed"}"#
+        ));
+    }
+
+    #[test]
+    fn timeout_after_terminal_success_is_reported_as_success() {
+        let script = r#"printf '%s\n' '{"type":"message","content":"done"}' '{"type":"result","status":"success"}'; sleep 2"#;
+        let run = run_command_with_timeout(
+            "sh",
+            &["-c".to_string(), script.to_string()],
+            &PathBuf::from("."),
+            Duration::from_millis(20),
+        )
+        .expect("timeout run");
+
+        let result = agent_result_from_command_run(ProviderId("gemini".to_string()), "gemini", run);
+
+        assert!(result.success);
+        assert!(result.error.is_none());
+        assert!(!result.stderr.contains("timed out"));
+        assert!(result
+            .events
+            .iter()
+            .any(|event| event.text.as_deref() == Some("done")));
     }
 
     #[test]
