@@ -78,10 +78,10 @@ impl Default for TuiState {
         Self {
             workspace: "Baize MVP TUI".to_string(),
             transcript: vec![
-                "Baize is ready.".to_string(),
-                "Ask for a code change, investigation, test run, or handoff.".to_string(),
+                "boot sequence complete".to_string(),
+                "mesh router standing by for code operations".to_string(),
                 String::new(),
-                "The local daemon is started automatically when possible.".to_string(),
+                "daemon link is managed automatically when possible".to_string(),
             ],
             scroll_offset: 0,
             daemon_status: "daemon: not checked".to_string(),
@@ -282,7 +282,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                 .bg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" Workspace Fabric", Style::default().fg(Color::White)),
+        Span::styled(
+            " BAIZE://workspace-fabric",
+            Style::default().fg(Color::White),
+        ),
         Span::raw("  "),
         Span::styled(
             format!(" {status_label} "),
@@ -290,6 +293,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                 .fg(Color::Black)
                 .bg(activity_color(&state.activity_status)),
         ),
+        Span::raw("  "),
+        Span::styled("[mesh:local]", muted_style()),
+        Span::raw(" "),
+        Span::styled("[router:sticky]", muted_style()),
     ]);
     let subtitle = Line::from(vec![
         Span::styled("workspace ", muted_style()),
@@ -297,6 +304,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         Span::raw("   "),
         Span::styled("daemon ", muted_style()),
         Span::raw(state.daemon_status.trim_start_matches("daemon: ")),
+        Span::raw("   "),
+        Span::styled("target ", muted_style()),
+        Span::styled(state.selected_provider().to_string(), accent_style()),
     ]);
     let rule = Line::from(Span::styled("─".repeat(area.width as usize), muted_style()));
 
@@ -400,21 +410,22 @@ fn ready_panel_lines(state: &TuiState) -> Vec<Line<'static>> {
     vec![
         Line::raw(""),
         Line::from(vec![
-            Span::styled("Start here", accent_style()),
-            Span::styled("  ask, route, inspect, hand off", muted_style()),
+            Span::styled("╭─", muted_style()),
+            Span::styled(" COMMAND MATRIX ", accent_style()),
+            Span::styled("────────────────────────────╮", muted_style()),
         ]),
-        ready_action_line("new task", "type a request and press Enter"),
-        ready_action_line("switch", "Tab cycles the target provider"),
-        ready_action_line("load", "Ctrl-L restores the latest session"),
-        ready_action_line("handoff", "Ctrl-H previews a provider transfer"),
-        Line::raw(""),
+        ready_action_line("enter", "launch a task into the mesh"),
+        ready_action_line("tab", "rotate target provider"),
+        ready_action_line("^L", "re-attach latest session"),
+        ready_action_line("^H", "generate handoff packet"),
         Line::from(vec![
-            Span::styled("target ", muted_style()),
+            Span::styled("├─", muted_style()),
+            Span::styled(" target ", muted_style()),
             Span::styled(
                 state.selected_provider().to_string(),
                 Style::default().fg(Color::White),
             ),
-            Span::styled("   active ", muted_style()),
+            Span::styled("  active ", muted_style()),
             Span::raw(
                 state
                     .active_provider
@@ -422,14 +433,23 @@ fn ready_panel_lines(state: &TuiState) -> Vec<Line<'static>> {
                     .unwrap_or("none")
                     .to_string(),
             ),
+            Span::styled("  mode ", muted_style()),
+            Span::raw("supervised"),
+        ]),
+        Line::from(vec![
+            Span::styled("╰─", muted_style()),
+            Span::styled(" await instructions ", muted_style()),
+            Span::styled("────────────────────────────╯", muted_style()),
         ]),
     ]
 }
 
 fn ready_action_line(label: &'static str, text: &'static str) -> Line<'static> {
     Line::from(vec![
-        Span::styled("  • ", muted_style()),
-        Span::styled(format!("{label:<8}"), Style::default().fg(Color::White)),
+        Span::styled("│ ", muted_style()),
+        Span::styled("▸ ", accent_style()),
+        Span::styled(format!("{label:<7}"), Style::default().fg(Color::White)),
+        Span::styled(":: ", muted_style()),
         Span::styled(text, muted_style()),
     ])
 }
@@ -471,10 +491,10 @@ fn transcript_line(line: &str) -> Line<'static> {
 
 fn control_plane_text(state: &TuiState) -> Text<'static> {
     let mut lines = Vec::new();
-    lines.push(section_line("providers"));
+    lines.push(section_line("provider matrix"));
     lines.extend(provider_lines(state));
     lines.push(Line::raw(""));
-    lines.push(section_line("session"));
+    lines.push(section_line("router"));
     lines.push(key_value_line("current", &state.session_status()));
     lines.push(key_value_line("route", &state.route_status()));
     lines.push(Line::raw(""));
@@ -496,6 +516,7 @@ fn provider_lines(state: &TuiState) -> Vec<Line<'static>> {
                 .unwrap_or("?");
             let marker = if selected { "›" } else { " " };
             let active_label = if active { " active" } else { "" };
+            let signal = health_signal(health);
             Line::from(vec![
                 Span::styled(format!("{marker} "), accent_style()),
                 Span::styled(
@@ -508,7 +529,8 @@ fn provider_lines(state: &TuiState) -> Vec<Line<'static>> {
                         Style::default()
                     },
                 ),
-                Span::styled(format!(" {health:<4}"), health_style(health)),
+                Span::styled(format!(" {signal} "), health_style(health)),
+                Span::styled(format!("{health:<4}"), health_style(health)),
                 Span::styled(active_label, muted_style()),
             ])
         })
@@ -519,7 +541,7 @@ fn section_line(label: &'static str) -> Line<'static> {
     Line::from(Span::styled(
         label.to_ascii_uppercase(),
         Style::default()
-            .fg(Color::Blue)
+            .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -557,6 +579,15 @@ fn health_style(health: &str) -> Style {
         "warn" => Style::default().fg(Color::Yellow),
         "down" => Style::default().fg(Color::Red),
         _ => muted_style(),
+    }
+}
+
+fn health_signal(health: &str) -> &'static str {
+    match health {
+        "ok" => "▰▰▰",
+        "warn" => "▰▰▱",
+        "down" => "▰▱▱",
+        _ => "▱▱▱",
     }
 }
 
@@ -1851,17 +1882,17 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("BAIZE"));
-        assert!(rendered.contains("Workspace Fabric"));
+        assert!(rendered.contains("BAIZE://workspace-fabric"));
         assert!(rendered.contains("Baize MVP TUI"));
         assert!(rendered.contains("daemon"));
         assert!(rendered.contains("not checked"));
         assert!(rendered.contains("Agent Stream"));
-        assert!(rendered.contains("Start here"));
-        assert!(rendered.contains("new task"));
+        assert!(rendered.contains("COMMAND MATRIX"));
+        assert!(rendered.contains("enter"));
         assert!(rendered.contains("target"));
         assert!(rendered.contains("Control Plane"));
-        assert!(rendered.contains("PROVIDERS"));
-        assert!(rendered.contains("selected"));
+        assert!(rendered.contains("PROVIDER MATRIX"));
+        assert!(rendered.contains("ROUTER"));
         assert!(rendered.contains("codex"));
         assert!(rendered.contains("opencode"));
         assert!(rendered.contains("Prompt"));
