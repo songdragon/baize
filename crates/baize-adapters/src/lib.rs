@@ -87,6 +87,24 @@ pub struct AgentPromptRequest {
     pub cwd: PathBuf,
     pub session_id: Option<String>,
     pub timeout_seconds: Option<u64>,
+    pub execution_policy: AgentExecutionPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentExecutionPolicy {
+    Ask,
+    AllowProject,
+    Deny,
+}
+
+impl AgentExecutionPolicy {
+    pub fn from_command_policy(policy: &str) -> Self {
+        match policy {
+            "allow_project" => Self::AllowProject,
+            "deny" => Self::Deny,
+            _ => Self::Ask,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +369,7 @@ pub fn smoke_provider(
         cwd: options.cwd,
         session_id: None,
         timeout_seconds: options.timeout_seconds,
+        execution_policy: AgentExecutionPolicy::Deny,
     };
     let prompt_command_args = match provider_id.0.as_str() {
         "codex" => build_codex_args(&prompt_request),
@@ -386,13 +405,18 @@ pub fn smoke_provider(
 }
 
 pub fn build_gemini_args(request: &AgentPromptRequest) -> Vec<String> {
+    let approval_mode = match request.execution_policy {
+        AgentExecutionPolicy::Ask => "default",
+        AgentExecutionPolicy::AllowProject => "auto_edit",
+        AgentExecutionPolicy::Deny => "plan",
+    };
     let mut args = vec![
         "--prompt".to_string(),
         request.prompt.clone(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--approval-mode".to_string(),
-        "plan".to_string(),
+        approval_mode.to_string(),
         "--skip-trust".to_string(),
     ];
     if let Some(session_id) = &request.session_id {
@@ -403,13 +427,15 @@ pub fn build_gemini_args(request: &AgentPromptRequest) -> Vec<String> {
 }
 
 pub fn build_codex_args(request: &AgentPromptRequest) -> Vec<String> {
+    let sandbox = match request.execution_policy {
+        AgentExecutionPolicy::Deny => "read-only",
+        AgentExecutionPolicy::Ask | AgentExecutionPolicy::AllowProject => "workspace-write",
+    };
     let mut args = vec![
         "exec".to_string(),
         "--json".to_string(),
         "--sandbox".to_string(),
-        "read-only".to_string(),
-        "--ask-for-approval".to_string(),
-        "never".to_string(),
+        sandbox.to_string(),
         "--cd".to_string(),
         request.cwd.to_string_lossy().to_string(),
     ];
@@ -1171,13 +1197,34 @@ mod tests {
     }
 
     #[test]
-    fn builds_safe_gemini_stream_json_command() {
+    fn execution_policy_maps_from_workspace_command_policy() {
+        assert_eq!(
+            AgentExecutionPolicy::from_command_policy("allow_project"),
+            AgentExecutionPolicy::AllowProject
+        );
+        assert_eq!(
+            AgentExecutionPolicy::from_command_policy("deny"),
+            AgentExecutionPolicy::Deny
+        );
+        assert_eq!(
+            AgentExecutionPolicy::from_command_policy("ask"),
+            AgentExecutionPolicy::Ask
+        );
+        assert_eq!(
+            AgentExecutionPolicy::from_command_policy("unknown"),
+            AgentExecutionPolicy::Ask
+        );
+    }
+
+    #[test]
+    fn builds_deny_gemini_stream_json_command() {
         let request = AgentPromptRequest {
             provider_id: ProviderId("gemini".to_string()),
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("session-1".to_string()),
             timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Deny,
         };
 
         let args = build_gemini_args(&request);
@@ -1195,13 +1242,37 @@ mod tests {
     }
 
     #[test]
-    fn builds_safe_codex_json_command() {
+    fn gemini_execution_policy_controls_approval_mode() {
+        let mut request = AgentPromptRequest {
+            provider_id: ProviderId("gemini".to_string()),
+            prompt: "hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: None,
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Ask,
+        };
+
+        let ask_args = build_gemini_args(&request);
+        assert!(ask_args
+            .windows(2)
+            .any(|pair| pair == ["--approval-mode", "default"]));
+
+        request.execution_policy = AgentExecutionPolicy::AllowProject;
+        let allow_args = build_gemini_args(&request);
+        assert!(allow_args
+            .windows(2)
+            .any(|pair| pair == ["--approval-mode", "auto_edit"]));
+    }
+
+    #[test]
+    fn builds_deny_codex_json_command() {
         let request = AgentPromptRequest {
             provider_id: ProviderId("codex".to_string()),
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: None,
             timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Deny,
         };
 
         let args = build_codex_args(&request);
@@ -1211,10 +1282,31 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--sandbox", "read-only"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--ask-for-approval", "never"]));
+        assert!(!args.contains(&"--ask-for-approval".to_string()));
         assert_eq!(args.last().expect("prompt"), "hello");
+    }
+
+    #[test]
+    fn codex_execution_policy_controls_sandbox() {
+        let mut request = AgentPromptRequest {
+            provider_id: ProviderId("codex".to_string()),
+            prompt: "hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: None,
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Ask,
+        };
+
+        let ask_args = build_codex_args(&request);
+        assert!(ask_args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"]));
+
+        request.execution_policy = AgentExecutionPolicy::AllowProject;
+        let allow_args = build_codex_args(&request);
+        assert!(allow_args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"]));
     }
 
     #[test]

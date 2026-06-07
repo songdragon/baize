@@ -434,6 +434,9 @@ pub async fn prompt_session(
             cwd: project.root,
             session_id: None,
             timeout_seconds: request.timeout_seconds.or(Some(120)),
+            execution_policy: baize_adapters::AgentExecutionPolicy::from_command_policy(
+                &state.config.workspace.command_policy,
+            ),
         });
 
     match run {

@@ -64,6 +64,7 @@ The MVP target is a single-workspace local agent supervisor:
 - daemon endpoints for provider validation;
 - Gemini `--prompt --output-format stream-json` execution path;
 - Codex `exec --json` execution path;
+- workspace command policy mapping for Codex/Gemini execution arguments;
 - Codex/Gemini smoke validation command for auth, timeout and parser checks;
 - stream-json/JSONL parser behavior;
 - native provider session ID extraction from structured output;
@@ -208,7 +209,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 161.
+Current full test count: 165.
 
 Implemented test coverage includes:
 
@@ -236,6 +237,7 @@ Implemented test coverage includes:
 - provider ACP initialize proof generation;
 - provider validation behavior;
 - Gemini/Codex command construction;
+- Gemini/Codex execution policy argument mapping;
 - Gemini/Codex smoke validation without real prompt execution;
 - stream-json/JSONL parser behavior;
 - adapter native provider session ID extraction;
@@ -244,6 +246,7 @@ Implemented test coverage includes:
 - adapter terminal success detection for stream-json output that completes before CLI process exit;
 - adapter timeout handling that treats an already-emitted terminal success result as a successful prompt turn;
 - daemon workspace/session/prompt/events flow;
+- daemon propagation of workspace command policy into adapter prompt requests;
 - daemon workspace project listing;
 - daemon event history filtering;
 - daemon session diff hunk reporting;

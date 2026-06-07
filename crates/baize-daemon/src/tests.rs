@@ -6,7 +6,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use baize_adapters::{
     AgentErrorDetail, AgentErrorKind, AgentErrorSource, AgentExecutionEvent,
-    AgentExecutionEventKind, AgentPromptRequest, AgentRunResult,
+    AgentExecutionEventKind, AgentExecutionPolicy, AgentPromptRequest, AgentRunResult,
 };
 use baize_config::BaizeConfig;
 use baize_core::{
@@ -360,6 +360,7 @@ async fn prompt_provider_target_switches_session_route_and_executor() {
     let captured_provider = {
         let captured = requests.lock().expect("requests");
         assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].execution_policy, AgentExecutionPolicy::Ask);
         captured[0].provider_id.0.clone()
     };
     assert_eq!(captured_provider, "gemini");
@@ -393,6 +394,53 @@ async fn prompt_provider_target_switches_session_route_and_executor() {
         .as_str()
         .expect("reason")
         .contains("Prompt target provider override"));
+}
+
+#[tokio::test]
+async fn prompt_request_uses_workspace_command_policy() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut config = BaizeConfig::default();
+    config.workspace.command_policy = "allow_project".to_string();
+    let state = AppState::with_executor(
+        config,
+        store,
+        Arc::new(RecordingAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+            requests: requests.clone(),
+        }),
+    );
+    let app = router(state);
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let prompt = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "edit files" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(prompt["status"], "running");
+    let captured = requests.lock().expect("requests");
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].execution_policy,
+        AgentExecutionPolicy::AllowProject
+    );
 }
 
 #[tokio::test]

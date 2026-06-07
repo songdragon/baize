@@ -52,6 +52,18 @@ cargo run -p baize-cli -- smoke gemini --run-prompt --timeout-seconds 30
 
 Only use `--run-prompt` when the provider CLI is installed, authenticated and you are ready to spend provider quota.
 
+## Execution Policy
+
+Prompt execution follows `workspace.command_policy` in `~/.config/baize/config.toml`:
+
+| Policy | Codex | Gemini |
+|---|---|---|
+| `ask` | `--sandbox workspace-write` | `--approval-mode default` |
+| `allow_project` | `--sandbox workspace-write` | `--approval-mode auto_edit` |
+| `deny` | `--sandbox read-only` | `--approval-mode plan` |
+
+The default is `ask`. Use `deny` when you want Baize to inspect or plan without modifying files.
+
 ## TUI Keys
 
 | Key | Action |
