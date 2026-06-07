@@ -73,6 +73,12 @@ pub struct SessionView {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPromptSubmission {
+    prompt: String,
+    provider_id: String,
+}
+
 impl Default for TuiState {
     fn default() -> Self {
         Self {
@@ -235,9 +241,12 @@ fn run_app(
                         state.input.pop();
                     }
                     KeyCode::Enter => {
-                        if let Err(error) = submit_prompt(&mut state) {
-                            state.activity_status = "failed".to_string();
-                            state.push_message(format!("error: {error:#}"));
+                        if let Some(submission) = begin_prompt_submission(&mut state) {
+                            terminal.draw(|frame| render(frame, &state))?;
+                            if let Err(error) = finish_prompt_submission(&mut state, submission) {
+                                state.activity_status = "failed".to_string();
+                                state.push_message(format!("error: {error:#}"));
+                            }
                         }
                     }
                     _ => {}
@@ -792,25 +801,39 @@ fn summarize_provider_health(health: &[ProviderHealthView]) -> String {
         .join(", ")
 }
 
-fn submit_prompt(state: &mut TuiState) -> Result<()> {
+fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmission> {
     let prompt = state.input.trim().to_string();
     if prompt.is_empty() {
-        return Ok(());
+        return None;
     }
 
-    state.activity_status = format!("running {}", state.selected_provider());
+    let provider_id = state.selected_provider().to_string();
+    state.activity_status = format!("running {provider_id}");
     state.push_message(format!("> {prompt}"));
+    state.push_message(format!("mesh: dispatching to {provider_id}"));
+    state.input.clear();
+
+    Some(PendingPromptSubmission {
+        prompt,
+        provider_id,
+    })
+}
+
+fn finish_prompt_submission(
+    state: &mut TuiState,
+    submission: PendingPromptSubmission,
+) -> Result<()> {
     let session_id = match state.session_id.clone() {
         Some(session_id) => session_id,
         None => {
             let workspace_id = ensure_workspace(state)?;
-            ensure_session(state, &workspace_id, &prompt)?
+            ensure_session(state, &workspace_id, &submission.prompt)?
         }
     };
 
     let response = post_json(
         &format!("/sessions/{session_id}/prompt"),
-        prompt_request_body(state.selected_provider(), &prompt),
+        prompt_request_body(&submission.provider_id, &submission.prompt),
     )?;
     append_prompt_response(state, &response);
 
@@ -818,7 +841,6 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
     append_recent_events_with_sections(state, &events);
     refresh_route_history(state)?;
     refresh_session_diff(state)?;
-    state.input.clear();
     state.activity_status = "idle".to_string();
     Ok(())
 }
@@ -1965,6 +1987,40 @@ mod tests {
         assert_eq!(body["prompt"], "continue task");
         assert_eq!(body["provider_id"], "gemini");
         assert_eq!(body["timeout_seconds"], PROMPT_TIMEOUT_SECONDS);
+    }
+
+    #[test]
+    fn begin_prompt_submission_immediately_shows_running_state() {
+        let mut state = TuiState {
+            selected_provider_index: 1,
+            input: "你能做什么".to_string(),
+            ..TuiState::default()
+        };
+
+        let submission = begin_prompt_submission(&mut state).expect("submission");
+
+        assert_eq!(submission.provider_id, "gemini");
+        assert_eq!(submission.prompt, "你能做什么");
+        assert!(state.input.is_empty());
+        assert_eq!(state.activity_status, "running gemini");
+        assert!(state.transcript_text().contains("> 你能做什么"));
+        assert!(state
+            .transcript_text()
+            .contains("mesh: dispatching to gemini"));
+    }
+
+    #[test]
+    fn begin_prompt_submission_ignores_blank_input() {
+        let mut state = TuiState {
+            input: "   ".to_string(),
+            ..TuiState::default()
+        };
+
+        let submission = begin_prompt_submission(&mut state);
+
+        assert!(submission.is_none());
+        assert_eq!(state.activity_status, "idle");
+        assert_eq!(state.input, "   ");
     }
 
     #[test]
