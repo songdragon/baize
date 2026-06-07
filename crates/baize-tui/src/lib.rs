@@ -22,6 +22,10 @@ const DAEMON_HOST: &str = "127.0.0.1";
 const DAEMON_PORT: u16 = 7878;
 const PROMPT_TIMEOUT_SECONDS: u64 = 120;
 const TRANSCRIPT_DETAIL_MAX_CHARS: usize = 180;
+const TRANSCRIPT_RECENT_EVENT_LIMIT: usize = 12;
+const TRANSCRIPT_ASSISTANT_LINE_LIMIT: usize = 5;
+const TRANSCRIPT_TOOL_LINE_LIMIT: usize = 4;
+const TRANSCRIPT_STATUS_LINE_LIMIT: usize = 4;
 const DAEMON_START_ATTEMPTS: usize = 20;
 const DAEMON_START_POLL_MS: u64 = 100;
 
@@ -785,6 +789,13 @@ fn health_status_for<'a>(health: &'a [ProviderHealthView], provider_id: &str) ->
         .map(|entry| entry.status.as_str())
 }
 
+fn selected_provider_unavailable(state: &TuiState) -> Option<&ProviderHealthView> {
+    let provider_id = state.selected_provider();
+    state.provider_health.iter().find(|entry| {
+        entry.provider_id == provider_id && short_health_status(&entry.status) == "down"
+    })
+}
+
 fn summarize_provider_health(health: &[ProviderHealthView]) -> String {
     if health.is_empty() {
         return "none".to_string();
@@ -809,6 +820,21 @@ fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmissi
     }
 
     let provider_id = state.selected_provider().to_string();
+    if let Some(health) = selected_provider_unavailable(state) {
+        let detail = health
+            .last_error
+            .as_deref()
+            .map(transcript_detail)
+            .filter(|detail| !detail.is_empty())
+            .map(|detail| format!(": {detail}"))
+            .unwrap_or_default();
+        state.activity_status = "blocked".to_string();
+        state.push_message(format!(
+            "provider {provider_id} is down{detail}; press Tab to switch or Ctrl-R to refresh"
+        ));
+        return None;
+    }
+
     state.activity_status = format!("running {provider_id}");
     state.push_message(format!("> {prompt}"));
     state.push_message(format!("mesh: dispatching to {provider_id}"));
@@ -1424,48 +1450,77 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
     let recent_events = events
         .iter()
         .rev()
-        .take(5)
+        .take(TRANSCRIPT_RECENT_EVENT_LIMIT)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect::<Vec<_>>();
     let mut tool_lines = Vec::new();
-    let mut output_lines = Vec::new();
+    let mut assistant_lines = Vec::new();
+    let mut status_lines = Vec::new();
     for event in recent_events {
         let event_type = event
             .get("event_type")
             .and_then(Value::as_str)
             .unwrap_or("event");
         let payload = event.get("payload").unwrap_or(&Value::Null);
-        let detail = payload
-            .get("text")
-            .and_then(Value::as_str)
-            .or_else(|| payload.get("error").and_then(Value::as_str))
-            .or_else(|| payload.get("stderr").and_then(Value::as_str))
-            .map(transcript_detail);
+        let detail = event_detail(payload);
 
-        let line = match detail {
-            Some(detail) if !detail.is_empty() => format!("{event_type}: {detail}"),
-            _ => event_type.to_string(),
-        };
-        if event_type == "session.agent.tool_call" {
-            tool_lines.push(line);
-        } else {
-            output_lines.push(line);
+        match (event_type, detail) {
+            ("session.agent.tool_call", Some(detail)) if !detail.is_empty() => {
+                tool_lines.push(detail);
+            }
+            ("session.agent.tool_call", _) => tool_lines.push("tool call".to_string()),
+            ("session.agent.output", Some(detail)) if !detail.is_empty() => {
+                assistant_lines.push(detail);
+            }
+            ("session.agent.output", _) => {}
+            (_, Some(detail)) if !detail.is_empty() => {
+                status_lines.push(format!("{event_type}: {detail}"));
+            }
+            _ => status_lines.push(event_type.to_string()),
         }
     }
 
     if !tool_lines.is_empty() {
         state.push_message("command/tool events:".to_string());
-        for line in tool_lines {
+        for line in tool_lines.iter().take(TRANSCRIPT_TOOL_LINE_LIMIT) {
             state.push_message(format!("  {line}"));
         }
+        append_more_line(state, tool_lines.len(), TRANSCRIPT_TOOL_LINE_LIMIT);
     }
-    if !output_lines.is_empty() {
-        state.push_message("agent output:".to_string());
-        for line in output_lines {
+    if !assistant_lines.is_empty() {
+        state.push_message("assistant:".to_string());
+        for line in assistant_lines.iter().take(TRANSCRIPT_ASSISTANT_LINE_LIMIT) {
             state.push_message(format!("  {line}"));
         }
+        append_more_line(
+            state,
+            assistant_lines.len(),
+            TRANSCRIPT_ASSISTANT_LINE_LIMIT,
+        );
+    }
+    if !status_lines.is_empty() {
+        state.push_message("run events:".to_string());
+        for line in status_lines.iter().take(TRANSCRIPT_STATUS_LINE_LIMIT) {
+            state.push_message(format!("  {line}"));
+        }
+        append_more_line(state, status_lines.len(), TRANSCRIPT_STATUS_LINE_LIMIT);
+    }
+}
+
+fn event_detail(payload: &Value) -> Option<String> {
+    payload
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("error").and_then(Value::as_str))
+        .or_else(|| payload.get("stderr").and_then(Value::as_str))
+        .map(transcript_detail)
+}
+
+fn append_more_line(state: &mut TuiState, total: usize, shown: usize) {
+    if let Some(hidden) = total.checked_sub(shown).filter(|hidden| *hidden > 0) {
+        state.push_message(format!("  (+{hidden} more)"));
     }
 }
 
@@ -2029,6 +2084,29 @@ mod tests {
     }
 
     #[test]
+    fn begin_prompt_submission_blocks_known_down_provider() {
+        let mut state = TuiState {
+            input: "summarize project".to_string(),
+            provider_health: vec![ProviderHealthView {
+                provider_id: "codex".to_string(),
+                status: "Unavailable".to_string(),
+                last_error: Some("failed to spawn codex".to_string()),
+            }],
+            ..TuiState::default()
+        };
+
+        let submission = begin_prompt_submission(&mut state);
+
+        assert!(submission.is_none());
+        assert_eq!(state.activity_status, "blocked");
+        assert_eq!(state.input, "summarize project");
+        assert!(state
+            .transcript_text()
+            .contains("provider codex is down: failed to spawn codex"));
+        assert!(!state.transcript_text().contains("mesh: dispatching"));
+    }
+
+    #[test]
     fn renders_provider_mesh_as_individual_rows() {
         let backend = TestBackend::new(100, 22);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -2510,10 +2588,12 @@ mod tests {
 
         let transcript = state.transcript_text();
         assert!(transcript.contains("command/tool events:"));
-        assert!(transcript.contains("  session.agent.tool_call: cargo test"));
-        assert!(transcript.contains("agent output:"));
-        assert!(transcript.contains("  session.agent.output: reading files"));
+        assert!(transcript.contains("  cargo test"));
+        assert!(transcript.contains("assistant:"));
+        assert!(transcript.contains("  reading files"));
+        assert!(transcript.contains("run events:"));
         assert!(transcript.contains("  session.agent.failed: tests failed"));
+        assert!(!transcript.contains("session.agent.output: reading files"));
     }
 
     #[test]
@@ -2532,9 +2612,32 @@ mod tests {
         append_recent_events(&mut state, &response);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("session.agent.output: "));
+        assert!(transcript.contains("assistant:"));
         assert!(transcript.contains("..."));
         assert!(!transcript.contains("tail"));
+    }
+
+    #[test]
+    fn append_recent_events_caps_assistant_lines() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "events": [
+                { "event_type": "session.agent.output", "payload": { "text": "line 1" } },
+                { "event_type": "session.agent.output", "payload": { "text": "line 2" } },
+                { "event_type": "session.agent.output", "payload": { "text": "line 3" } },
+                { "event_type": "session.agent.output", "payload": { "text": "line 4" } },
+                { "event_type": "session.agent.output", "payload": { "text": "line 5" } },
+                { "event_type": "session.agent.output", "payload": { "text": "line 6" } }
+            ]
+        });
+
+        append_recent_events(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("  line 1"));
+        assert!(transcript.contains("  line 5"));
+        assert!(!transcript.contains("  line 6"));
+        assert!(transcript.contains("  (+1 more)"));
     }
 
     #[test]
@@ -2556,7 +2659,7 @@ mod tests {
         append_recent_events_with_sections(&mut state, &response);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("agent output:"));
+        assert!(transcript.contains("assistant:"));
         assert!(transcript.contains("test results:"));
         assert!(transcript.contains("  cargo test --all passed"));
     }
