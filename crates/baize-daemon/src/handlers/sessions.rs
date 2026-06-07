@@ -383,10 +383,10 @@ pub async fn prompt_session(
     if matches!(session.status, TaskSessionStatus::Canceled) {
         return bad_request("session is canceled");
     }
-    let provider_id = session
-        .active_provider_id
-        .clone()
-        .unwrap_or_else(|| ProviderId("codex".to_string()));
+    let provider_id = match apply_prompt_provider_target(&state, &mut session, &request) {
+        Ok(provider_id) => provider_id,
+        Err(response) => return response,
+    };
     let workspace = match with_store(&state, |store| store.get_workspace(&session.workspace_id)) {
         Ok(Some(workspace)) => workspace,
         _ => return not_found("workspace not found"),
@@ -555,6 +555,62 @@ pub async fn prompt_session(
             )
         }
     }
+}
+
+fn apply_prompt_provider_target(
+    state: &AppState,
+    session: &mut TaskSession,
+    request: &PromptRequest,
+) -> Result<ProviderId, (StatusCode, Json<serde_json::Value>)> {
+    let current_provider = session
+        .active_provider_id
+        .clone()
+        .unwrap_or_else(|| ProviderId("codex".to_string()));
+    let Some(requested_provider) = request.provider_id.as_ref() else {
+        return Ok(current_provider);
+    };
+    let requested_provider = ProviderId(requested_provider.clone());
+    if requested_provider == current_provider {
+        return Ok(current_provider);
+    }
+
+    let now = Utc::now();
+    let task_type = infer_task_type(&request.prompt);
+    let decision = RouteDecision {
+        id: RouteDecisionId::new(),
+        session_id: session.id.clone(),
+        selected_provider_id: requested_provider.clone(),
+        previous_provider_id: Some(current_provider),
+        reason: format!(
+            "Prompt target provider override. Task hint: {:?}.",
+            task_type
+        ),
+        task_type: Some(task_type),
+        confidence: 1.0,
+        mode: RoutingMode::Manual,
+        created_at: now,
+    };
+
+    session.active_provider_id = Some(requested_provider.clone());
+    session.updated_at = now;
+    if let Err(error) = with_store(state, |store| {
+        store.upsert_task_session(session)?;
+        store.insert_route_decision(&decision)?;
+        Ok(())
+    }) {
+        return Err(internal_error(error.to_string()));
+    }
+
+    let mut routed = baize_core::BaizeEvent::new(
+        "session.route.decided",
+        serde_json::json!({ "decision": decision }),
+    );
+    routed.workspace_id = Some(session.workspace_id.clone());
+    routed.session_id = Some(session.id.clone());
+    routed.provider_id = Some(requested_provider.clone());
+    state.record_event(routed);
+
+    Ok(requested_provider)
 }
 
 pub async fn cancel_session(

@@ -65,6 +65,7 @@ pub struct CreateSessionRequest {
 #[derive(Debug, Deserialize)]
 pub struct PromptRequest {
     pub prompt: String,
+    pub provider_id: Option<String>,
     pub timeout_seconds: Option<u64>,
 }
 

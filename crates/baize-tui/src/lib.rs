@@ -657,6 +657,14 @@ fn load_pending_permissions() -> Result<Vec<PermissionView>> {
     parse_permissions(&response)
 }
 
+fn prompt_request_body(provider_id: &str, prompt: &str) -> Value {
+    json!({
+        "prompt": prompt,
+        "provider_id": provider_id,
+        "timeout_seconds": PROMPT_TIMEOUT_SECONDS,
+    })
+}
+
 fn refresh_provider_health(state: &mut TuiState) -> Result<()> {
     state.activity_status = "refreshing provider health".to_string();
     let health = load_provider_health()?;
@@ -802,10 +810,7 @@ fn submit_prompt(state: &mut TuiState) -> Result<()> {
 
     let response = post_json(
         &format!("/sessions/{session_id}/prompt"),
-        json!({
-            "prompt": prompt,
-            "timeout_seconds": PROMPT_TIMEOUT_SECONDS,
-        }),
+        prompt_request_body(state.selected_provider(), &prompt),
     )?;
     append_prompt_response(state, &response);
 
@@ -1951,6 +1956,15 @@ mod tests {
 
         assert!(rendered.contains("baize"));
         assert!(rendered.contains("hello baize"));
+    }
+
+    #[test]
+    fn prompt_request_body_includes_target_provider() {
+        let body = prompt_request_body("gemini", "continue task");
+
+        assert_eq!(body["prompt"], "continue task");
+        assert_eq!(body["provider_id"], "gemini");
+        assert_eq!(body["timeout_seconds"], PROMPT_TIMEOUT_SECONDS);
     }
 
     #[test]

@@ -15,7 +15,11 @@ use baize_core::{
 };
 use baize_storage::EventStore;
 use serde_json::json;
-use std::{fs, process::Command, sync::Arc};
+use std::{
+    fs,
+    process::Command,
+    sync::{Arc, Mutex},
+};
 use tower::ServiceExt;
 
 #[derive(Clone)]
@@ -25,6 +29,19 @@ struct FakeAgentExecutor {
 
 impl AgentExecutor for FakeAgentExecutor {
     fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+        Ok(self.result.clone())
+    }
+}
+
+#[derive(Clone)]
+struct RecordingAgentExecutor {
+    result: AgentRunResult,
+    requests: Arc<Mutex<Vec<AgentPromptRequest>>>,
+}
+
+impl AgentExecutor for RecordingAgentExecutor {
+    fn run_prompt(&self, request: AgentPromptRequest) -> Result<AgentRunResult> {
+        self.requests.lock().expect("requests").push(request);
         Ok(self.result.clone())
     }
 }
@@ -259,6 +276,121 @@ async fn creates_workspace_session_prompt_and_events() {
     .await;
     assert_eq!(mode_status, StatusCode::BAD_REQUEST);
     assert_eq!(invalid_mode["error"], "invalid route mode");
+}
+
+#[tokio::test]
+async fn prompt_provider_target_switches_session_route_and_executor() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(RecordingAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("gemini".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+            requests: requests.clone(),
+        }),
+    );
+    let app = router(state);
+
+    let workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path(), "name": "switch-provider" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+
+    let session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "implement feature",
+                    "provider_id": "codex"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let session_id = session["session"]["id"].as_str().expect("session id");
+    assert_eq!(session["session"]["active_provider_id"], "codex");
+
+    let prompt = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "prompt": "continue on gemini",
+                    "provider_id": "gemini"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(prompt["status"], "running");
+    assert_eq!(prompt["provider_id"], "gemini");
+
+    let captured_provider = {
+        let captured = requests.lock().expect("requests");
+        assert_eq!(captured.len(), 1);
+        captured[0].provider_id.0.clone()
+    };
+    assert_eq!(captured_provider, "gemini");
+
+    let updated = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(updated["session"]["active_provider_id"], "gemini");
+
+    let routes = json_response(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}/routes"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let route_items = routes["routes"].as_array().expect("routes");
+    assert_eq!(route_items.len(), 2);
+    assert_eq!(route_items[1]["previous_provider_id"], "codex");
+    assert_eq!(route_items[1]["selected_provider_id"], "gemini");
+    assert_eq!(route_items[1]["mode"], "Manual");
+    assert!(route_items[1]["reason"]
+        .as_str()
+        .expect("reason")
+        .contains("Prompt target provider override"));
 }
 
 #[tokio::test]
