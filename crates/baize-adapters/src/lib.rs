@@ -420,7 +420,7 @@ pub fn build_gemini_args(request: &AgentPromptRequest) -> Vec<String> {
         "--skip-trust".to_string(),
     ];
     if let Some(session_id) = &request.session_id {
-        args.push("--session-id".to_string());
+        args.push("--resume".to_string());
         args.push(session_id.clone());
     }
     args
@@ -1238,7 +1238,8 @@ mod tests {
             .any(|pair| pair == ["--approval-mode", "plan"]));
         assert!(args
             .windows(2)
-            .any(|pair| pair == ["--session-id", "session-1"]));
+            .any(|pair| pair == ["--resume", "session-1"]));
+        assert!(!args.contains(&"--session-id".to_string()));
     }
 
     #[test]
@@ -1307,6 +1308,30 @@ mod tests {
         assert!(allow_args
             .windows(2)
             .any(|pair| pair == ["--sandbox", "workspace-write"]));
+    }
+
+    #[test]
+    fn codex_resume_command_preserves_session_id_and_prompt() {
+        let request = AgentPromptRequest {
+            provider_id: ProviderId("codex".to_string()),
+            prompt: "continue".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: Some("codex-native-1".to_string()),
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Ask,
+        };
+
+        let args = build_codex_args(&request);
+        let resume_index = args
+            .iter()
+            .position(|arg| arg == "resume")
+            .expect("resume command");
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"]));
+        assert_eq!(args[resume_index + 1], "codex-native-1");
+        assert_eq!(args.last().expect("prompt"), "continue");
     }
 
     #[test]

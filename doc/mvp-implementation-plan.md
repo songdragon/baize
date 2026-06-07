@@ -69,6 +69,7 @@ The MVP target is a single-workspace local agent supervisor:
 - stream-json/JSONL parser behavior;
 - native provider session ID extraction from structured output;
 - native provider session ID persistence and reuse for same-provider follow-up prompts;
+- provider-specific resume argument generation for Codex and Gemini follow-up prompts;
 - structured provider error classification and daemon reporting;
 - prompt execution timeout to prevent hanging on provider authentication or interactive prompts.
 
@@ -213,7 +214,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 203.
+Current full test count: 204.
 
 Implemented test coverage includes:
 
@@ -242,6 +243,7 @@ Implemented test coverage includes:
 - provider validation behavior;
 - Gemini/Codex command construction;
 - Gemini/Codex execution policy argument mapping;
+- Gemini/Codex resume argument generation;
 - Gemini/Codex smoke validation without real prompt execution;
 - stream-json/JSONL parser behavior;
 - adapter native provider session ID extraction;
