@@ -167,7 +167,11 @@ fn run_app(
         Err(error) => state.push_message(format!("provider load failed: {error:#}")),
     }
     match health_load {
-        Ok(health) => state.provider_health = health,
+        Ok(health) => {
+            if let Some((from, to)) = state.set_provider_health(health) {
+                state.push_message(format!("provider auto-selected: {from} -> {to}"));
+            }
+        }
         Err(error) => state.push_message(format!("provider health failed: {error:#}")),
     }
     match permission_load {
@@ -683,9 +687,13 @@ fn refresh_provider_health(state: &mut TuiState) -> Result<()> {
     state.activity_status = "refreshing provider health".to_string();
     let health = load_provider_health()?;
     let summary = summarize_provider_health(&health);
-    state.provider_health = health;
+    let switched = state.set_provider_health(health);
     state.activity_status = "idle".to_string();
     state.push_message(format!("provider health refreshed: {summary}"));
+    append_provider_health_errors(state);
+    if let Some((from, to)) = switched {
+        state.push_message(format!("provider auto-selected: {from} -> {to}"));
+    }
     Ok(())
 }
 
@@ -791,9 +799,20 @@ fn health_status_for<'a>(health: &'a [ProviderHealthView], provider_id: &str) ->
 
 fn selected_provider_unavailable(state: &TuiState) -> Option<&ProviderHealthView> {
     let provider_id = state.selected_provider();
-    state.provider_health.iter().find(|entry| {
-        entry.provider_id == provider_id && short_health_status(&entry.status) == "down"
-    })
+    state
+        .provider_health
+        .iter()
+        .find(|entry| entry.provider_id == provider_id && provider_health_is_down(entry))
+}
+
+fn provider_is_down(health: &[ProviderHealthView], provider_id: &str) -> bool {
+    health
+        .iter()
+        .any(|entry| entry.provider_id == provider_id && provider_health_is_down(entry))
+}
+
+fn provider_health_is_down(health: &ProviderHealthView) -> bool {
+    short_health_status(&health.status) == "down"
 }
 
 fn summarize_provider_health(health: &[ProviderHealthView]) -> String {
@@ -811,6 +830,32 @@ fn summarize_provider_health(health: &[ProviderHealthView]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn append_provider_health_errors(state: &mut TuiState) {
+    let lines = state
+        .provider_health
+        .iter()
+        .filter(|entry| short_health_status(&entry.status) == "down")
+        .filter_map(|entry| {
+            let error = entry.last_error.as_deref()?;
+            let error = transcript_detail(error);
+            if error.is_empty() {
+                None
+            } else {
+                Some(format!("{}: {error}", entry.provider_id))
+            }
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return;
+    }
+
+    state.push_message("provider setup issues:".to_string());
+    for line in lines {
+        state.push_message(format!("  {line}"));
+    }
 }
 
 fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmission> {
@@ -1583,6 +1628,31 @@ impl TuiState {
             return;
         }
         self.selected_provider_index = (self.selected_provider_index + 1) % self.providers.len();
+    }
+
+    fn set_provider_health(&mut self, health: Vec<ProviderHealthView>) -> Option<(String, String)> {
+        self.provider_health = health;
+        self.select_first_available_provider_if_current_is_down()
+    }
+
+    fn select_first_available_provider_if_current_is_down(&mut self) -> Option<(String, String)> {
+        let current = self.selected_provider().to_string();
+        if !provider_is_down(&self.provider_health, &current) {
+            return None;
+        }
+
+        let next_index = self.providers.iter().position(|provider| {
+            matches!(
+                health_status_for(&self.provider_health, provider).map(short_health_status),
+                Some("ok" | "warn")
+            )
+        })?;
+        if next_index == self.selected_provider_index {
+            return None;
+        }
+
+        self.selected_provider_index = next_index;
+        Some((current, self.selected_provider().to_string()))
     }
 
     fn selected_permission(&self) -> Option<&PermissionView> {
@@ -2986,6 +3056,76 @@ mod tests {
 
         assert!(status.contains(" codex:ok*"));
         assert!(status.contains(">gemini:ok"));
+    }
+
+    #[test]
+    fn set_provider_health_selects_first_available_when_current_is_down() {
+        let mut state = TuiState::default();
+
+        let switched = state.set_provider_health(vec![
+            ProviderHealthView {
+                provider_id: "codex".to_string(),
+                status: "Unavailable".to_string(),
+                last_error: Some("missing codex".to_string()),
+            },
+            ProviderHealthView {
+                provider_id: "gemini".to_string(),
+                status: "Healthy".to_string(),
+                last_error: None,
+            },
+        ]);
+
+        assert_eq!(switched, Some(("codex".to_string(), "gemini".to_string())));
+        assert_eq!(state.selected_provider(), "gemini");
+    }
+
+    #[test]
+    fn set_provider_health_keeps_current_provider_when_available() {
+        let mut state = TuiState {
+            selected_provider_index: 1,
+            ..TuiState::default()
+        };
+
+        let switched = state.set_provider_health(vec![
+            ProviderHealthView {
+                provider_id: "codex".to_string(),
+                status: "Healthy".to_string(),
+                last_error: None,
+            },
+            ProviderHealthView {
+                provider_id: "gemini".to_string(),
+                status: "Degraded".to_string(),
+                last_error: Some("slow".to_string()),
+            },
+        ]);
+
+        assert!(switched.is_none());
+        assert_eq!(state.selected_provider(), "gemini");
+    }
+
+    #[test]
+    fn append_provider_health_errors_shows_down_provider_setup_details() {
+        let mut state = TuiState {
+            provider_health: vec![
+                ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: Some("failed to spawn codex".to_string()),
+                },
+                ProviderHealthView {
+                    provider_id: "gemini".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+            ],
+            ..TuiState::default()
+        };
+
+        append_provider_health_errors(&mut state);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("provider setup issues:"));
+        assert!(transcript.contains("codex: failed to spawn codex"));
     }
 
     #[test]
