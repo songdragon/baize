@@ -131,6 +131,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `GET /events/history`.
 - Session status transitions: `Running` stays on prompt success, transitions to `Failed` on prompt failure or executor error, recovers from `Failed` on next successful prompt.
 - Canceled sessions reject new prompt requests.
+- Late provider results are ignored when a session was canceled before completion.
 - `session.status.changed` event emission on status transitions.
 - Startup recovery marks in-flight `Running` sessions as `Failed` and emits `session.recovered`.
 - Session diff API includes changed files and tracked-file diff hunks.
@@ -190,6 +191,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `Ctrl-R` provider health refresh;
 - prompt input and `Enter` submit;
 - non-blocking prompt worker so the TUI remains responsive while agent prompts run;
+- cancel flow detaches any pending prompt worker so late results do not update the TUI;
 - selected provider switching with `Tab`;
 - latest session loading with `Ctrl-L`;
 - new session reset with `Ctrl-N`;
@@ -211,7 +213,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 200.
+Current full test count: 203.
 
 Implemented test coverage includes:
 
@@ -271,6 +273,7 @@ Implemented test coverage includes:
 - daemon session status transitions (Running, Failed, Canceled, recovery);
 - daemon startup recovery for in-flight sessions;
 - daemon canceled session prompt rejection;
+- daemon ignored-result guard for prompts that complete after session cancellation;
 - TUI dashboard rendering;
 - TUI prompt input rendering;
 - TUI provider, route, permission and handoff status formatting;
@@ -287,6 +290,7 @@ Implemented test coverage includes:
 - TUI command/tool event and test result sections;
 - TUI workspace diff and route history display.
 - TUI prompt worker completion/error polling.
+- TUI prompt worker detachment after cancellation.
 
 Last measured coverage snapshot:
 

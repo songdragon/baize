@@ -2047,6 +2047,50 @@ async fn canceled_session_prompt_returns_400() {
     assert_eq!(body["error"], "session is canceled");
 }
 
+#[test]
+fn session_was_canceled_detects_stored_canceled_state() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let now = chrono::Utc::now();
+    let canceled = TaskSession {
+        id: TaskSessionId("task_canceled_before_result".to_string()),
+        workspace_id: WorkspaceId("ws_1".to_string()),
+        objective: "cancel before provider result".to_string(),
+        active_provider_id: Some(ProviderId("codex".to_string())),
+        provider_native_session_ids: Default::default(),
+        status: TaskSessionStatus::Canceled,
+        created_at: now,
+        updated_at: now,
+    };
+    store
+        .upsert_task_session(&canceled)
+        .expect("canceled session");
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+        }),
+    );
+
+    assert!(crate::handlers::sessions::session_was_canceled(
+        &state,
+        &canceled.id
+    ));
+    assert!(!crate::handlers::sessions::session_was_canceled(
+        &state,
+        &TaskSessionId("task_missing".to_string())
+    ));
+}
+
 #[tokio::test]
 async fn prompt_failure_returns_500() {
     let (app, _data_dir, project_dir) = failing_app();

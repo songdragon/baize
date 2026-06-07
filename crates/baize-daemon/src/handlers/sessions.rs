@@ -446,6 +446,30 @@ pub async fn prompt_session(
 
     match run {
         Ok(result) => {
+            if session_was_canceled(&state, &session.id) {
+                let mut ignored = baize_core::BaizeEvent::new(
+                    "session.agent.ignored",
+                    serde_json::json!({
+                        "reason": "session canceled before provider result completed",
+                        "provider_id": provider_id.0,
+                    }),
+                );
+                ignored.workspace_id = Some(session.workspace_id.clone());
+                ignored.session_id = Some(session.id.clone());
+                ignored.provider_id = Some(provider_id.clone());
+                state.record_event(ignored);
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "status": "canceled",
+                        "turn_status": "canceled",
+                        "session_status": "Canceled",
+                        "session_id": session.id.0,
+                        "provider_id": provider_id,
+                        "error": "session was canceled before provider result completed",
+                    })),
+                );
+            }
             for adapter_event in &result.events {
                 let event_type = match adapter_event.kind {
                     baize_adapters::AgentExecutionEventKind::Output
@@ -589,6 +613,13 @@ pub async fn prompt_session(
             )
         }
     }
+}
+
+pub(crate) fn session_was_canceled(state: &AppState, session_id: &TaskSessionId) -> bool {
+    with_store(state, |store| store.get_task_session(session_id))
+        .ok()
+        .flatten()
+        .is_some_and(|session| matches!(session.status, TaskSessionStatus::Canceled))
 }
 
 fn apply_prompt_provider_target(

@@ -270,6 +270,8 @@ fn run_app(
                         if let Err(error) = cancel_current_session(&mut state) {
                             state.activity_status = "failed".to_string();
                             state.push_message(format!("cancel error: {error:#}"));
+                        } else {
+                            detach_prompt_task_after_cancel(&mut state, &mut prompt_task);
                         }
                     }
                     KeyCode::Down => state.select_next_permission(),
@@ -330,6 +332,12 @@ fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<PromptTask>) 
             state.push_message("error: prompt worker disconnected".to_string());
             *prompt_task = None;
         }
+    }
+}
+
+fn detach_prompt_task_after_cancel(state: &mut TuiState, prompt_task: &mut Option<PromptTask>) {
+    if prompt_task.take().is_some() {
+        state.push_message("prompt worker detached after cancel");
     }
 }
 
@@ -2164,7 +2172,10 @@ fn parse_http_json_response(response: &str) -> Result<Value> {
     let status_line = head.lines().next().unwrap_or_default();
     let value: Value = serde_json::from_str(body.trim()).context("parse daemon JSON response")?;
     if !status_line.contains(" 200 ") {
-        if value.get("status").and_then(Value::as_str) == Some("failed") {
+        if matches!(
+            value.get("status").and_then(Value::as_str),
+            Some("failed" | "canceled")
+        ) {
             return Ok(value);
         }
         if let Some(error) = value.get("error").and_then(Value::as_str) {
@@ -2371,6 +2382,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_http_json_response_allows_structured_prompt_cancel() {
+        let response = "HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\n\r\n{\"status\":\"canceled\",\"turn_status\":\"canceled\",\"error\":\"session canceled\"}";
+        let value = parse_http_json_response(response).expect("structured cancel");
+
+        assert_eq!(value["status"], "canceled");
+        assert_eq!(value["turn_status"], "canceled");
+        assert_eq!(value["error"], "session canceled");
+    }
+
+    #[test]
     fn parse_http_json_response_includes_error_for_non_prompt_failure() {
         let response = "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\n\r\n{\"error\":\"session not found\"}";
         let error = parse_http_json_response(response).expect_err("error");
@@ -2450,6 +2471,20 @@ mod tests {
         assert!(task.is_none());
         assert_eq!(state.activity_status, "failed");
         assert!(state.transcript_text().contains("error: provider failed"));
+    }
+
+    #[test]
+    fn detach_prompt_task_after_cancel_drops_worker() {
+        let mut state = TuiState::default();
+        let (_sender, receiver) = mpsc::channel();
+        let mut task = Some(PromptTask { receiver });
+
+        detach_prompt_task_after_cancel(&mut state, &mut task);
+
+        assert!(task.is_none());
+        assert!(state
+            .transcript_text()
+            .contains("prompt worker detached after cancel"));
     }
 
     #[test]
