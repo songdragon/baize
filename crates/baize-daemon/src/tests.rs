@@ -2455,6 +2455,67 @@ async fn create_session_route_decision_reflects_health_fallback() {
 }
 
 #[tokio::test]
+async fn create_session_rejects_provider_without_runtime_support() {
+    let (app, _data_dir, _project_dir) = test_app();
+    let workspace = create_test_workspace(&app).await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+
+    let (status, response) = json_response_with_status(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "try opencode",
+                    "provider_id": "opencode"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response["error"],
+        "provider opencode does not support Baize prompt execution yet"
+    );
+}
+
+#[test]
+fn select_provider_fallback_skips_unsupported_runtime() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let mut config = BaizeConfig::default();
+    config.providers.order = vec!["opencode".to_string()];
+    let state = AppState::with_executor(
+        config,
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+        }),
+    );
+
+    let result = crate::helpers::select_provider(&state, None, None, None);
+
+    assert_ne!(result.provider_id.0, "opencode");
+    assert!(baize_adapters::is_prompt_runtime_supported(
+        &result.provider_id
+    ));
+}
+
+#[tokio::test]
 async fn second_session_in_workspace_reuses_provider_when_healthy() {
     let (app, _data_dir, _project_dir) = test_app();
 

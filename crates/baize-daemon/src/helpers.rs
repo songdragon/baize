@@ -176,30 +176,30 @@ pub fn select_provider(
         }
     }
 
-    let providers = default_provider_profiles();
-    let ordered_ids: Vec<&String> = state.config.providers.order.iter().collect();
-    for id in &ordered_ids {
-        let Some(provider) = providers.iter().find(|p| p.id.0 == **id && p.enabled) else {
-            continue;
-        };
+    let ordered = ordered_provider_profiles(&state.config);
+    for provider in &ordered {
         if is_provider_routable(state, &provider.id.0) {
             return RoutingResult {
-                provider_id: baize_core::ProviderId((*id).clone()),
+                provider_id: provider.id.clone(),
                 previous_provider_id: None,
-                reason: format!("Selected {} from configured provider priority.", id),
+                reason: format!(
+                    "Selected {} from configured provider priority.",
+                    provider.id.0
+                ),
                 confidence: 0.75,
             };
         }
     }
-    let fallback = ordered_ids
-        .first()
-        .map(|id| baize_core::ProviderId((*id).clone()))
+    let fallback = ordered
+        .iter()
+        .find(|provider| baize_adapters::is_prompt_runtime_supported(&provider.id))
+        .map(|provider| provider.id.clone())
         .unwrap_or_else(|| baize_core::ProviderId("codex".to_string()));
     RoutingResult {
         provider_id: fallback.clone(),
         previous_provider_id: None,
         reason: format!(
-            "Selected {} (higher-priority providers unhealthy).",
+            "Selected {} (higher-priority providers unavailable or unsupported).",
             fallback.0
         ),
         confidence: 0.6,

@@ -314,6 +314,15 @@ pub async fn create_session(
     let now = Utc::now();
     let workspace_id = baize_core::WorkspaceId(request.workspace_id);
     let task_type = infer_task_type(&request.objective);
+    if let Some(provider_id) = request.provider_id.as_deref() {
+        if !baize_adapters::is_prompt_runtime_supported(&baize_core::ProviderId(
+            provider_id.to_string(),
+        )) {
+            return crate::helpers::bad_request(&format!(
+                "provider {provider_id} does not support Baize prompt execution yet"
+            ));
+        }
+    }
     let routing = select_provider(
         &state,
         request.provider_id,
