@@ -500,6 +500,8 @@ pub async fn prompt_session(
                 code,
                 Json(serde_json::json!({
                     "status": if result.success { "running" } else { "failed" },
+                    "turn_status": if result.success { "completed" } else { "failed" },
+                    "session_status": session_status_label(&new_status),
                     "session_id": session.id.0,
                     "provider_id": provider_id,
                     "events": result.events,
@@ -547,6 +549,8 @@ pub async fn prompt_session(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "status": "failed",
+                    "turn_status": "failed",
+                    "session_status": "Failed",
                     "session_id": session.id.0,
                     "provider_id": provider_id,
                     "error": error,

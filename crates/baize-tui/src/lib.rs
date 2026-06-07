@@ -1053,7 +1053,7 @@ fn finish_prompt_submission(
     append_recent_events_with_sections(state, &events);
     refresh_route_history(state)?;
     refresh_session_diff(state)?;
-    state.activity_status = "idle".to_string();
+    state.activity_status = prompt_activity_after_response(&response).to_string();
     Ok(())
 }
 
@@ -1604,7 +1604,17 @@ fn append_session_diff(state: &mut TuiState, response: &Value) {
 }
 
 fn append_prompt_response(state: &mut TuiState, response: &Value) {
-    let status = response
+    let turn_status = response
+        .get("turn_status")
+        .and_then(Value::as_str)
+        .or_else(|| response.get("status").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let session_status = response
+        .get("session_status")
+        .and_then(Value::as_str)
+        .or_else(|| response.get("status").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let legacy_status = response
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
@@ -1612,7 +1622,13 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
         .get("provider_id")
         .and_then(provider_id)
         .unwrap_or("unknown");
-    state.push_message(format!("prompt result: {status} via {provider}"));
+    if response.get("turn_status").is_some() || response.get("session_status").is_some() {
+        state.push_message(format!(
+            "turn result: {turn_status} via {provider} (session {session_status})"
+        ));
+    } else {
+        state.push_message(format!("prompt result: {legacy_status} via {provider}"));
+    }
 
     if let Some(error) = response.get("error").and_then(Value::as_str) {
         state.push_message(format!("  error: {}", transcript_detail(error)));
@@ -1624,6 +1640,17 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
     }
     if let Some(hint) = provider_error_hint(response) {
         state.push_message(hint);
+    }
+}
+
+fn prompt_activity_after_response(response: &Value) -> &'static str {
+    match response
+        .get("turn_status")
+        .and_then(Value::as_str)
+        .or_else(|| response.get("status").and_then(Value::as_str))
+    {
+        Some("failed") => "failed",
+        _ => "idle",
     }
 }
 
@@ -2754,6 +2781,8 @@ mod tests {
         let mut state = TuiState::default();
         let response = json!({
             "status": "failed",
+            "turn_status": "failed",
+            "session_status": "Failed",
             "provider_id": "codex",
             "error": "429 Too Many Requests",
             "limit_inference": {
@@ -2767,10 +2796,54 @@ mod tests {
 
         assert!(state
             .transcript_text()
-            .contains("prompt result: failed via codex"));
+            .contains("turn result: failed via codex (session Failed)"));
         assert!(state
             .transcript_text()
             .contains("provider hint: rate limit detected"));
+    }
+
+    #[test]
+    fn append_prompt_response_shows_completed_turn_status() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "status": "running",
+            "turn_status": "completed",
+            "session_status": "Running",
+            "provider_id": "gemini"
+        });
+
+        append_prompt_response(&mut state, &response);
+
+        assert!(state
+            .transcript_text()
+            .contains("turn result: completed via gemini (session Running)"));
+    }
+
+    #[test]
+    fn append_prompt_response_keeps_legacy_status_display() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "status": "failed",
+            "provider_id": "codex"
+        });
+
+        append_prompt_response(&mut state, &response);
+
+        assert!(state
+            .transcript_text()
+            .contains("prompt result: failed via codex"));
+    }
+
+    #[test]
+    fn prompt_activity_after_response_reflects_turn_failure() {
+        assert_eq!(
+            prompt_activity_after_response(&json!({ "turn_status": "failed" })),
+            "failed"
+        );
+        assert_eq!(
+            prompt_activity_after_response(&json!({ "turn_status": "completed" })),
+            "idle"
+        );
     }
 
     #[test]

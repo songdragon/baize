@@ -157,6 +157,8 @@ async fn creates_workspace_session_prompt_and_events() {
     )
     .await;
     assert_eq!(prompt["status"], "running");
+    assert_eq!(prompt["turn_status"], "completed");
+    assert_eq!(prompt["session_status"], "Running");
 
     let events = json_response(
         app.clone(),
@@ -1620,6 +1622,8 @@ async fn prompt_failure_transitions_session_to_failed() {
     )
     .await;
     assert_eq!(prompt["status"], "failed");
+    assert_eq!(prompt["turn_status"], "failed");
+    assert_eq!(prompt["session_status"], "Failed");
 
     let session = json_response(
         app,
@@ -1670,6 +1674,8 @@ async fn failed_session_recovers_on_successful_prompt() {
     )
     .await;
     assert_eq!(second["status"], "running");
+    assert_eq!(second["turn_status"], "completed");
+    assert_eq!(second["session_status"], "Running");
 
     let session_after_recover = json_response(
         app,
