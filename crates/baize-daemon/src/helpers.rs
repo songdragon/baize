@@ -182,7 +182,7 @@ pub fn select_provider(
         let Some(provider) = providers.iter().find(|p| p.id.0 == **id && p.enabled) else {
             continue;
         };
-        if is_provider_healthy(state, &provider.id.0) {
+        if is_provider_routable(state, &provider.id.0) {
             return RoutingResult {
                 provider_id: baize_core::ProviderId((*id).clone()),
                 previous_provider_id: None,
@@ -226,7 +226,7 @@ fn try_sticky_provider(
     if elapsed > sticky_window_minutes {
         return None;
     }
-    if !is_provider_healthy(state, &active.0) {
+    if !is_provider_routable(state, &active.0) {
         return None;
     }
     Some(RoutingResult {
@@ -250,6 +250,11 @@ pub fn is_provider_healthy(_state: &AppState, provider_id: &str) -> bool {
         health.status,
         baize_core::HealthStatus::Healthy | baize_core::HealthStatus::Unknown
     )
+}
+
+pub fn is_provider_routable(state: &AppState, provider_id: &str) -> bool {
+    baize_adapters::is_prompt_runtime_supported(&baize_core::ProviderId(provider_id.to_string()))
+        && is_provider_healthy(state, provider_id)
 }
 
 pub fn ordered_provider_profiles(config: &BaizeConfig) -> Vec<baize_core::ProviderProfile> {

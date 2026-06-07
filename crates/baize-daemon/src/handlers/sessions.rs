@@ -387,6 +387,12 @@ pub async fn prompt_session(
         Ok(provider_id) => provider_id,
         Err(response) => return response,
     };
+    if !baize_adapters::is_prompt_runtime_supported(&provider_id) {
+        return crate::helpers::bad_request(&format!(
+            "provider {} does not support Baize prompt execution yet",
+            provider_id.0
+        ));
+    }
     let workspace = match with_store(&state, |store| store.get_workspace(&session.workspace_id)) {
         Ok(Some(workspace)) => workspace,
         _ => return not_found("workspace not found"),

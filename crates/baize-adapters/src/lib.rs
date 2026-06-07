@@ -320,6 +320,10 @@ pub fn diagnose_all_providers() -> Vec<ProviderDiagnostic> {
         .collect()
 }
 
+pub fn is_prompt_runtime_supported(provider_id: &ProviderId) -> bool {
+    prompt_runtime_supported(provider_id)
+}
+
 pub fn run_agent_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
     match request.provider_id.0.as_str() {
         "gemini" => run_gemini_prompt(request),
@@ -1121,6 +1125,22 @@ mod tests {
             .suggested_actions
             .iter()
             .any(|action| action.contains("baize smoke gemini --run-prompt")));
+    }
+
+    #[test]
+    fn prompt_runtime_support_is_explicit() {
+        assert!(is_prompt_runtime_supported(&ProviderId(
+            "codex".to_string()
+        )));
+        assert!(is_prompt_runtime_supported(&ProviderId(
+            "gemini".to_string()
+        )));
+        assert!(!is_prompt_runtime_supported(&ProviderId(
+            "opencode".to_string()
+        )));
+        assert!(!is_prompt_runtime_supported(&ProviderId(
+            "copilot".to_string()
+        )));
     }
 
     #[test]

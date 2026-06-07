@@ -1637,6 +1637,35 @@ async fn prompt_failure_transitions_session_to_failed() {
 }
 
 #[tokio::test]
+async fn prompt_rejects_provider_without_runtime_support() {
+    let (app, _data_dir, project_dir) = test_app();
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let (status, prompt) = json_response_with_status(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "prompt": "hello",
+                    "provider_id": "opencode"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        prompt["error"],
+        "provider opencode does not support Baize prompt execution yet"
+    );
+}
+
+#[tokio::test]
 async fn failed_session_recovers_on_successful_prompt() {
     let (app, _data_dir, project_dir) = recoverable_app();
     let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
@@ -2318,6 +2347,30 @@ fn is_provider_healthy_returns_false_for_unknown_provider() {
         &state,
         "nonexistent_provider"
     ));
+}
+
+#[test]
+fn unsupported_prompt_runtime_is_not_routable() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+        }),
+    );
+
+    assert!(!crate::helpers::is_provider_routable(&state, "opencode"));
+    assert!(!crate::helpers::is_provider_routable(&state, "copilot"));
 }
 
 async fn create_test_workspace(app: &Router) -> serde_json::Value {

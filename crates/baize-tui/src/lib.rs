@@ -877,10 +877,10 @@ fn health_status_for<'a>(health: &'a [ProviderHealthView], provider_id: &str) ->
 
 fn selected_provider_unavailable(state: &TuiState) -> Option<&ProviderHealthView> {
     let provider_id = state.selected_provider();
-    state
-        .provider_health
-        .iter()
-        .find(|entry| entry.provider_id == provider_id && provider_health_is_down(entry))
+    state.provider_health.iter().find(|entry| {
+        entry.provider_id == provider_id
+            && (provider_health_is_down(entry) || !state.provider_ready_for_prompt(provider_id))
+    })
 }
 
 fn provider_is_down(health: &[ProviderHealthView], provider_id: &str) -> bool {
@@ -891,6 +891,35 @@ fn provider_is_down(health: &[ProviderHealthView], provider_id: &str) -> bool {
 
 fn provider_health_is_down(health: &ProviderHealthView) -> bool {
     short_health_status(&health.status) == "down"
+}
+
+fn provider_unavailable_detail(
+    state: &TuiState,
+    provider_id: &str,
+    health: &ProviderHealthView,
+) -> String {
+    if let Some(diagnostic) = state
+        .provider_diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.provider_id == provider_id && diagnostic.readiness != "Ready")
+    {
+        let detail = diagnostic
+            .issues
+            .first()
+            .map(String::as_str)
+            .map(transcript_detail)
+            .filter(|detail| !detail.is_empty())
+            .unwrap_or_else(|| format!("readiness {}", diagnostic.readiness));
+        return format!(": {detail}");
+    }
+
+    health
+        .last_error
+        .as_deref()
+        .map(transcript_detail)
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| format!(": {detail}"))
+        .unwrap_or_default()
 }
 
 fn summarize_provider_diagnostics(diagnostics: &[ProviderDiagnosticView]) -> String {
@@ -1006,16 +1035,10 @@ fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmissi
 
     let provider_id = state.selected_provider().to_string();
     if let Some(health) = selected_provider_unavailable(state) {
-        let detail = health
-            .last_error
-            .as_deref()
-            .map(transcript_detail)
-            .filter(|detail| !detail.is_empty())
-            .map(|detail| format!(": {detail}"))
-            .unwrap_or_default();
+        let detail = provider_unavailable_detail(state, &provider_id, health);
         state.activity_status = "blocked".to_string();
         state.push_message(format!(
-            "provider {provider_id} is down{detail}; press Tab to switch or Ctrl-R to refresh"
+            "provider {provider_id} is not ready{detail}; press Tab to switch or Ctrl-R to refresh"
         ));
         return None;
     }
@@ -1811,22 +1834,32 @@ impl TuiState {
 
     fn select_first_available_provider_if_current_is_down(&mut self) -> Option<(String, String)> {
         let current = self.selected_provider().to_string();
-        if !provider_is_down(&self.provider_health, &current) {
+        if self.provider_ready_for_prompt(&current) {
             return None;
         }
 
-        let next_index = self.providers.iter().position(|provider| {
-            matches!(
-                health_status_for(&self.provider_health, provider).map(short_health_status),
-                Some("ok" | "warn")
-            )
-        })?;
+        let next_index = self
+            .providers
+            .iter()
+            .position(|provider| self.provider_ready_for_prompt(provider))?;
         if next_index == self.selected_provider_index {
             return None;
         }
 
         self.selected_provider_index = next_index;
         Some((current, self.selected_provider().to_string()))
+    }
+
+    fn provider_ready_for_prompt(&self, provider: &str) -> bool {
+        if let Some(diagnostic) = self
+            .provider_diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.provider_id == provider)
+        {
+            return diagnostic.readiness == "Ready";
+        }
+
+        !provider_is_down(&self.provider_health, provider)
     }
 
     fn selected_permission(&self) -> Option<&PermissionView> {
@@ -2356,8 +2389,43 @@ mod tests {
         assert_eq!(state.input, "summarize project");
         assert!(state
             .transcript_text()
-            .contains("provider codex is down: failed to spawn codex"));
+            .contains("provider codex is not ready: failed to spawn codex"));
         assert!(!state.transcript_text().contains("mesh: dispatching"));
+    }
+
+    #[test]
+    fn begin_prompt_submission_blocks_unsupported_runtime_provider() {
+        let mut state = TuiState {
+            input: "summarize project".to_string(),
+            selected_provider_index: 3,
+            provider_diagnostics: vec![ProviderDiagnosticView {
+                provider_id: "opencode".to_string(),
+                readiness: "UnsupportedRuntime".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "opencode".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                issues: vec![
+                    "Baize prompt runtime is not implemented for this provider yet".to_string(),
+                ],
+                suggested_actions: Vec::new(),
+            }],
+            provider_health: vec![ProviderHealthView {
+                provider_id: "opencode".to_string(),
+                status: "Healthy".to_string(),
+                last_error: None,
+            }],
+            ..TuiState::default()
+        };
+
+        let submission = begin_prompt_submission(&mut state);
+
+        assert!(submission.is_none());
+        assert_eq!(state.input, "summarize project");
+        assert!(state
+            .transcript_text()
+            .contains("provider opencode is not ready: Baize prompt runtime"));
     }
 
     #[test]
@@ -3357,6 +3425,50 @@ mod tests {
         assert_eq!(state.selected_provider(), "gemini");
         assert_eq!(state.provider_health[0].provider_id, "codex");
         assert_eq!(state.provider_diagnostics[1].readiness, "Ready");
+    }
+
+    #[test]
+    fn set_provider_diagnostics_skips_unsupported_runtime_provider() {
+        let mut state = TuiState::default();
+
+        let switched = state.set_provider_diagnostics(vec![
+            ProviderDiagnosticView {
+                provider_id: "codex".to_string(),
+                readiness: "SetupRequired".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: Some("missing".to_string()),
+                },
+                issues: Vec::new(),
+                suggested_actions: Vec::new(),
+            },
+            ProviderDiagnosticView {
+                provider_id: "opencode".to_string(),
+                readiness: "UnsupportedRuntime".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "opencode".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                issues: Vec::new(),
+                suggested_actions: Vec::new(),
+            },
+            ProviderDiagnosticView {
+                provider_id: "gemini".to_string(),
+                readiness: "Ready".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "gemini".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                issues: Vec::new(),
+                suggested_actions: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(switched, Some(("codex".to_string(), "gemini".to_string())));
+        assert_eq!(state.selected_provider(), "gemini");
     }
 
     #[test]
