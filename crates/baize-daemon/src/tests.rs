@@ -1832,6 +1832,18 @@ async fn workspace_projects_lists_projects_for_workspace() {
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["id"], primary_project_id);
 
+    let project = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/projects/{primary_project_id}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(project["project"]["id"], primary_project_id);
+    assert_eq!(project["project"]["workspace_id"], workspace_id);
+
     let directories = json_response(
         app.clone(),
         Request::builder()
@@ -1887,7 +1899,7 @@ async fn workspace_projects_lists_projects_for_workspace() {
     assert_eq!(invalid_vcs["error"], "invalid project vcs");
 
     let (status, missing) = json_response_with_status(
-        app,
+        app.clone(),
         Request::builder()
             .method(Method::GET)
             .uri("/workspaces/ws_missing/projects")
@@ -1897,6 +1909,18 @@ async fn workspace_projects_lists_projects_for_workspace() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(missing["error"], "workspace not found");
+
+    let (status, missing_project) = json_response_with_status(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/projects/prj_missing")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing_project["error"], "project not found");
 }
 
 #[tokio::test]

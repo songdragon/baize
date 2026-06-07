@@ -106,6 +106,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `GET /workspaces` with optional `name` and `primary_project_id` filters;
 - `POST /workspaces`;
 - `GET /workspaces/:id/projects` with optional `kind` and `vcs` filters;
+- `GET /projects/:id`;
 - `GET /workspaces/:id/status`;
 - `GET /workspaces/status?path=...`;
 - `GET /sessions`;
