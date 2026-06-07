@@ -15,7 +15,8 @@ use std::io::{stdout, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::thread::sleep;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread::{self, sleep};
 use std::time::Duration;
 
 const DAEMON_HOST: &str = "127.0.0.1";
@@ -92,6 +93,18 @@ pub struct SessionView {
 struct PendingPromptSubmission {
     prompt: String,
     provider_id: String,
+}
+
+struct PromptTask {
+    receiver: Receiver<Result<PromptTaskCompletion, String>>,
+}
+
+#[derive(Debug, Clone)]
+struct PromptTaskCompletion {
+    prompt_response: Value,
+    events_response: Value,
+    routes_response: Value,
+    diff_response: Value,
 }
 
 impl Default for TuiState {
@@ -197,7 +210,9 @@ fn run_app(
         Ok(permissions) => state.pending_permissions = permissions,
         Err(error) => state.push_message(format!("permission load failed: {error:#}")),
     }
+    let mut prompt_task: Option<PromptTask> = None;
     loop {
+        poll_prompt_task(&mut state, &mut prompt_task);
         terminal.draw(|frame| render(frame, &state))?;
 
         if event::poll(Duration::from_millis(250))? {
@@ -269,11 +284,20 @@ fn run_app(
                         state.input.pop();
                     }
                     KeyCode::Enter => {
+                        if prompt_task.is_some() {
+                            state.push_message(
+                                "prompt already running; wait for completion or cancel the session",
+                            );
+                            continue;
+                        }
                         if let Some(submission) = begin_prompt_submission(&mut state) {
                             terminal.draw(|frame| render(frame, &state))?;
-                            if let Err(error) = finish_prompt_submission(&mut state, submission) {
-                                state.activity_status = "failed".to_string();
-                                state.push_message(format!("error: {error:#}"));
+                            match start_prompt_task(&mut state, submission) {
+                                Ok(task) => prompt_task = Some(task),
+                                Err(error) => {
+                                    state.activity_status = "failed".to_string();
+                                    state.push_message(format!("error: {error:#}"));
+                                }
                             }
                         }
                     }
@@ -284,6 +308,77 @@ fn run_app(
     }
 
     Ok(())
+}
+
+fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<PromptTask>) {
+    let Some(task) = prompt_task.as_ref() else {
+        return;
+    };
+    match task.receiver.try_recv() {
+        Ok(Ok(completion)) => {
+            apply_prompt_completion(state, completion);
+            *prompt_task = None;
+        }
+        Ok(Err(error)) => {
+            state.activity_status = "failed".to_string();
+            state.push_message(format!("error: {error}"));
+            *prompt_task = None;
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => {
+            state.activity_status = "failed".to_string();
+            state.push_message("error: prompt worker disconnected".to_string());
+            *prompt_task = None;
+        }
+    }
+}
+
+fn start_prompt_task(
+    state: &mut TuiState,
+    submission: PendingPromptSubmission,
+) -> Result<PromptTask> {
+    let session_id = match state.session_id.clone() {
+        Some(session_id) => session_id,
+        None => {
+            let workspace_id = ensure_workspace(state)?;
+            ensure_session(state, &workspace_id, &submission.prompt)?
+        }
+    };
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result =
+            run_prompt_submission(&session_id, &submission).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(result);
+    });
+    Ok(PromptTask { receiver })
+}
+
+fn run_prompt_submission(
+    session_id: &str,
+    submission: &PendingPromptSubmission,
+) -> Result<PromptTaskCompletion> {
+    let prompt_response = post_json(
+        &format!("/sessions/{session_id}/prompt"),
+        prompt_request_body(&submission.provider_id, &submission.prompt),
+    )?;
+    let events_response = get_json(&format!("/sessions/{session_id}/events"))?;
+    let routes_response = get_json(&format!("/sessions/{session_id}/routes"))?;
+    let diff_response = get_json(&format!("/sessions/{session_id}/diff"))?;
+
+    Ok(PromptTaskCompletion {
+        prompt_response,
+        events_response,
+        routes_response,
+        diff_response,
+    })
+}
+
+fn apply_prompt_completion(state: &mut TuiState, completion: PromptTaskCompletion) {
+    append_prompt_response(state, &completion.prompt_response);
+    append_recent_events_with_sections(state, &completion.events_response);
+    append_route_history(state, &completion.routes_response);
+    append_session_diff(state, &completion.diff_response);
+    state.activity_status = prompt_activity_after_response(&completion.prompt_response).to_string();
 }
 
 pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
@@ -1052,32 +1147,6 @@ fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmissi
         prompt,
         provider_id,
     })
-}
-
-fn finish_prompt_submission(
-    state: &mut TuiState,
-    submission: PendingPromptSubmission,
-) -> Result<()> {
-    let session_id = match state.session_id.clone() {
-        Some(session_id) => session_id,
-        None => {
-            let workspace_id = ensure_workspace(state)?;
-            ensure_session(state, &workspace_id, &submission.prompt)?
-        }
-    };
-
-    let response = post_json(
-        &format!("/sessions/{session_id}/prompt"),
-        prompt_request_body(&submission.provider_id, &submission.prompt),
-    )?;
-    append_prompt_response(state, &response);
-
-    let events = get_json(&format!("/sessions/{session_id}/events"))?;
-    append_recent_events_with_sections(state, &events);
-    refresh_route_history(state)?;
-    refresh_session_diff(state)?;
-    state.activity_status = prompt_activity_after_response(&response).to_string();
-    Ok(())
 }
 
 fn load_latest_session(state: &mut TuiState) -> Result<()> {
@@ -2308,6 +2377,79 @@ mod tests {
 
         assert!(error.to_string().contains("HTTP/1.1 404 Not Found"));
         assert!(error.to_string().contains("session not found"));
+    }
+
+    #[test]
+    fn poll_prompt_task_applies_successful_completion() {
+        let mut state = TuiState {
+            activity_status: "running codex".to_string(),
+            ..TuiState::default()
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(PromptTaskCompletion {
+                prompt_response: json!({
+                    "status": "running",
+                    "turn_status": "completed",
+                    "session_status": "Running",
+                    "provider_id": "codex"
+                }),
+                events_response: json!({
+                    "events": [
+                        {
+                            "event_type": "session.agent.output",
+                            "payload": { "text": "done" }
+                        }
+                    ]
+                }),
+                routes_response: json!({
+                    "routes": [
+                        {
+                            "selected_provider_id": "codex",
+                            "previous_provider_id": null,
+                            "reason": "Selected codex"
+                        }
+                    ]
+                }),
+                diff_response: json!({
+                    "diff": {
+                        "dirty": false,
+                        "changed_files": []
+                    }
+                }),
+            }))
+            .expect("send completion");
+        let mut task = Some(PromptTask { receiver });
+
+        poll_prompt_task(&mut state, &mut task);
+
+        assert!(task.is_none());
+        assert_eq!(state.activity_status, "idle");
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("turn result: completed via codex"));
+        assert!(transcript.contains("assistant:"));
+        assert!(transcript.contains("  done"));
+        assert!(transcript.contains("routes:"));
+        assert!(transcript.contains("workspace clean"));
+    }
+
+    #[test]
+    fn poll_prompt_task_reports_worker_error() {
+        let mut state = TuiState {
+            activity_status: "running gemini".to_string(),
+            ..TuiState::default()
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Err("provider failed".to_string()))
+            .expect("send error");
+        let mut task = Some(PromptTask { receiver });
+
+        poll_prompt_task(&mut state, &mut task);
+
+        assert!(task.is_none());
+        assert_eq!(state.activity_status, "failed");
+        assert!(state.transcript_text().contains("error: provider failed"));
     }
 
     #[test]

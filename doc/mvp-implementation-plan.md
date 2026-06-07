@@ -189,6 +189,7 @@ The MVP target is a single-workspace local agent supervisor:
 - provider health display;
 - `Ctrl-R` provider health refresh;
 - prompt input and `Enter` submit;
+- non-blocking prompt worker so the TUI remains responsive while agent prompts run;
 - selected provider switching with `Tab`;
 - latest session loading with `Ctrl-L`;
 - new session reset with `Ctrl-N`;
@@ -210,7 +211,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 190.
+Current full test count: 200.
 
 Implemented test coverage includes:
 
@@ -285,6 +286,7 @@ Implemented test coverage includes:
 - TUI permission risk parsing and status display;
 - TUI command/tool event and test result sections;
 - TUI workspace diff and route history display.
+- TUI prompt worker completion/error polling.
 
 Last measured coverage snapshot:
 
