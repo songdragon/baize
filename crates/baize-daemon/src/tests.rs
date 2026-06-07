@@ -656,6 +656,77 @@ async fn prompt_response_reports_native_provider_session_id() {
 }
 
 #[tokio::test]
+async fn prompt_reuses_saved_native_provider_session_id() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let app = router(AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(RecordingAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: Some("codex_native_session_1".to_string()),
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+            requests: requests.clone(),
+        }),
+    ));
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let first = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "first" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(first["native_session_id"], "codex_native_session_1");
+
+    let second = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "second" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(second["status"], "running");
+
+    let session = json_response(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(
+        session["session"]["provider_native_session_ids"]["codex"],
+        "codex_native_session_1"
+    );
+
+    let captured = requests.lock().expect("requests");
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].session_id.is_none());
+    assert_eq!(
+        captured[1].session_id.as_deref(),
+        Some("codex_native_session_1")
+    );
+}
+
+#[tokio::test]
 async fn session_diff_reports_git_hunks() {
     let (app, _data_dir, project_dir) = test_app();
     run_git(project_dir.path(), &["init", "-b", "main"]);
@@ -1775,6 +1846,7 @@ fn app_state_recovers_in_flight_sessions_on_startup() {
         workspace_id: WorkspaceId("ws_1".to_string()),
         objective: "recover this".to_string(),
         active_provider_id: Some(ProviderId("codex".to_string())),
+        provider_native_session_ids: Default::default(),
         status: TaskSessionStatus::Running,
         created_at: now,
         updated_at: now,
@@ -1784,6 +1856,7 @@ fn app_state_recovers_in_flight_sessions_on_startup() {
         workspace_id: WorkspaceId("ws_1".to_string()),
         objective: "leave canceled".to_string(),
         active_provider_id: Some(ProviderId("gemini".to_string())),
+        provider_native_session_ids: Default::default(),
         status: TaskSessionStatus::Canceled,
         created_at: now,
         updated_at: now,

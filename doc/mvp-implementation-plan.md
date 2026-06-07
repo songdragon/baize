@@ -68,6 +68,7 @@ The MVP target is a single-workspace local agent supervisor:
 - Codex/Gemini smoke validation command for auth, timeout and parser checks;
 - stream-json/JSONL parser behavior;
 - native provider session ID extraction from structured output;
+- native provider session ID persistence and reuse for same-provider follow-up prompts;
 - structured provider error classification and daemon reporting;
 - prompt execution timeout to prevent hanging on provider authentication or interactive prompts.
 
@@ -209,7 +210,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 165.
+Current full test count: 190.
 
 Implemented test coverage includes:
 
@@ -251,6 +252,7 @@ Implemented test coverage includes:
 - daemon event history filtering;
 - daemon session diff hunk reporting;
 - daemon prompt native provider session ID reporting;
+- daemon native provider session ID persistence and resume request propagation;
 - daemon prompt failure error chain;
 - daemon prompt failure structured provider error reporting;
 - daemon provider ordering and provider health ordering;

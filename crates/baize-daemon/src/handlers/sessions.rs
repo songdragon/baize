@@ -334,6 +334,7 @@ pub async fn create_session(
         workspace_id: workspace_id.clone(),
         objective: request.objective,
         active_provider_id: Some(routing.provider_id.clone()),
+        provider_native_session_ids: Default::default(),
         status: TaskSessionStatus::Running,
         created_at: now,
         updated_at: now,
@@ -426,13 +427,17 @@ pub async fn prompt_session(
     started.provider_id = Some(provider_id.clone());
     state.record_event(started);
 
+    let native_resume_session_id = session
+        .provider_native_session_ids
+        .get(&provider_id.0)
+        .cloned();
     let run = state
         .executor
         .run_prompt(baize_adapters::AgentPromptRequest {
             provider_id: provider_id.clone(),
             prompt: request.prompt,
             cwd: project.root,
-            session_id: None,
+            session_id: native_resume_session_id,
             timeout_seconds: request.timeout_seconds.or(Some(120)),
             execution_policy: baize_adapters::AgentExecutionPolicy::from_command_policy(
                 &state.config.workspace.command_policy,
@@ -495,6 +500,13 @@ pub async fn prompt_session(
             state.record_event(final_event);
 
             session.status = new_status.clone();
+            if result.success {
+                if let Some(native_session_id) = native_session_id.as_deref() {
+                    session
+                        .provider_native_session_ids
+                        .insert(provider_id.0.clone(), native_session_id.to_string());
+                }
+            }
             session.updated_at = Utc::now();
             if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
                 return internal_error(error.to_string());

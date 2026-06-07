@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -240,6 +241,8 @@ pub struct TaskSession {
     pub workspace_id: WorkspaceId,
     pub objective: String,
     pub active_provider_id: Option<ProviderId>,
+    #[serde(default)]
+    pub provider_native_session_ids: BTreeMap<String, String>,
     pub status: TaskSessionStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -502,6 +505,49 @@ mod tests {
         assert!(event.workspace_id.is_none());
         assert!(event.session_id.is_none());
         assert!(event.provider_id.is_none());
+    }
+
+    #[test]
+    fn task_session_deserializes_without_native_provider_session_ids() {
+        let raw = json!({
+            "id": "task_legacy",
+            "workspace_id": "ws_legacy",
+            "objective": "legacy",
+            "active_provider_id": "codex",
+            "status": "Running",
+            "created_at": "2026-06-07T00:00:00Z",
+            "updated_at": "2026-06-07T00:00:00Z"
+        });
+
+        let session: TaskSession = serde_json::from_value(raw).expect("legacy session");
+
+        assert!(session.provider_native_session_ids.is_empty());
+        assert_eq!(session.active_provider_id.expect("provider").0, "codex");
+    }
+
+    #[test]
+    fn task_session_native_provider_session_ids_round_trip() {
+        let mut native_ids = std::collections::BTreeMap::new();
+        native_ids.insert("codex".to_string(), "codex_native_1".to_string());
+        let now = Utc::now();
+        let session = TaskSession {
+            id: TaskSessionId("task_roundtrip".to_string()),
+            workspace_id: WorkspaceId("ws_roundtrip".to_string()),
+            objective: "round trip".to_string(),
+            active_provider_id: Some(ProviderId("codex".to_string())),
+            provider_native_session_ids: native_ids,
+            status: TaskSessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let value = serde_json::to_value(&session).expect("serialize session");
+        let restored: TaskSession = serde_json::from_value(value).expect("deserialize session");
+
+        assert_eq!(
+            restored.provider_native_session_ids.get("codex"),
+            Some(&"codex_native_1".to_string())
+        );
     }
 
     #[test]
