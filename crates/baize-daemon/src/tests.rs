@@ -1789,6 +1789,36 @@ async fn workspace_projects_lists_projects_for_workspace() {
         .as_str()
         .expect("project id");
 
+    let named = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/workspaces?name=project-list")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let named_workspaces = named["workspaces"].as_array().expect("workspaces array");
+    assert_eq!(named_workspaces.len(), 1);
+    assert_eq!(named_workspaces[0]["id"], workspace_id);
+
+    let by_primary_project = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/workspaces?primary_project_id={primary_project_id}"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let project_workspaces = by_primary_project["workspaces"]
+        .as_array()
+        .expect("workspaces array");
+    assert_eq!(project_workspaces.len(), 1);
+    assert_eq!(project_workspaces[0]["id"], workspace_id);
+
     let list = json_response(
         app.clone(),
         Request::builder()

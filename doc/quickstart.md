@@ -94,6 +94,13 @@ curl -s -X POST http://127.0.0.1:7878/workspaces \
   -d '{"path":"."}'
 ```
 
+List workspaces:
+
+```sh
+curl -s http://127.0.0.1:7878/workspaces
+curl -s 'http://127.0.0.1:7878/workspaces?name=WORKSPACE_NAME'
+```
+
 List projects in a workspace after replacing `WORKSPACE_ID`:
 
 ```sh

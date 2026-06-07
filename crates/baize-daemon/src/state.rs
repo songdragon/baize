@@ -37,6 +37,12 @@ pub struct WorkspaceStatusQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct WorkspacesQuery {
+    pub name: Option<String>,
+    pub primary_project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct WorkspaceProjectsQuery {
     pub kind: Option<String>,
     pub vcs: Option<String>,

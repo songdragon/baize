@@ -4,14 +4,31 @@ use axum::Json;
 use baize_core::{Project, ProjectId, ProjectKind, TrustLevel, VcsKind, Workspace, WorkspaceId};
 use chrono::Utc;
 
-use crate::helpers::{bad_request, internal_error, json_result, not_found, ok_json, with_store};
+use crate::helpers::{bad_request, internal_error, not_found, ok_json, with_store};
 use crate::state::{
-    AppState, CreateWorkspaceRequest, WorkspaceProjectsQuery, WorkspaceStatusQuery,
+    AppState, CreateWorkspaceRequest, WorkspaceProjectsQuery, WorkspaceStatusQuery, WorkspacesQuery,
 };
 
-pub async fn workspaces(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let workspaces = with_store(&state, |store| store.list_workspaces());
-    json_result("workspaces", workspaces)
+pub async fn workspaces(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<WorkspacesQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let workspaces = match with_store(&state, |store| {
+        if let Some(name) = &query.name {
+            store.list_workspaces_by_name(name)
+        } else if let Some(project_id) = &query.primary_project_id {
+            store
+                .get_workspace_by_primary_project(&ProjectId(project_id.clone()))
+                .map(|workspace| workspace.into_iter().collect())
+        } else {
+            store.list_workspaces()
+        }
+    }) {
+        Ok(workspaces) => workspaces,
+        Err(error) => return internal_error(error.to_string()),
+    };
+
+    ok_json(serde_json::json!({ "workspaces": workspaces }))
 }
 
 pub async fn create_workspace(
