@@ -8,6 +8,7 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::providers::health))
+        .route("/runtime/status", get(handlers::runtime::runtime_status))
         .route(
             "/workspaces",
             get(handlers::workspaces::workspaces).post(handlers::workspaces::create_workspace),

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use baize_adapters::{ProviderDiagnostic, ProviderReadiness};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
@@ -102,10 +103,47 @@ fn status_output(path: String) -> Result<String> {
 
 fn doctor_output() -> Result<String> {
     let diagnostics = baize_adapters::diagnose_all_providers();
+    let config = baize_config::load_or_default()?;
     Ok(format!(
         "{}\n",
-        serde_json::to_string_pretty(&json!({ "providers": diagnostics }))?
+        serde_json::to_string_pretty(&doctor_report(&diagnostics, &config))?
     ))
+}
+
+fn doctor_report(
+    diagnostics: &[ProviderDiagnostic],
+    config: &baize_config::BaizeConfig,
+) -> serde_json::Value {
+    let ready_prompt_providers = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.prompt_runtime_supported && diagnostic.readiness == ProviderReadiness::Ready
+        })
+        .map(|diagnostic| diagnostic.provider_id.0.clone())
+        .collect::<Vec<_>>();
+    let blocked_prompt_providers = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.prompt_runtime_supported && diagnostic.readiness != ProviderReadiness::Ready
+        })
+        .map(|diagnostic| diagnostic.provider_id.0.clone())
+        .collect::<Vec<_>>();
+
+    json!({
+        "coding_ready": !ready_prompt_providers.is_empty(),
+        "ready_prompt_providers": ready_prompt_providers,
+        "blocked_prompt_providers": blocked_prompt_providers,
+        "runtime": {
+            "command_policy": config.workspace.command_policy,
+            "checkpoint_policy": config.workspace.checkpoint_policy,
+            "routing": {
+                "sticky_window_minutes": config.routing.sticky_window_minutes,
+                "quota_switch_threshold_percent": config.routing.quota_switch_threshold_percent,
+                "failure_threshold_count": config.routing.failure_threshold_count,
+            }
+        },
+        "providers": diagnostics,
+    })
 }
 
 fn providers_output() -> Result<String> {
@@ -179,6 +217,8 @@ fn handle_config(command: ConfigCommand) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use baize_adapters::DetectedCapabilities;
+    use baize_core::{HealthStatus, ProviderHealth, ProviderId};
     use clap::CommandFactory;
 
     #[test]
@@ -223,10 +263,72 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&output).expect("json");
         let provider = &value["providers"][0];
 
+        assert!(value.get("coding_ready").is_some());
+        assert!(value.get("ready_prompt_providers").is_some());
+        assert_eq!(value["runtime"]["command_policy"], "ask");
         assert_eq!(provider["provider_id"], "codex");
         assert!(provider.get("readiness").is_some());
         assert!(provider.get("issues").is_some());
         assert!(provider.get("suggested_actions").is_some());
+    }
+
+    #[test]
+    fn doctor_report_marks_coding_ready_when_prompt_provider_is_ready() {
+        let config = baize_config::BaizeConfig::default();
+        let diagnostics = vec![
+            diagnostic("codex", ProviderReadiness::Ready, true),
+            diagnostic("opencode", ProviderReadiness::UnsupportedRuntime, false),
+        ];
+
+        let value = doctor_report(&diagnostics, &config);
+
+        assert_eq!(value["coding_ready"], true);
+        assert_eq!(value["ready_prompt_providers"][0], "codex");
+        assert_eq!(
+            value["blocked_prompt_providers"].as_array().unwrap().len(),
+            0
+        );
+        assert_eq!(value["runtime"]["routing"]["sticky_window_minutes"], 30);
+    }
+
+    #[test]
+    fn doctor_report_marks_not_ready_without_ready_prompt_provider() {
+        let config = baize_config::BaizeConfig::default();
+        let diagnostics = vec![
+            diagnostic("codex", ProviderReadiness::SetupRequired, true),
+            diagnostic("opencode", ProviderReadiness::UnsupportedRuntime, false),
+        ];
+
+        let value = doctor_report(&diagnostics, &config);
+
+        assert_eq!(value["coding_ready"], false);
+        assert_eq!(value["blocked_prompt_providers"][0], "codex");
+        assert_eq!(value["ready_prompt_providers"].as_array().unwrap().len(), 0);
+    }
+
+    fn diagnostic(
+        provider_id: &str,
+        readiness: ProviderReadiness,
+        prompt_runtime_supported: bool,
+    ) -> ProviderDiagnostic {
+        ProviderDiagnostic {
+            provider_id: ProviderId(provider_id.to_string()),
+            display_name: provider_id.to_string(),
+            readiness,
+            health: ProviderHealth {
+                provider_id: ProviderId(provider_id.to_string()),
+                status: HealthStatus::Healthy,
+                latency_ms: Some(1),
+                last_error: None,
+                checked_at: chrono::Utc::now(),
+            },
+            version: Some("1.0.0".to_string()),
+            prompt_runtime_supported,
+            detected: DetectedCapabilities::default(),
+            acp_proof: None,
+            issues: Vec::new(),
+            suggested_actions: Vec::new(),
+        }
     }
 
     #[test]

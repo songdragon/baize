@@ -85,6 +85,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `baize config validate`;
 - `baize status`;
 - `baize doctor`;
+- `baize doctor` readiness summary with `coding_ready`, ready prompt providers and runtime policy;
 - `baize providers`;
 - `baize validate [provider]`;
 - `baize smoke <provider>` with gated real-prompt execution;
@@ -101,6 +102,7 @@ The MVP target is a single-workspace local agent supervisor:
 ### 7. Daemon API
 
 - `GET /health`;
+- `GET /runtime/status`;
 - `GET /providers`;
 - `GET /providers/:id/health`;
 - `GET /providers/:id/validate`;
@@ -212,10 +214,13 @@ The MVP target is a single-workspace local agent supervisor:
 - recent route history display;
 - recent session list display;
 - compact keyboard help line.
+- runtime policy display;
+- full assistant output preservation with code indentation;
+- default latest-output transcript viewport with PageUp/PageDown/Home/End and mouse-wheel scroll.
 
 ## Test Coverage
 
-Current full test count: 204.
+Current full test count: 219.
 
 Implemented test coverage includes:
 
@@ -295,6 +300,8 @@ Implemented test coverage includes:
 - TUI workspace diff and route history display.
 - TUI prompt worker completion/error polling.
 - TUI prompt worker detachment after cancellation.
+- TUI runtime policy rendering and fallback behavior.
+- TUI Codex assistant-message parsing, full assistant output preservation and transcript scrolling.
 
 Last measured coverage snapshot:
 

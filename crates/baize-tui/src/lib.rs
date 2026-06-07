@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -24,7 +26,6 @@ const DAEMON_PORT: u16 = 7878;
 const PROMPT_TIMEOUT_SECONDS: u64 = 120;
 const TRANSCRIPT_DETAIL_MAX_CHARS: usize = 180;
 const TRANSCRIPT_RECENT_EVENT_LIMIT: usize = 12;
-const TRANSCRIPT_ASSISTANT_LINE_LIMIT: usize = 5;
 const TRANSCRIPT_TOOL_LINE_LIMIT: usize = 4;
 const TRANSCRIPT_STATUS_LINE_LIMIT: usize = 4;
 const DAEMON_START_ATTEMPTS: usize = 20;
@@ -43,6 +44,7 @@ pub struct TuiState {
     pub recent_sessions: Vec<SessionView>,
     pub selected_session_index: usize,
     pub pending_permissions: Vec<PermissionView>,
+    pub runtime_policy: Option<RuntimePolicyView>,
     pub selected_permission_index: usize,
     pub selected_provider_index: usize,
     pub active_provider: Option<String>,
@@ -90,6 +92,16 @@ pub struct SessionView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePolicyView {
+    pub command_policy: String,
+    pub execution_mode: String,
+    pub checkpoint_policy: String,
+    pub sticky_window_minutes: u16,
+    pub quota_switch_threshold_percent: u8,
+    pub failure_threshold_count: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingPromptSubmission {
     prompt: String,
     provider_id: String,
@@ -131,6 +143,7 @@ impl Default for TuiState {
             recent_sessions: Vec::new(),
             selected_session_index: 0,
             pending_permissions: Vec::new(),
+            runtime_policy: None,
             selected_permission_index: 0,
             selected_provider_index: 0,
             active_provider: None,
@@ -157,11 +170,13 @@ pub fn run() -> Result<()> {
         })
     });
     let permission_load = load_pending_permissions();
+    let runtime_policy_load = load_runtime_policy();
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
+    terminal.backend_mut().execute(EnableMouseCapture)?;
 
     let result = run_app(
         &mut terminal,
@@ -169,9 +184,11 @@ pub fn run() -> Result<()> {
         provider_load,
         diagnostics_load,
         permission_load,
+        runtime_policy_load,
     );
 
     disable_raw_mode()?;
+    terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
@@ -184,6 +201,7 @@ fn run_app(
     provider_load: Result<Vec<String>>,
     diagnostics_load: Result<Vec<ProviderDiagnosticView>>,
     permission_load: Result<Vec<PermissionView>>,
+    runtime_policy_load: Result<RuntimePolicyView>,
 ) -> Result<()> {
     let mut state = TuiState {
         daemon_status,
@@ -210,14 +228,24 @@ fn run_app(
         Ok(permissions) => state.pending_permissions = permissions,
         Err(error) => state.push_message(format!("permission load failed: {error:#}")),
     }
+    match runtime_policy_load {
+        Ok(policy) => state.runtime_policy = Some(policy),
+        Err(error) => {
+            state.runtime_policy = Some(default_runtime_policy());
+            state.push_message(format!(
+                "runtime policy unavailable; using safe default ask mode ({})",
+                runtime_policy_error_hint(&error)
+            ));
+        }
+    }
     let mut prompt_task: Option<PromptTask> = None;
     loop {
         poll_prompt_task(&mut state, &mut prompt_task);
         terminal.draw(|frame| render(frame, &state))?;
 
         if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
+            match event::read()? {
+                Event::Key(key) => match key.code {
                     KeyCode::Esc => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -304,7 +332,13 @@ fn run_app(
                         }
                     }
                     _ => {}
-                }
+                },
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => state.scroll_up(3),
+                    MouseEventKind::ScrollDown => state.scroll_down(3),
+                    _ => {}
+                },
+                _ => {}
             }
         }
     }
@@ -437,6 +471,8 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         Span::styled("[mesh:local]", muted_style()),
         Span::raw(" "),
         Span::styled("[router:sticky]", muted_style()),
+        Span::raw(" "),
+        Span::styled(format!("[exec:{}]", state.execution_mode()), muted_style()),
     ]);
     let subtitle = Line::from(vec![
         Span::styled("workspace ", muted_style()),
@@ -447,6 +483,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         Span::raw("   "),
         Span::styled("target ", muted_style()),
         Span::styled(state.selected_provider().to_string(), accent_style()),
+        Span::raw("   "),
+        Span::styled("policy ", muted_style()),
+        Span::raw(state.command_policy_label()),
     ]);
     let rule = Line::from(Span::styled("─".repeat(area.width as usize), muted_style()));
 
@@ -466,12 +505,13 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     } else {
         state.scroll_offset
     };
+    let viewport_top = max_scroll.saturating_sub(effective_scroll);
     let title = if is_scrolled {
-        let current_top = line_count.saturating_sub(effective_scroll + visible_height) + 1;
+        let current_top = viewport_top + 1;
         format!(
             "Agent Stream ({}-{}/{})",
             current_top,
-            current_top + visible_height.saturating_sub(1),
+            (current_top + visible_height.saturating_sub(1)).min(line_count),
             line_count
         )
     } else {
@@ -479,7 +519,7 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     };
     frame.render_widget(
         Paragraph::new(transcript_text(state))
-            .scroll((effective_scroll, 0))
+            .scroll((viewport_top, 0))
             .wrap(Wrap { trim: false })
             .block(side_panel_block(title)),
         area,
@@ -577,6 +617,15 @@ fn ready_panel_lines(state: &TuiState) -> Vec<Line<'static>> {
             Span::raw("supervised"),
         ]),
         Line::from(vec![
+            Span::styled("│ ", muted_style()),
+            Span::styled("▸ ", accent_style()),
+            Span::styled("policy ", Style::default().fg(Color::White)),
+            Span::styled(":: ", muted_style()),
+            Span::styled(state.command_policy_label(), muted_style()),
+            Span::styled(" · ", muted_style()),
+            Span::styled(state.execution_mode(), muted_style()),
+        ]),
+        Line::from(vec![
             Span::styled("╰─", muted_style()),
             Span::styled(" await instructions ", muted_style()),
             Span::styled("────────────────────────────╯", muted_style()),
@@ -620,9 +669,10 @@ fn transcript_line(line: &str) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ))
     } else if line.starts_with("  ") {
+        let content = line.strip_prefix("  ").unwrap_or(line);
         Line::from(vec![
             Span::styled("  │ ", muted_style()),
-            Span::raw(line.trim().to_string()),
+            Span::raw(content.to_string()),
         ])
     } else {
         Line::from(Span::raw(line.to_string()))
@@ -637,6 +687,9 @@ fn control_plane_text(state: &TuiState) -> Text<'static> {
     lines.push(section_line("router"));
     lines.push(key_value_line("current", &state.session_status()));
     lines.push(key_value_line("route", &state.route_status()));
+    lines.push(key_value_line("policy", &state.command_policy_label()));
+    lines.push(key_value_line("exec", &state.execution_mode()));
+    lines.push(key_value_line("sticky", &state.routing_status()));
     lines.push(Line::raw(""));
     lines.push(section_line("queue"));
     lines.push(key_value_line("perm", &state.permission_status()));
@@ -802,6 +855,31 @@ fn load_pending_permissions() -> Result<Vec<PermissionView>> {
     parse_permissions(&response)
 }
 
+fn load_runtime_policy() -> Result<RuntimePolicyView> {
+    let response = get_json("/runtime/status")?;
+    parse_runtime_policy(&response)
+}
+
+fn default_runtime_policy() -> RuntimePolicyView {
+    RuntimePolicyView {
+        command_policy: "ask".to_string(),
+        execution_mode: "ask_before_commands".to_string(),
+        checkpoint_policy: "before_handoff".to_string(),
+        sticky_window_minutes: 30,
+        quota_switch_threshold_percent: 10,
+        failure_threshold_count: 3,
+    }
+}
+
+fn runtime_policy_error_hint(error: &anyhow::Error) -> String {
+    let detail = error.to_string();
+    if detail.contains("404") || detail.contains("empty body") {
+        "restart baize daemon to enable runtime status".to_string()
+    } else {
+        transcript_detail(&detail)
+    }
+}
+
 fn prompt_request_body(provider_id: &str, prompt: &str) -> Value {
     json!({
         "prompt": prompt,
@@ -911,6 +989,44 @@ fn parse_provider_health(response: &Value) -> Result<Vec<ProviderHealthView>> {
         .iter()
         .filter_map(parse_provider_health_entry)
         .collect())
+}
+
+fn parse_runtime_policy(response: &Value) -> Result<RuntimePolicyView> {
+    let runtime = response
+        .get("runtime")
+        .ok_or_else(|| response_error("runtime", response))?;
+    let routing = runtime.get("routing").unwrap_or(&Value::Null);
+    Ok(RuntimePolicyView {
+        command_policy: runtime
+            .get("command_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        execution_mode: runtime
+            .get("execution_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        checkpoint_policy: runtime
+            .get("checkpoint_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        sticky_window_minutes: value_as_u16(routing.get("sticky_window_minutes")).unwrap_or(0),
+        quota_switch_threshold_percent: value_as_u8(routing.get("quota_switch_threshold_percent"))
+            .unwrap_or(0),
+        failure_threshold_count: value_as_u8(routing.get("failure_threshold_count")).unwrap_or(0),
+    })
+}
+
+fn value_as_u16(value: Option<&Value>) -> Option<u16> {
+    value?
+        .as_u64()
+        .and_then(|number| u16::try_from(number).ok())
+}
+
+fn value_as_u8(value: Option<&Value>) -> Option<u8> {
+    value?.as_u64().and_then(|number| u8::try_from(number).ok())
 }
 
 fn parse_provider_diagnostics(response: &Value) -> Result<Vec<ProviderDiagnosticView>> {
@@ -1149,6 +1265,11 @@ fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmissi
     state.activity_status = format!("running {provider_id}");
     state.push_message(format!("> {prompt}"));
     state.push_message(format!("mesh: dispatching to {provider_id}"));
+    state.push_message(format!(
+        "policy: {} ({})",
+        state.command_policy_label(),
+        state.execution_mode()
+    ));
     state.input.clear();
 
     Some(PendingPromptSubmission {
@@ -1733,7 +1854,11 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
     if let Some(error) = response.get("error").and_then(Value::as_str) {
         state.push_message(format!("  error: {}", transcript_detail(error)));
     }
-    if let Some(stderr) = response.get("stderr").and_then(Value::as_str) {
+    if let Some(stderr) = response
+        .get("stderr")
+        .and_then(Value::as_str)
+        .filter(|stderr| should_show_prompt_stderr(response, stderr))
+    {
         if !stderr.trim().is_empty() {
             state.push_message(format!("  stderr: {}", transcript_detail(stderr)));
         }
@@ -1752,6 +1877,17 @@ fn prompt_activity_after_response(response: &Value) -> &'static str {
         Some("failed") => "failed",
         _ => "idle",
     }
+}
+
+fn should_show_prompt_stderr(response: &Value, stderr: &str) -> bool {
+    !stderr.trim().is_empty()
+        && matches!(
+            response
+                .get("turn_status")
+                .and_then(Value::as_str)
+                .or_else(|| response.get("status").and_then(Value::as_str)),
+            Some("failed" | "canceled")
+        )
 }
 
 fn append_recent_events(state: &mut TuiState, response: &Value) {
@@ -1776,24 +1912,32 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
             .and_then(Value::as_str)
             .unwrap_or("event");
         let payload = event.get("payload").unwrap_or(&Value::Null);
-        let detail = event_detail(payload);
 
-        match (event_type, detail) {
-            ("session.agent.tool_call", Some(detail)) if !detail.is_empty() => {
-                tool_lines.push(detail);
+        match event_type {
+            "session.agent.output" => {
+                assistant_lines.extend(assistant_event_lines(payload));
             }
-            ("session.agent.tool_call", _) => tool_lines.push("tool call".to_string()),
-            ("session.agent.output", Some(detail)) if !detail.is_empty() => {
-                assistant_lines.push(detail);
+            "session.agent.tool_call" => {
+                if let Some(detail) = event_detail(payload) {
+                    if !detail.is_empty() {
+                        tool_lines.push(detail);
+                    } else {
+                        tool_lines.push("tool call".to_string());
+                    }
+                } else {
+                    tool_lines.push("tool call".to_string());
+                }
             }
-            ("session.agent.output", _) => {}
-            (_, Some(detail)) if !detail.is_empty() => {
-                status_lines.push(format!("{event_type}: {detail}"));
-            }
-            _ => status_lines.push(event_type.to_string()),
+            _ => status_lines.push(status_event_line(event_type, payload)),
         }
     }
 
+    if !assistant_lines.is_empty() {
+        state.push_message("assistant:".to_string());
+        for line in &assistant_lines {
+            state.push_message(format!("  {line}"));
+        }
+    }
     if !tool_lines.is_empty() {
         state.push_message("command/tool events:".to_string());
         for line in tool_lines.iter().take(TRANSCRIPT_TOOL_LINE_LIMIT) {
@@ -1801,23 +1945,29 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
         }
         append_more_line(state, tool_lines.len(), TRANSCRIPT_TOOL_LINE_LIMIT);
     }
-    if !assistant_lines.is_empty() {
-        state.push_message("assistant:".to_string());
-        for line in assistant_lines.iter().take(TRANSCRIPT_ASSISTANT_LINE_LIMIT) {
-            state.push_message(format!("  {line}"));
-        }
-        append_more_line(
-            state,
-            assistant_lines.len(),
-            TRANSCRIPT_ASSISTANT_LINE_LIMIT,
-        );
-    }
     if !status_lines.is_empty() {
-        state.push_message("run events:".to_string());
+        state.push_message("status:".to_string());
         for line in status_lines.iter().take(TRANSCRIPT_STATUS_LINE_LIMIT) {
             state.push_message(format!("  {line}"));
         }
         append_more_line(state, status_lines.len(), TRANSCRIPT_STATUS_LINE_LIMIT);
+    }
+}
+
+fn assistant_event_lines(payload: &Value) -> Vec<String> {
+    payload
+        .get("text")
+        .and_then(Value::as_str)
+        .map(split_display_lines)
+        .unwrap_or_default()
+}
+
+fn split_display_lines(text: &str) -> Vec<String> {
+    let lines = text.lines().map(str::to_string).collect::<Vec<_>>();
+    if lines.is_empty() {
+        vec![text.to_string()]
+    } else {
+        lines
     }
 }
 
@@ -1826,6 +1976,34 @@ fn event_detail(payload: &Value) -> Option<String> {
         .get("text")
         .and_then(Value::as_str)
         .or_else(|| payload.get("error").and_then(Value::as_str))
+        .or_else(|| payload.get("stderr").and_then(Value::as_str))
+        .map(transcript_detail)
+}
+
+fn status_event_line(event_type: &str, payload: &Value) -> String {
+    let label = match event_type {
+        "session.created" => "session created",
+        "session.route.decided" => "route decided",
+        "session.agent.started" => "agent started",
+        "session.agent.completed" => "agent completed",
+        "session.agent.failed" => "agent failed",
+        "session.status.changed" => "status changed",
+        other => other,
+    };
+    if event_type == "session.agent.completed" {
+        return label.to_string();
+    }
+    if let Some(detail) = status_event_detail(payload) {
+        format!("{label}: {detail}")
+    } else {
+        label.to_string()
+    }
+}
+
+fn status_event_detail(payload: &Value) -> Option<String> {
+    payload
+        .get("error")
+        .and_then(Value::as_str)
         .or_else(|| payload.get("stderr").and_then(Value::as_str))
         .map(transcript_detail)
 }
@@ -1842,6 +2020,12 @@ fn append_test_result_section(state: &mut TuiState, response: &Value) {
     };
     let test_lines = events
         .iter()
+        .filter(|event| {
+            event
+                .get("event_type")
+                .and_then(Value::as_str)
+                .is_some_and(|event_type| event_type != "session.agent.output")
+        })
         .filter_map(|event| event.get("payload"))
         .filter_map(|payload| {
             payload
@@ -2024,6 +2208,37 @@ impl TuiState {
         }
     }
 
+    fn command_policy_label(&self) -> String {
+        let Some(policy) = &self.runtime_policy else {
+            return "unknown".to_string();
+        };
+        match policy.command_policy.as_str() {
+            "ask" => "ask before commands".to_string(),
+            "allow_project" => "project writes allowed".to_string(),
+            "deny" => "read-only".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    fn execution_mode(&self) -> String {
+        self.runtime_policy
+            .as_ref()
+            .map(|policy| policy.execution_mode.replace('_', "-"))
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn routing_status(&self) -> String {
+        let Some(policy) = &self.runtime_policy else {
+            return "unknown".to_string();
+        };
+        format!(
+            "{}m quota<{}% fail>{}",
+            policy.sticky_window_minutes,
+            policy.quota_switch_threshold_percent,
+            policy.failure_threshold_count
+        )
+    }
+
     fn session_status(&self) -> String {
         if let Some(session) = self.recent_sessions.get(self.selected_session_index) {
             let current_marker = if self.session_id.as_deref() == Some(session.id.as_str()) {
@@ -2084,7 +2299,7 @@ impl TuiState {
     }
 
     fn help_text(&self) -> &'static str {
-        "Ent|Tab|Up/Dn|^N new|^L load|^H hand|^Y yes|^A ok|^D no|^X stop"
+        "Ent|Tab|PgUp/PgDn scroll|Home/End|^N new|^L load|^H hand|^X stop"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -2170,7 +2385,11 @@ fn parse_http_json_response(response: &str) -> Result<Value> {
         .split_once("\r\n\r\n")
         .ok_or_else(|| anyhow!("invalid daemon response"))?;
     let status_line = head.lines().next().unwrap_or_default();
-    let value: Value = serde_json::from_str(body.trim()).context("parse daemon JSON response")?;
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(anyhow!("daemon returned {status_line} with empty body"));
+    }
+    let value: Value = serde_json::from_str(body).context("parse daemon JSON response")?;
     if !status_line.contains(" 200 ") {
         if matches!(
             value.get("status").and_then(Value::as_str),
@@ -2351,7 +2570,7 @@ mod tests {
         assert!(rendered.contains("opencode"));
         assert!(rendered.contains("Prompt"));
         assert!(rendered.contains("keys"));
-        assert!(rendered.contains("Ent|Tab|Up/Dn|^N new|^L load|^H hand"));
+        assert!(rendered.contains("Ent|Tab|PgUp/PgDn scroll"));
     }
 
     #[test]
@@ -2398,6 +2617,34 @@ mod tests {
 
         assert!(error.to_string().contains("HTTP/1.1 404 Not Found"));
         assert!(error.to_string().contains("session not found"));
+    }
+
+    #[test]
+    fn parse_http_json_response_reports_empty_body_without_json_eof() {
+        let response = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n";
+        let error = parse_http_json_response(response).expect_err("error");
+
+        assert!(error.to_string().contains("empty body"));
+        assert!(!error.to_string().contains("EOF"));
+    }
+
+    #[test]
+    fn runtime_policy_error_hint_suggests_daemon_restart_for_missing_endpoint() {
+        let error = anyhow!("daemon returned HTTP/1.1 404 Not Found with empty body");
+
+        assert_eq!(
+            runtime_policy_error_hint(&error),
+            "restart baize daemon to enable runtime status"
+        );
+    }
+
+    #[test]
+    fn default_runtime_policy_uses_safe_ask_mode() {
+        let policy = default_runtime_policy();
+
+        assert_eq!(policy.command_policy, "ask");
+        assert_eq!(policy.execution_mode, "ask_before_commands");
+        assert_eq!(policy.sticky_window_minutes, 30);
     }
 
     #[test]
@@ -2514,10 +2761,49 @@ mod tests {
     }
 
     #[test]
+    fn parses_runtime_policy_from_daemon_response() {
+        let policy = parse_runtime_policy(&json!({
+            "runtime": {
+                "command_policy": "allow_project",
+                "execution_mode": "project_write_allowed",
+                "checkpoint_policy": "before_handoff",
+                "routing": {
+                    "sticky_window_minutes": 45,
+                    "quota_switch_threshold_percent": 15,
+                    "failure_threshold_count": 2
+                }
+            }
+        }))
+        .expect("policy");
+
+        assert_eq!(policy.command_policy, "allow_project");
+        assert_eq!(policy.execution_mode, "project_write_allowed");
+        assert_eq!(policy.checkpoint_policy, "before_handoff");
+        assert_eq!(policy.sticky_window_minutes, 45);
+        assert_eq!(policy.quota_switch_threshold_percent, 15);
+        assert_eq!(policy.failure_threshold_count, 2);
+    }
+
+    #[test]
+    fn parse_runtime_policy_rejects_missing_runtime_object() {
+        let error = parse_runtime_policy(&json!({ "status": "ok" })).expect_err("error");
+
+        assert!(error.to_string().contains("runtime"));
+    }
+
+    #[test]
     fn begin_prompt_submission_immediately_shows_running_state() {
         let mut state = TuiState {
             selected_provider_index: 1,
             input: "你能做什么".to_string(),
+            runtime_policy: Some(RuntimePolicyView {
+                command_policy: "deny".to_string(),
+                execution_mode: "read_only".to_string(),
+                checkpoint_policy: "before_handoff".to_string(),
+                sticky_window_minutes: 30,
+                quota_switch_threshold_percent: 10,
+                failure_threshold_count: 3,
+            }),
             ..TuiState::default()
         };
 
@@ -2531,6 +2817,9 @@ mod tests {
         assert!(state
             .transcript_text()
             .contains("mesh: dispatching to gemini"));
+        assert!(state
+            .transcript_text()
+            .contains("policy: read-only (read-only)"));
     }
 
     #[test]
@@ -2644,6 +2933,31 @@ mod tests {
         assert!(rendered.contains("copilot"));
         assert!(rendered.contains("opencode"));
         assert!(!rendered.contains("ope..."));
+    }
+
+    #[test]
+    fn renders_runtime_policy_in_control_plane() {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = TuiState {
+            runtime_policy: Some(RuntimePolicyView {
+                command_policy: "allow_project".to_string(),
+                execution_mode: "project_write_allowed".to_string(),
+                checkpoint_policy: "before_handoff".to_string(),
+                sticky_window_minutes: 45,
+                quota_switch_threshold_percent: 15,
+                failure_threshold_count: 2,
+            }),
+            ..TuiState::default()
+        };
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("[exec:project-write-allowed]"));
+        assert!(rendered.contains("project writes allowed"));
+        assert!(rendered.contains("45m quota<15% fail>2"));
     }
 
     #[test]
@@ -3065,6 +3379,24 @@ mod tests {
     }
 
     #[test]
+    fn append_prompt_response_hides_success_stderr_noise() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "status": "running",
+            "turn_status": "completed",
+            "session_status": "Running",
+            "provider_id": "codex",
+            "stderr": "Reading additional input from stdin..."
+        });
+
+        append_prompt_response(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("turn result: completed via codex"));
+        assert!(!transcript.contains("Reading additional input"));
+    }
+
+    #[test]
     fn append_prompt_response_keeps_legacy_status_display() {
         let mut state = TuiState::default();
         let response = json!({
@@ -3125,6 +3457,10 @@ mod tests {
                 {
                     "event_type": "session.agent.failed",
                     "payload": { "stderr": "tests failed" }
+                },
+                {
+                    "event_type": "session.agent.completed",
+                    "payload": { "stderr": "Reading additional input from stdin..." }
                 }
             ]
         });
@@ -3136,13 +3472,15 @@ mod tests {
         assert!(transcript.contains("  cargo test"));
         assert!(transcript.contains("assistant:"));
         assert!(transcript.contains("  reading files"));
-        assert!(transcript.contains("run events:"));
-        assert!(transcript.contains("  session.agent.failed: tests failed"));
+        assert!(transcript.contains("status:"));
+        assert!(transcript.contains("  agent failed: tests failed"));
+        assert!(transcript.contains("  agent completed"));
+        assert!(!transcript.contains("Reading additional input"));
         assert!(!transcript.contains("session.agent.output: reading files"));
     }
 
     #[test]
-    fn append_recent_events_truncates_long_output_detail() {
+    fn append_recent_events_preserves_long_assistant_output() {
         let mut state = TuiState::default();
         let long_output = format!("{} tail", "o".repeat(TRANSCRIPT_DETAIL_MAX_CHARS + 40));
         let response = json!({
@@ -3158,12 +3496,12 @@ mod tests {
 
         let transcript = state.transcript_text();
         assert!(transcript.contains("assistant:"));
-        assert!(transcript.contains("..."));
-        assert!(!transcript.contains("tail"));
+        assert!(transcript.contains("tail"));
+        assert!(!transcript.contains("..."));
     }
 
     #[test]
-    fn append_recent_events_caps_assistant_lines() {
+    fn append_recent_events_preserves_all_assistant_lines() {
         let mut state = TuiState::default();
         let response = json!({
             "events": [
@@ -3181,8 +3519,31 @@ mod tests {
         let transcript = state.transcript_text();
         assert!(transcript.contains("  line 1"));
         assert!(transcript.contains("  line 5"));
-        assert!(!transcript.contains("  line 6"));
-        assert!(transcript.contains("  (+1 more)"));
+        assert!(transcript.contains("  line 6"));
+        assert!(!transcript.contains("  (+1 more)"));
+    }
+
+    #[test]
+    fn append_recent_events_preserves_multiline_assistant_output() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "events": [
+                {
+                    "event_type": "session.agent.output",
+                    "payload": {
+                        "text": "```cpp\nint main() {\n    return 0;\n}\n```"
+                    }
+                }
+            ]
+        });
+
+        append_recent_events(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("  ```cpp"));
+        assert!(transcript.contains("  int main() {"));
+        assert!(transcript.contains("      return 0;"));
+        assert!(transcript.contains("  }"));
     }
 
     #[test]
@@ -3191,7 +3552,7 @@ mod tests {
         let response = json!({
             "events": [
                 {
-                    "event_type": "session.agent.output",
+                    "event_type": "session.agent.tool_call",
                     "payload": { "text": "cargo test --all passed" }
                 },
                 {
@@ -3207,6 +3568,27 @@ mod tests {
         assert!(transcript.contains("assistant:"));
         assert!(transcript.contains("test results:"));
         assert!(transcript.contains("  cargo test --all passed"));
+    }
+
+    #[test]
+    fn append_recent_events_does_not_treat_assistant_suggestions_as_test_results() {
+        let mut state = TuiState::default();
+        let response = json!({
+            "events": [
+                {
+                    "event_type": "session.agent.output",
+                    "payload": {
+                        "text": "I can help run cargo test --workspace when you ask."
+                    }
+                }
+            ]
+        });
+
+        append_recent_events_with_sections(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("assistant:"));
+        assert!(!transcript.contains("test results:"));
     }
 
     #[test]
@@ -3852,6 +4234,43 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("Agent Stream ("));
+    }
+
+    #[test]
+    fn render_transcript_defaults_to_latest_lines() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = TuiState::default();
+        for i in 0..40 {
+            state.push_message(format!("older line {i}"));
+        }
+        state.push_message("latest assistant line");
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("latest assistant line"));
+        assert!(!rendered.contains("older line 0"));
+    }
+
+    #[test]
+    fn render_transcript_scroll_offset_shows_history() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = TuiState::default();
+        for i in 0..40 {
+            state.push_message(format!("older line {i}"));
+        }
+        state.push_message("latest assistant line");
+        state.scroll_to_top();
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("boot sequence complete"));
+        assert!(!rendered.contains("latest assistant line"));
     }
 
     #[test]

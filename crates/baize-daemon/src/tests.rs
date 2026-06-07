@@ -281,6 +281,53 @@ async fn creates_workspace_session_prompt_and_events() {
 }
 
 #[tokio::test]
+async fn runtime_status_reports_execution_policy_snapshot() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let mut config = BaizeConfig::default();
+    config.workspace.command_policy = "deny".to_string();
+    config.workspace.checkpoint_policy = "off".to_string();
+    config.routing.sticky_window_minutes = 45;
+    config.routing.quota_switch_threshold_percent = 12;
+    config.routing.failure_threshold_count = 2;
+    let state = AppState::with_executor(
+        config,
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+        }),
+    );
+    let app = router(state);
+
+    let status = json_response(
+        app,
+        Request::builder()
+            .uri("/runtime/status")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(status["runtime"]["command_policy"], "deny");
+    assert_eq!(status["runtime"]["execution_mode"], "read_only");
+    assert_eq!(status["runtime"]["checkpoint_policy"], "off");
+    assert_eq!(status["runtime"]["routing"]["sticky_window_minutes"], 45);
+    assert_eq!(
+        status["runtime"]["routing"]["quota_switch_threshold_percent"],
+        12
+    );
+    assert_eq!(status["runtime"]["routing"]["failure_threshold_count"], 2);
+}
+
+#[tokio::test]
 async fn prompt_provider_target_switches_session_route_and_executor() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let project_dir = tempfile::tempdir().expect("project dir");

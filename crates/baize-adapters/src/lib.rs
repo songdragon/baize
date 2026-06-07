@@ -455,15 +455,16 @@ pub fn parse_stream_json_lines(raw: &str) -> Vec<AgentExecutionEvent> {
                 return None;
             }
             let value = serde_json::from_str::<Value>(line).ok()?;
+            let text = find_event_text(&value);
             let kind = if looks_like_tool_call(&value) {
                 AgentExecutionEventKind::ToolCall
-            } else if find_text(&value).is_some() {
+            } else if text.is_some() {
                 AgentExecutionEventKind::Output
             } else {
                 AgentExecutionEventKind::Raw
             };
             Some(AgentExecutionEvent {
-                text: find_text(&value),
+                text,
                 kind,
                 raw: Some(value),
             })
@@ -763,6 +764,19 @@ fn find_text(value: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn find_event_text(value: &Value) -> Option<String> {
+    find_codex_agent_message_text(value).or_else(|| find_text(value))
+}
+
+fn find_codex_agent_message_text(value: &Value) -> Option<String> {
+    let item = value.get("item")?;
+    let item_type = item.get("type").and_then(Value::as_str)?;
+    if item_type != "agent_message" {
+        return None;
+    }
+    find_text(item)
 }
 
 fn find_session_id(value: &Value) -> Option<String> {
@@ -1430,6 +1444,21 @@ mod tests {
         assert_eq!(events[0].text.as_deref(), Some("hello"));
         assert!(matches!(events[1].kind, AgentExecutionEventKind::ToolCall));
         assert!(matches!(events[2].kind, AgentExecutionEventKind::Raw));
+    }
+
+    #[test]
+    fn parses_codex_agent_message_item_as_output() {
+        let raw = r#"
+        {"type":"thread.started","thread_id":"thread_1"}
+        {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"baize-smoke"}}
+        "#;
+
+        let events = parse_stream_json_lines(raw);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].kind, AgentExecutionEventKind::Raw));
+        assert!(matches!(events[1].kind, AgentExecutionEventKind::Output));
+        assert_eq!(events[1].text.as_deref(), Some("baize-smoke"));
     }
 
     #[test]
