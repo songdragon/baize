@@ -8,7 +8,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::{json, Value};
 use std::io::{stdout, Read, Write};
@@ -358,19 +358,10 @@ fn render_prompt(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
 
     frame.render_widget(
         Paragraph::new(Text::from(vec![prompt, help]))
-            .block(panel_block("Prompt"))
+            .block(prompt_block("Prompt"))
             .wrap(Wrap { trim: false }),
         area,
     );
-}
-
-fn panel_block(title: impl Into<String>) -> Block<'static> {
-    Block::default()
-        .title(title.into())
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .padding(Padding::horizontal(1))
 }
 
 fn side_panel_block(title: impl Into<String>) -> Block<'static> {
@@ -381,13 +372,66 @@ fn side_panel_block(title: impl Into<String>) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
+fn prompt_block(title: impl Into<String>) -> Block<'static> {
+    Block::default()
+        .title(title.into())
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .padding(Padding::horizontal(1))
+}
+
 fn transcript_text(state: &TuiState) -> Text<'static> {
-    let lines = state
+    let mut lines = state
         .transcript
         .iter()
         .map(|line| transcript_line(line))
         .collect::<Vec<_>>();
+    if should_show_ready_panel(state) {
+        lines.extend(ready_panel_lines(state));
+    }
     Text::from(lines)
+}
+
+fn should_show_ready_panel(state: &TuiState) -> bool {
+    state.session_id.is_none() && state.transcript.len() <= 4
+}
+
+fn ready_panel_lines(state: &TuiState) -> Vec<Line<'static>> {
+    vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Start here", accent_style()),
+            Span::styled("  ask, route, inspect, hand off", muted_style()),
+        ]),
+        ready_action_line("new task", "type a request and press Enter"),
+        ready_action_line("switch", "Tab cycles the target provider"),
+        ready_action_line("load", "Ctrl-L restores the latest session"),
+        ready_action_line("handoff", "Ctrl-H previews a provider transfer"),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("target ", muted_style()),
+            Span::styled(
+                state.selected_provider().to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("   active ", muted_style()),
+            Span::raw(
+                state
+                    .active_provider
+                    .as_deref()
+                    .unwrap_or("none")
+                    .to_string(),
+            ),
+        ]),
+    ]
+}
+
+fn ready_action_line(label: &'static str, text: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  • ", muted_style()),
+        Span::styled(format!("{label:<8}"), Style::default().fg(Color::White)),
+        Span::styled(text, muted_style()),
+    ])
 }
 
 fn transcript_line(line: &str) -> Line<'static> {
@@ -1812,6 +1856,9 @@ mod tests {
         assert!(rendered.contains("daemon"));
         assert!(rendered.contains("not checked"));
         assert!(rendered.contains("Agent Stream"));
+        assert!(rendered.contains("Start here"));
+        assert!(rendered.contains("new task"));
+        assert!(rendered.contains("target"));
         assert!(rendered.contains("Control Plane"));
         assert!(rendered.contains("PROVIDERS"));
         assert!(rendered.contains("selected"));
