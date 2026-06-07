@@ -20,7 +20,7 @@ use std::time::Duration;
 
 const DAEMON_HOST: &str = "127.0.0.1";
 const DAEMON_PORT: u16 = 7878;
-const PROMPT_TIMEOUT_SECONDS: u64 = 10;
+const PROMPT_TIMEOUT_SECONDS: u64 = 120;
 const DAEMON_START_ATTEMPTS: usize = 20;
 const DAEMON_START_POLL_MS: u64 = 100;
 

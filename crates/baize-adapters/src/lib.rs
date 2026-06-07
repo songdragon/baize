@@ -115,6 +115,12 @@ pub enum AgentErrorSource {
     Runtime,
 }
 
+struct CommandRunOutput {
+    output: Output,
+    timed_out: bool,
+    timeout: Duration,
+}
+
 pub fn default_provider_profiles() -> Vec<ProviderProfile> {
     vec![
         ProviderProfile {
@@ -447,53 +453,64 @@ pub fn classify_agent_error(text: &str, source: AgentErrorSource) -> Option<Agen
 }
 
 fn run_gemini_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
-    let output = run_command_with_timeout(
+    let run = run_command_with_timeout(
         "gemini",
         &build_gemini_args(&request),
         &request.cwd,
         timeout_for(&request),
     )
     .with_context(|| "failed to run gemini prompt")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Ok(AgentRunResult {
-        provider_id: request.provider_id,
-        success: output.status.success(),
-        exit_code: output.status.code(),
-        native_session_id: extract_native_session_id(&stdout),
-        events: parse_stream_json_lines(&stdout),
-        error: if output.status.success() {
-            None
-        } else {
-            classify_agent_error(&stderr, AgentErrorSource::Stderr)
-        },
-        stderr,
-    })
+    Ok(agent_result_from_command_run(
+        request.provider_id,
+        "gemini",
+        run,
+    ))
 }
 
 fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
-    let output = run_command_with_timeout(
+    let run = run_command_with_timeout(
         "codex",
         &build_codex_args(&request),
         &request.cwd,
         timeout_for(&request),
     )
     .with_context(|| "failed to run codex prompt")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Ok(AgentRunResult {
-        provider_id: request.provider_id,
-        success: output.status.success(),
-        exit_code: output.status.code(),
+    Ok(agent_result_from_command_run(
+        request.provider_id,
+        "codex",
+        run,
+    ))
+}
+
+fn agent_result_from_command_run(
+    provider_id: ProviderId,
+    command: &str,
+    run: CommandRunOutput,
+) -> AgentRunResult {
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let raw_stderr = String::from_utf8_lossy(&run.output.stderr).to_string();
+    let stderr = if run.timed_out {
+        timeout_stderr(command, run.timeout, &raw_stderr)
+    } else {
+        raw_stderr
+    };
+    let success = !run.timed_out && run.output.status.success();
+    let error = if success {
+        None
+    } else if run.timed_out {
+        classify_agent_error(&stderr, AgentErrorSource::Runtime)
+    } else {
+        classify_agent_error(&stderr, AgentErrorSource::Stderr)
+    };
+    AgentRunResult {
+        provider_id,
+        success,
+        exit_code: run.output.status.code(),
         native_session_id: extract_native_session_id(&stdout),
         events: parse_stream_json_lines(&stdout),
-        error: if output.status.success() {
-            None
-        } else {
-            classify_agent_error(&stderr, AgentErrorSource::Stderr)
-        },
+        error,
         stderr,
-    })
+    }
 }
 
 fn timeout_for(request: &AgentPromptRequest) -> Duration {
@@ -505,7 +522,7 @@ fn run_command_with_timeout(
     args: &[String],
     cwd: &PathBuf,
     timeout: Duration,
-) -> Result<Output> {
+) -> Result<CommandRunOutput> {
     let mut child = Command::new(command)
         .args(args)
         .current_dir(cwd)
@@ -517,17 +534,43 @@ fn run_command_with_timeout(
     if child.wait_timeout(timeout)?.is_none() {
         let _ = child.kill();
         let output = child.wait_with_output()?;
-        anyhow::bail!(
-            "{command} timed out after {} seconds. stdout: {} stderr: {}",
-            timeout.as_secs(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
+        return Ok(CommandRunOutput {
+            output,
+            timed_out: true,
+            timeout,
+        });
     }
 
-    child
+    let output = child
         .wait_with_output()
-        .with_context(|| format!("failed to collect {command} output"))
+        .with_context(|| format!("failed to collect {command} output"))?;
+    Ok(CommandRunOutput {
+        output,
+        timed_out: false,
+        timeout,
+    })
+}
+
+fn timeout_stderr(command: &str, timeout: Duration, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!("{command} timed out after {} seconds", timeout.as_secs())
+    } else {
+        format!(
+            "{command} timed out after {} seconds. stderr: {}",
+            timeout.as_secs(),
+            one_line_limit(stderr, 240)
+        )
+    }
+}
+
+fn one_line_limit(text: &str, max_chars: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max_chars {
+        return one_line;
+    }
+    let keep = max_chars.saturating_sub(3);
+    format!("{}...", one_line.chars().take(keep).collect::<String>())
 }
 
 fn detect_capabilities(
@@ -1073,15 +1116,31 @@ mod tests {
     }
 
     #[test]
-    fn command_timeout_prevents_hanging_processes() {
-        let error = run_command_with_timeout(
+    fn command_timeout_returns_partial_output_without_runtime_error() {
+        let run = run_command_with_timeout(
             "sleep",
             &["2".to_string()],
             &PathBuf::from("."),
             Duration::from_millis(10),
         )
-        .expect_err("sleep should time out");
+        .expect("timeout run");
 
-        assert!(error.to_string().contains("timed out"));
+        assert!(run.timed_out);
+        assert!(!run.output.status.success());
+    }
+
+    #[test]
+    fn timeout_stderr_is_concise() {
+        let message = timeout_stderr(
+            "gemini",
+            Duration::from_secs(10),
+            "stderr line\nwith more detail",
+        );
+
+        assert_eq!(
+            message,
+            "gemini timed out after 10 seconds. stderr: stderr line with more detail"
+        );
+        assert!(!message.contains("stdout:"));
     }
 }
