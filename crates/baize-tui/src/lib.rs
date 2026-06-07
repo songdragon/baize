@@ -21,6 +21,7 @@ use std::time::Duration;
 const DAEMON_HOST: &str = "127.0.0.1";
 const DAEMON_PORT: u16 = 7878;
 const PROMPT_TIMEOUT_SECONDS: u64 = 120;
+const TRANSCRIPT_DETAIL_MAX_CHARS: usize = 180;
 const DAEMON_START_ATTEMPTS: usize = 20;
 const DAEMON_START_POLL_MS: u64 = 100;
 
@@ -1403,11 +1404,11 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
     state.push_message(format!("prompt result: {status} via {provider}"));
 
     if let Some(error) = response.get("error").and_then(Value::as_str) {
-        state.push_message(format!("  error: {error}"));
+        state.push_message(format!("  error: {}", transcript_detail(error)));
     }
     if let Some(stderr) = response.get("stderr").and_then(Value::as_str) {
         if !stderr.trim().is_empty() {
-            state.push_message(format!("  stderr: {}", one_line(stderr)));
+            state.push_message(format!("  stderr: {}", transcript_detail(stderr)));
         }
     }
     if let Some(hint) = provider_error_hint(response) {
@@ -1441,7 +1442,7 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
             .and_then(Value::as_str)
             .or_else(|| payload.get("error").and_then(Value::as_str))
             .or_else(|| payload.get("stderr").and_then(Value::as_str))
-            .map(one_line);
+            .map(transcript_detail);
 
         let line = match detail {
             Some(detail) if !detail.is_empty() => format!("{event_type}: {detail}"),
@@ -1891,6 +1892,10 @@ fn short_text(text: &str, max_chars: usize) -> String {
 
     let keep = max_chars.saturating_sub(3);
     format!("{}...", text.chars().take(keep).collect::<String>())
+}
+
+fn transcript_detail(text: &str) -> String {
+    short_text(text, TRANSCRIPT_DETAIL_MAX_CHARS)
 }
 
 #[cfg(test)]
@@ -2464,6 +2469,24 @@ mod tests {
     }
 
     #[test]
+    fn append_prompt_response_truncates_long_error_detail() {
+        let mut state = TuiState::default();
+        let long_error = "x".repeat(TRANSCRIPT_DETAIL_MAX_CHARS + 40);
+        let response = json!({
+            "status": "failed",
+            "provider_id": "gemini",
+            "stderr": long_error
+        });
+
+        append_prompt_response(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("stderr: "));
+        assert!(transcript.contains("..."));
+        assert!(!transcript.contains(&"x".repeat(TRANSCRIPT_DETAIL_MAX_CHARS + 20)));
+    }
+
+    #[test]
     fn append_recent_events_groups_tool_and_output_sections() {
         let mut state = TuiState::default();
         let response = json!({
@@ -2491,6 +2514,27 @@ mod tests {
         assert!(transcript.contains("agent output:"));
         assert!(transcript.contains("  session.agent.output: reading files"));
         assert!(transcript.contains("  session.agent.failed: tests failed"));
+    }
+
+    #[test]
+    fn append_recent_events_truncates_long_output_detail() {
+        let mut state = TuiState::default();
+        let long_output = format!("{} tail", "o".repeat(TRANSCRIPT_DETAIL_MAX_CHARS + 40));
+        let response = json!({
+            "events": [
+                {
+                    "event_type": "session.agent.output",
+                    "payload": { "text": long_output }
+                }
+            ]
+        });
+
+        append_recent_events(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("session.agent.output: "));
+        assert!(transcript.contains("..."));
+        assert!(!transcript.contains("tail"));
     }
 
     #[test]
