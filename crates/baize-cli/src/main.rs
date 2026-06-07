@@ -277,7 +277,7 @@ mod tests {
         let config = baize_config::BaizeConfig::default();
         let diagnostics = vec![
             diagnostic("codex", ProviderReadiness::Ready, true),
-            diagnostic("opencode", ProviderReadiness::UnsupportedRuntime, false),
+            diagnostic("copilot", ProviderReadiness::UnsupportedRuntime, false),
         ];
 
         let value = doctor_report(&diagnostics, &config);
@@ -296,7 +296,7 @@ mod tests {
         let config = baize_config::BaizeConfig::default();
         let diagnostics = vec![
             diagnostic("codex", ProviderReadiness::SetupRequired, true),
-            diagnostic("opencode", ProviderReadiness::UnsupportedRuntime, false),
+            diagnostic("copilot", ProviderReadiness::UnsupportedRuntime, false),
         ];
 
         let value = doctor_report(&diagnostics, &config);

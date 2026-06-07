@@ -1816,7 +1816,7 @@ async fn prompt_rejects_provider_without_runtime_support() {
             .body(Body::from(
                 json!({
                     "prompt": "hello",
-                    "provider_id": "opencode"
+                    "provider_id": "copilot"
                 })
                 .to_string(),
             ))
@@ -1827,7 +1827,7 @@ async fn prompt_rejects_provider_without_runtime_support() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         prompt["error"],
-        "provider opencode does not support Baize prompt execution yet"
+        "provider copilot does not support Baize prompt execution yet"
     );
 
     let session = json_response(
@@ -2605,7 +2605,7 @@ fn unsupported_prompt_runtime_is_not_routable() {
         }),
     );
 
-    assert!(!crate::helpers::is_provider_routable(&state, "opencode"));
+    assert!(crate::helpers::is_provider_routable(&state, "opencode"));
     assert!(!crate::helpers::is_provider_routable(&state, "copilot"));
 }
 
@@ -2705,8 +2705,8 @@ async fn create_session_rejects_provider_without_runtime_support() {
             .body(Body::from(
                 json!({
                     "workspace_id": workspace_id,
-                    "objective": "try opencode",
-                    "provider_id": "opencode"
+                    "objective": "try copilot",
+                    "provider_id": "copilot"
                 })
                 .to_string(),
             ))
@@ -2717,7 +2717,7 @@ async fn create_session_rejects_provider_without_runtime_support() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         response["error"],
-        "provider opencode does not support Baize prompt execution yet"
+        "provider copilot does not support Baize prompt execution yet"
     );
 }
 
@@ -2726,7 +2726,7 @@ fn select_provider_fallback_skips_unsupported_runtime() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
     let mut config = BaizeConfig::default();
-    config.providers.order = vec!["opencode".to_string()];
+    config.providers.order = vec!["copilot".to_string()];
     let state = AppState::with_executor(
         config,
         store,
@@ -2745,7 +2745,7 @@ fn select_provider_fallback_skips_unsupported_runtime() {
 
     let result = crate::helpers::select_provider(&state, None, None, None);
 
-    assert_ne!(result.provider_id.0, "opencode");
+    assert_ne!(result.provider_id.0, "copilot");
     assert!(baize_adapters::is_prompt_runtime_supported(
         &result.provider_id
     ));

@@ -4,14 +4,14 @@ Status: implemented and actively hardening
 
 ## Scope
 
-This MVP implements the review-passed technical spec as a local Rust daemon plus TUI shell. Gemini and Codex prompt execution paths are wired through CLI adapters; tests use fake executors and parser fixtures so CI does not spend model quota.
+This MVP implements the review-passed technical spec as a local Rust daemon plus TUI shell. Gemini, Codex and OpenCode prompt execution paths are wired through CLI adapters; tests use fake executors and parser fixtures so CI does not spend model quota.
 
 The MVP target is a single-workspace local agent supervisor:
 
 - inspect and register the current project;
 - create and resume task sessions;
 - route work to configured coding-agent providers;
-- execute prompt requests through Codex/Gemini CLI paths;
+- execute prompt requests through Codex/Gemini/OpenCode CLI paths;
 - record session events, route decisions, handoffs and permissions;
 - let the user operate the workflow from a TUI;
 - keep the kernel API reusable for a future desktop app.
@@ -64,12 +64,13 @@ The MVP target is a single-workspace local agent supervisor:
 - daemon endpoints for provider validation;
 - Gemini `--prompt --output-format stream-json` execution path;
 - Codex `exec --json` execution path;
-- workspace command policy mapping for Codex/Gemini execution arguments;
-- Codex/Gemini smoke validation command for auth, timeout and parser checks;
+- OpenCode `run --format json` execution path;
+- workspace command policy mapping for Codex/Gemini/OpenCode execution arguments;
+- Codex/Gemini/OpenCode smoke validation command for auth, timeout and parser checks;
 - stream-json/JSONL parser behavior;
 - native provider session ID extraction from structured output;
 - native provider session ID persistence and reuse for same-provider follow-up prompts;
-- provider-specific resume argument generation for Codex and Gemini follow-up prompts;
+- provider-specific resume argument generation for Codex, Gemini and OpenCode follow-up prompts;
 - structured provider error classification and daemon reporting;
 - prompt execution timeout to prevent hanging on provider authentication or interactive prompts.
 
@@ -220,7 +221,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 219.
+Current full test count: 222.
 
 Implemented test coverage includes:
 
@@ -247,10 +248,10 @@ Implemented test coverage includes:
 - provider priority and ACP transport metadata;
 - provider ACP initialize proof generation;
 - provider validation behavior;
-- Gemini/Codex command construction;
-- Gemini/Codex execution policy argument mapping;
-- Gemini/Codex resume argument generation;
-- Gemini/Codex smoke validation without real prompt execution;
+- Gemini/Codex/OpenCode command construction;
+- Gemini/Codex/OpenCode execution policy argument mapping;
+- Gemini/Codex/OpenCode resume argument generation where supported;
+- Gemini/Codex/OpenCode smoke validation without real prompt execution;
 - stream-json/JSONL parser behavior;
 - adapter native provider session ID extraction;
 - adapter provider error classification;
@@ -348,6 +349,7 @@ These are still in scope for a more usable MVP.
 
 - ~~Validate real Codex CLI execution end to end with authentication, timeout and JSON parsing~~ (done as `baize smoke codex`, with real prompt gated by `--run-prompt`);
 - ~~validate real Gemini CLI execution end to end with authentication, timeout and stream-json parsing~~ (done as `baize smoke gemini`, with real prompt gated by `--run-prompt`);
+- ~~add OpenCode CLI prompt runtime beyond ACP metadata~~ (done with `opencode run --format json`; real prompt is gated by `baize smoke opencode --run-prompt`);
 - ~~preserve provider-native session/resume IDs when available~~ (done for structured output capture);
 - ~~expose adapter stderr and provider errors in a more structured form~~ (done);
 - ~~add Copilot/OpenCode ACP proof-of-life beyond metadata~~ (done with initialize proof generation).

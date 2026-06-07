@@ -237,8 +237,11 @@ pub fn default_provider_profiles() -> Vec<ProviderProfile> {
             }],
             capabilities: ProviderCapabilities {
                 interactive_chat: true,
+                non_interactive_prompt: true,
                 shell_access: true,
+                structured_output: true,
                 acp: true,
+                session_resume: true,
                 ..ProviderCapabilities::default()
             },
             enabled: true,
@@ -291,6 +294,9 @@ pub fn validate_provider(profile: &ProviderProfile) -> ProviderValidation {
     let exec_help = match profile.kind {
         ProviderKind::Codex => {
             command.and_then(|command| command_text(command, &["exec", "--help"]))
+        }
+        ProviderKind::OpenCode => {
+            command.and_then(|command| command_text(command, &["run", "--help"]))
         }
         _ => None,
     };
@@ -346,6 +352,7 @@ pub fn run_agent_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
     match request.provider_id.0.as_str() {
         "gemini" => run_gemini_prompt(request),
         "codex" => run_codex_prompt(request),
+        "opencode" => run_opencode_prompt(request),
         other => anyhow::bail!("provider execution is not implemented for {other}"),
     }
 }
@@ -374,6 +381,7 @@ pub fn smoke_provider(
     let prompt_command_args = match provider_id.0.as_str() {
         "codex" => build_codex_args(&prompt_request),
         "gemini" => build_gemini_args(&prompt_request),
+        "opencode" => build_opencode_args(&prompt_request),
         other => anyhow::bail!("provider smoke is not implemented for {other}"),
     };
     let fixture = match provider_id.0.as_str() {
@@ -382,6 +390,9 @@ pub fn smoke_provider(
         }
         "gemini" => {
             r#"{"type":"message","conversationId":"smoke_gemini_session","message":{"content":[{"text":"baize-smoke"}]}}"#
+        }
+        "opencode" => {
+            r#"{"type":"message","sessionID":"smoke_opencode_session","message":{"content":[{"text":"baize-smoke"}]}}"#
         }
         _ => unreachable!("provider checked above"),
     };
@@ -442,6 +453,25 @@ pub fn build_codex_args(request: &AgentPromptRequest) -> Vec<String> {
     if let Some(session_id) = &request.session_id {
         args.push("resume".to_string());
         args.push(session_id.clone());
+    }
+    args.push(request.prompt.clone());
+    args
+}
+
+pub fn build_opencode_args(request: &AgentPromptRequest) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+        "--dir".to_string(),
+        request.cwd.to_string_lossy().to_string(),
+    ];
+    if let Some(session_id) = &request.session_id {
+        args.push("--session".to_string());
+        args.push(session_id.clone());
+    }
+    if matches!(request.execution_policy, AgentExecutionPolicy::AllowProject) {
+        args.push("--dangerously-skip-permissions".to_string());
     }
     args.push(request.prompt.clone());
     args
@@ -543,6 +573,21 @@ fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
     Ok(agent_result_from_command_run(
         request.provider_id,
         "codex",
+        run,
+    ))
+}
+
+fn run_opencode_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
+    let run = run_command_with_timeout(
+        "opencode",
+        &build_opencode_args(&request),
+        &request.cwd,
+        timeout_for(&request),
+    )
+    .with_context(|| "failed to run opencode prompt")?;
+    Ok(agent_result_from_command_run(
+        request.provider_id,
+        "opencode",
         run,
     ))
 }
@@ -699,9 +744,11 @@ fn detect_capabilities(
             ..DetectedCapabilities::default()
         },
         ProviderKind::OpenCode => DetectedCapabilities {
-            acp: true,
-            non_interactive_prompt: true,
-            session_resume: true,
+            non_interactive_prompt: help.contains("opencode run")
+                || exec_help.contains("run opencode"),
+            structured_output: exec_help.contains("--format") && exec_help.contains("json"),
+            acp: help.contains("opencode acp") || help.contains("start ACP"),
+            session_resume: exec_help.contains("--session"),
             ..DetectedCapabilities::default()
         },
         ProviderKind::Other(_) => DetectedCapabilities::default(),
@@ -788,6 +835,7 @@ fn find_session_id(value: &Value) -> Option<String> {
                 "sessionId",
                 "conversation_id",
                 "conversationId",
+                "sessionID",
                 "thread_id",
                 "threadId",
             ] {
@@ -903,7 +951,7 @@ fn diagnostic_from_validation(
 }
 
 fn prompt_runtime_supported(provider_id: &ProviderId) -> bool {
-    matches!(provider_id.0.as_str(), "codex" | "gemini")
+    matches!(provider_id.0.as_str(), "codex" | "gemini" | "opencode")
 }
 
 fn primary_command(profile: &ProviderProfile) -> Option<&str> {
@@ -1077,6 +1125,23 @@ mod tests {
     }
 
     #[test]
+    fn opencode_help_detection_finds_run_json_and_resume() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "opencode")
+            .expect("opencode profile");
+        let help = "Commands:\n  opencode acp\n  opencode run [message..]\n";
+        let run_help = "run opencode with a message\n      --format default json\n      --session session id to continue\n";
+
+        let detected = detect_capabilities(&profile, Some(help), Some(run_help), None);
+
+        assert!(detected.non_interactive_prompt);
+        assert!(detected.structured_output);
+        assert!(detected.acp);
+        assert!(detected.session_resume);
+    }
+
+    #[test]
     fn clean_version_ignores_warning_lines() {
         let version = clean_version(
             "codex-cli 0.133.0\nWARNING: proceeding, even though PATH failed\n".to_string(),
@@ -1124,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_reports_unsupported_runtime_for_acp_only_provider() {
+    fn diagnostic_reports_ready_for_opencode_prompt_runtime() {
         let profile = default_provider_profiles()
             .into_iter()
             .find(|profile| profile.id.0 == "opencode")
@@ -1141,6 +1206,9 @@ mod tests {
             version: Some("opencode 1.0.0".to_string()),
             detected: DetectedCapabilities {
                 acp: true,
+                non_interactive_prompt: true,
+                structured_output: true,
+                session_resume: true,
                 ..DetectedCapabilities::default()
             },
             acp_proof: build_acp_proof(&profile),
@@ -1149,12 +1217,12 @@ mod tests {
 
         let diagnostic = diagnostic_from_validation(&profile, validation);
 
-        assert_eq!(diagnostic.readiness, ProviderReadiness::UnsupportedRuntime);
-        assert!(!diagnostic.prompt_runtime_supported);
+        assert_eq!(diagnostic.readiness, ProviderReadiness::Ready);
+        assert!(diagnostic.prompt_runtime_supported);
         assert!(diagnostic
             .suggested_actions
             .iter()
-            .any(|action| action.contains("ACP proof-of-life")));
+            .any(|action| action.contains("baize smoke opencode --run-prompt")));
     }
 
     #[test]
@@ -1202,7 +1270,7 @@ mod tests {
         assert!(is_prompt_runtime_supported(&ProviderId(
             "gemini".to_string()
         )));
-        assert!(!is_prompt_runtime_supported(&ProviderId(
+        assert!(is_prompt_runtime_supported(&ProviderId(
             "opencode".to_string()
         )));
         assert!(!is_prompt_runtime_supported(&ProviderId(
@@ -1349,6 +1417,47 @@ mod tests {
     }
 
     #[test]
+    fn builds_opencode_json_command_with_safe_default_permissions() {
+        let request = AgentPromptRequest {
+            provider_id: ProviderId("opencode".to_string()),
+            prompt: "hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: Some("session-1".to_string()),
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Ask,
+        };
+
+        let args = build_opencode_args(&request);
+
+        assert_eq!(args[0], "run");
+        assert!(args.windows(2).any(|pair| pair == ["--format", "json"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--dir", "/tmp/project"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session", "session-1"]));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert_eq!(args.last().expect("prompt"), "hello");
+    }
+
+    #[test]
+    fn opencode_allow_project_policy_can_skip_permissions() {
+        let request = AgentPromptRequest {
+            provider_id: ProviderId("opencode".to_string()),
+            prompt: "hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: None,
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::AllowProject,
+        };
+
+        let args = build_opencode_args(&request);
+
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
     fn codex_smoke_skips_real_prompt_by_default() {
         let profile = default_provider_profiles()
             .into_iter()
@@ -1407,13 +1516,13 @@ mod tests {
     }
 
     #[test]
-    fn smoke_rejects_provider_without_prompt_adapter() {
+    fn opencode_smoke_builds_json_command_without_prompt_run() {
         let profile = default_provider_profiles()
             .into_iter()
             .find(|profile| profile.id.0 == "opencode")
             .expect("opencode profile");
 
-        let error = smoke_provider(
+        let report = smoke_provider(
             &profile,
             ProviderSmokeOptions {
                 cwd: PathBuf::from("."),
@@ -1422,11 +1531,18 @@ mod tests {
                 timeout_seconds: Some(5),
             },
         )
-        .expect_err("unsupported smoke");
+        .expect("smoke report");
 
-        assert!(error
-            .to_string()
-            .contains("provider smoke is not implemented for opencode"));
+        assert!(report.prompt_skipped);
+        assert!(report
+            .prompt_command_args
+            .windows(2)
+            .any(|pair| pair == ["--format", "json"]));
+        assert_eq!(
+            report.parser_native_session_id.as_deref(),
+            Some("smoke_opencode_session")
+        );
+        assert_eq!(report.parser_event_count, 1);
     }
 
     #[test]

@@ -2863,12 +2863,12 @@ mod tests {
     fn begin_prompt_submission_blocks_unsupported_runtime_provider() {
         let mut state = TuiState {
             input: "summarize project".to_string(),
-            selected_provider_index: 3,
+            selected_provider_index: 2,
             provider_diagnostics: vec![ProviderDiagnosticView {
-                provider_id: "opencode".to_string(),
+                provider_id: "copilot".to_string(),
                 readiness: "UnsupportedRuntime".to_string(),
                 health: ProviderHealthView {
-                    provider_id: "opencode".to_string(),
+                    provider_id: "copilot".to_string(),
                     status: "Healthy".to_string(),
                     last_error: None,
                 },
@@ -2878,7 +2878,7 @@ mod tests {
                 suggested_actions: Vec::new(),
             }],
             provider_health: vec![ProviderHealthView {
-                provider_id: "opencode".to_string(),
+                provider_id: "copilot".to_string(),
                 status: "Healthy".to_string(),
                 last_error: None,
             }],
@@ -2891,7 +2891,7 @@ mod tests {
         assert_eq!(state.input, "summarize project");
         assert!(state
             .transcript_text()
-            .contains("provider opencode is not ready: Baize prompt runtime"));
+            .contains("provider copilot is not ready: Baize prompt runtime"));
     }
 
     #[test]
@@ -4003,10 +4003,10 @@ mod tests {
                 suggested_actions: Vec::new(),
             },
             ProviderDiagnosticView {
-                provider_id: "opencode".to_string(),
+                provider_id: "copilot".to_string(),
                 readiness: "UnsupportedRuntime".to_string(),
                 health: ProviderHealthView {
-                    provider_id: "opencode".to_string(),
+                    provider_id: "copilot".to_string(),
                     status: "Healthy".to_string(),
                     last_error: None,
                 },
@@ -4059,10 +4059,10 @@ mod tests {
     fn append_provider_diagnostic_issues_shows_suggestions() {
         let mut state = TuiState {
             provider_diagnostics: vec![ProviderDiagnosticView {
-                provider_id: "opencode".to_string(),
+                provider_id: "copilot".to_string(),
                 readiness: "UnsupportedRuntime".to_string(),
                 health: ProviderHealthView {
-                    provider_id: "opencode".to_string(),
+                    provider_id: "copilot".to_string(),
                     status: "Healthy".to_string(),
                     last_error: None,
                 },
@@ -4080,7 +4080,7 @@ mod tests {
 
         let transcript = state.transcript_text();
         assert!(transcript.contains("provider diagnostics:"));
-        assert!(transcript.contains("opencode: Baize prompt runtime"));
+        assert!(transcript.contains("copilot: Baize prompt runtime"));
         assert!(transcript.contains("next: use the ACP proof-of-life"));
     }
 
@@ -4099,10 +4099,10 @@ mod tests {
                 suggested_actions: Vec::new(),
             },
             ProviderDiagnosticView {
-                provider_id: "opencode".to_string(),
+                provider_id: "copilot".to_string(),
                 readiness: "UnsupportedRuntime".to_string(),
                 health: ProviderHealthView {
-                    provider_id: "opencode".to_string(),
+                    provider_id: "copilot".to_string(),
                     status: "Healthy".to_string(),
                     last_error: None,
                 },
@@ -4113,7 +4113,7 @@ mod tests {
 
         assert_eq!(
             summarize_provider_diagnostics(&diagnostics),
-            "codex:ready, opencode:unsupported"
+            "codex:ready, copilot:unsupported"
         );
     }
 
