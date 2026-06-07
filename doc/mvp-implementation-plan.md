@@ -133,6 +133,7 @@ The MVP target is a single-workspace local agent supervisor:
 - Session status transitions: `Running` stays on prompt success, transitions to `Failed` on prompt failure or executor error, recovers from `Failed` on next successful prompt.
 - Canceled sessions reject new prompt requests.
 - Late provider results are ignored when a session was canceled before completion.
+- Unsupported prompt provider overrides are rejected before mutating session route state.
 - `session.status.changed` event emission on status transitions.
 - Startup recovery marks in-flight `Running` sessions as `Failed` and emits `session.recovered`.
 - Session diff API includes changed files and tracked-file diff hunks.
@@ -276,6 +277,7 @@ Implemented test coverage includes:
 - daemon startup recovery for in-flight sessions;
 - daemon canceled session prompt rejection;
 - daemon ignored-result guard for prompts that complete after session cancellation;
+- daemon guard that prevents unsupported prompt provider overrides from changing session state;
 - TUI dashboard rendering;
 - TUI prompt input rendering;
 - TUI provider, route, permission and handoff status formatting;

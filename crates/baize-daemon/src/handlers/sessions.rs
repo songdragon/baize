@@ -638,6 +638,12 @@ fn apply_prompt_provider_target(
     if requested_provider == current_provider {
         return Ok(current_provider);
     }
+    if !baize_adapters::is_prompt_runtime_supported(&requested_provider) {
+        return Err(crate::helpers::bad_request(&format!(
+            "provider {} does not support Baize prompt execution yet",
+            requested_provider.0
+        )));
+    }
 
     let now = Utc::now();
     let task_type = infer_task_type(&request.prompt);

@@ -1761,7 +1761,7 @@ async fn prompt_rejects_provider_without_runtime_support() {
     let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
 
     let (status, prompt) = json_response_with_status(
-        app,
+        app.clone(),
         Request::builder()
             .method(Method::POST)
             .uri(format!("/sessions/{session_id}/prompt"))
@@ -1782,6 +1782,30 @@ async fn prompt_rejects_provider_without_runtime_support() {
         prompt["error"],
         "provider opencode does not support Baize prompt execution yet"
     );
+
+    let session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(session["session"]["active_provider_id"], "codex");
+
+    let routes = json_response(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}/routes"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let route_items = routes["routes"].as_array().expect("routes");
+    assert_eq!(route_items.len(), 1);
+    assert_eq!(route_items[0]["selected_provider_id"], "codex");
 }
 
 #[tokio::test]
