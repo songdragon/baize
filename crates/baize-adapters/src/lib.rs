@@ -21,6 +21,28 @@ pub struct ProviderValidation {
     pub capability_gaps: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderReadiness {
+    Ready,
+    SetupRequired,
+    UnsupportedRuntime,
+    CapabilityMismatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderDiagnostic {
+    pub provider_id: ProviderId,
+    pub display_name: String,
+    pub readiness: ProviderReadiness,
+    pub health: ProviderHealth,
+    pub version: Option<String>,
+    pub prompt_runtime_supported: bool,
+    pub detected: DetectedCapabilities,
+    pub acp_proof: Option<AcpProof>,
+    pub issues: Vec<String>,
+    pub suggested_actions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DetectedCapabilities {
     pub non_interactive_prompt: bool,
@@ -283,6 +305,18 @@ pub fn validate_all_providers() -> Vec<ProviderValidation> {
     default_provider_profiles()
         .iter()
         .map(validate_provider)
+        .collect()
+}
+
+pub fn diagnose_provider(profile: &ProviderProfile) -> ProviderDiagnostic {
+    let validation = validate_provider(profile);
+    diagnostic_from_validation(profile, validation)
+}
+
+pub fn diagnose_all_providers() -> Vec<ProviderDiagnostic> {
+    default_provider_profiles()
+        .iter()
+        .map(diagnose_provider)
         .collect()
 }
 
@@ -721,6 +755,90 @@ fn capability_gaps(
     gaps
 }
 
+fn diagnostic_from_validation(
+    profile: &ProviderProfile,
+    validation: ProviderValidation,
+) -> ProviderDiagnostic {
+    let prompt_runtime_supported = prompt_runtime_supported(&profile.id);
+    let mut issues = Vec::new();
+    let mut suggested_actions = Vec::new();
+
+    if matches!(&validation.health.status, HealthStatus::Unavailable) {
+        let error = validation
+            .health
+            .last_error
+            .as_deref()
+            .filter(|error| !error.trim().is_empty())
+            .unwrap_or("provider command is unavailable");
+        issues.push(format!("provider executable is not ready: {error}"));
+        suggested_actions.push(format!(
+            "install `{}` or add it to PATH, then run `baize validate {}`",
+            primary_command(profile).unwrap_or(profile.id.0.as_str()),
+            profile.id.0
+        ));
+    }
+
+    let command_unavailable = matches!(&validation.health.status, HealthStatus::Unavailable);
+    if !command_unavailable && !validation.capability_gaps.is_empty() {
+        issues.push(format!(
+            "missing expected capabilities: {}",
+            validation.capability_gaps.join(", ")
+        ));
+        suggested_actions.push(format!(
+            "upgrade or reconfigure `{}` until `baize validate {}` reports no capability gaps",
+            profile.display_name, profile.id.0
+        ));
+    }
+
+    if !prompt_runtime_supported {
+        issues.push("Baize prompt runtime is not implemented for this provider yet".to_string());
+        if validation.acp_proof.is_some() {
+            suggested_actions.push(
+                "use the ACP proof-of-life data to continue adapter implementation".to_string(),
+            );
+        } else {
+            suggested_actions
+                .push("add an adapter runtime before routing prompts to this provider".to_string());
+        }
+    } else if !command_unavailable && validation.capability_gaps.is_empty() {
+        suggested_actions.push(format!(
+            "optional: run `baize smoke {} --run-prompt --timeout-seconds 30` to verify login and spend quota intentionally",
+            profile.id.0
+        ));
+    }
+
+    let readiness = if command_unavailable {
+        ProviderReadiness::SetupRequired
+    } else if !prompt_runtime_supported {
+        ProviderReadiness::UnsupportedRuntime
+    } else if !validation.capability_gaps.is_empty() {
+        ProviderReadiness::CapabilityMismatch
+    } else {
+        ProviderReadiness::Ready
+    };
+
+    ProviderDiagnostic {
+        provider_id: validation.provider_id,
+        display_name: profile.display_name.clone(),
+        readiness,
+        health: validation.health,
+        version: validation.version,
+        prompt_runtime_supported,
+        detected: validation.detected,
+        acp_proof: validation.acp_proof,
+        issues,
+        suggested_actions,
+    }
+}
+
+fn prompt_runtime_supported(provider_id: &ProviderId) -> bool {
+    matches!(provider_id.0.as_str(), "codex" | "gemini")
+}
+
+fn primary_command(profile: &ProviderProfile) -> Option<&str> {
+    profile.transports.first().map(command_for_transport)
+}
+
 fn command_text(command: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(command).args(args).output().ok()?;
     let mut text = String::new();
@@ -894,6 +1012,115 @@ mod tests {
         );
 
         assert_eq!(version, "codex-cli 0.133.0");
+    }
+
+    #[test]
+    fn diagnostic_reports_setup_required_for_unavailable_provider() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "codex")
+            .expect("codex profile");
+        let validation = ProviderValidation {
+            provider_id: profile.id.clone(),
+            health: ProviderHealth {
+                provider_id: profile.id.clone(),
+                status: HealthStatus::Unavailable,
+                latency_ms: None,
+                last_error: Some("No such file or directory".to_string()),
+                checked_at: Utc::now(),
+            },
+            version: None,
+            detected: DetectedCapabilities::default(),
+            acp_proof: None,
+            capability_gaps: vec!["structured_output".to_string()],
+        };
+
+        let diagnostic = diagnostic_from_validation(&profile, validation);
+
+        assert_eq!(diagnostic.readiness, ProviderReadiness::SetupRequired);
+        assert!(diagnostic
+            .issues
+            .iter()
+            .any(|issue| issue.contains("provider executable is not ready")));
+        assert!(diagnostic
+            .suggested_actions
+            .iter()
+            .any(|action| action.contains("install `codex`")));
+        assert!(!diagnostic
+            .issues
+            .iter()
+            .any(|issue| issue.contains("missing expected capabilities")));
+    }
+
+    #[test]
+    fn diagnostic_reports_unsupported_runtime_for_acp_only_provider() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "opencode")
+            .expect("opencode profile");
+        let validation = ProviderValidation {
+            provider_id: profile.id.clone(),
+            health: ProviderHealth {
+                provider_id: profile.id.clone(),
+                status: HealthStatus::Healthy,
+                latency_ms: Some(10),
+                last_error: None,
+                checked_at: Utc::now(),
+            },
+            version: Some("opencode 1.0.0".to_string()),
+            detected: DetectedCapabilities {
+                acp: true,
+                ..DetectedCapabilities::default()
+            },
+            acp_proof: build_acp_proof(&profile),
+            capability_gaps: Vec::new(),
+        };
+
+        let diagnostic = diagnostic_from_validation(&profile, validation);
+
+        assert_eq!(diagnostic.readiness, ProviderReadiness::UnsupportedRuntime);
+        assert!(!diagnostic.prompt_runtime_supported);
+        assert!(diagnostic
+            .suggested_actions
+            .iter()
+            .any(|action| action.contains("ACP proof-of-life")));
+    }
+
+    #[test]
+    fn diagnostic_reports_ready_for_supported_healthy_provider() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "gemini")
+            .expect("gemini profile");
+        let validation = ProviderValidation {
+            provider_id: profile.id.clone(),
+            health: ProviderHealth {
+                provider_id: profile.id.clone(),
+                status: HealthStatus::Healthy,
+                latency_ms: Some(10),
+                last_error: None,
+                checked_at: Utc::now(),
+            },
+            version: Some("gemini 1.0.0".to_string()),
+            detected: DetectedCapabilities {
+                non_interactive_prompt: true,
+                structured_output: true,
+                acp: true,
+                session_resume: true,
+                ..DetectedCapabilities::default()
+            },
+            acp_proof: build_acp_proof(&profile),
+            capability_gaps: Vec::new(),
+        };
+
+        let diagnostic = diagnostic_from_validation(&profile, validation);
+
+        assert_eq!(diagnostic.readiness, ProviderReadiness::Ready);
+        assert!(diagnostic.issues.is_empty());
+        assert!(diagnostic
+            .suggested_actions
+            .iter()
+            .any(|action| action.contains("baize smoke gemini --run-prompt")));
     }
 
     #[test]

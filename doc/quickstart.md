@@ -32,6 +32,7 @@ Baize currently wires prompt execution through:
 Install and authenticate those CLIs with their own login/setup flows before sending real prompts through Baize. The MVP validation commands do not spend model quota by themselves:
 
 ```sh
+cargo run -p baize-cli -- doctor
 cargo run -p baize-cli -- providers
 cargo run -p baize-cli -- validate
 cargo run -p baize-cli -- validate codex
@@ -40,7 +41,7 @@ cargo run -p baize-cli -- smoke codex
 cargo run -p baize-cli -- smoke gemini
 ```
 
-If a provider is not authenticated, Baize will report provider stderr and a structured provider error where possible.
+`doctor` reports each provider's readiness, setup issues and suggested next actions. If a provider is not authenticated, Baize will report provider stderr and a structured provider error where possible.
 
 The smoke commands check provider discovery, command construction and structured-output parser behavior without sending a real prompt. To explicitly run a real provider prompt, add `--run-prompt`:
 

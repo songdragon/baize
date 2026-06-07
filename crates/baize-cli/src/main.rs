@@ -101,14 +101,10 @@ fn status_output(path: String) -> Result<String> {
 }
 
 fn doctor_output() -> Result<String> {
-    let providers = baize_adapters::default_provider_profiles();
-    let health = providers
-        .iter()
-        .map(baize_adapters::check_provider)
-        .collect::<Vec<_>>();
+    let diagnostics = baize_adapters::diagnose_all_providers();
     Ok(format!(
         "{}\n",
-        serde_json::to_string_pretty(&json!({ "providers": health }))?
+        serde_json::to_string_pretty(&json!({ "providers": diagnostics }))?
     ))
 }
 
@@ -219,6 +215,18 @@ mod tests {
 
         assert_eq!(providers[0]["id"], "codex");
         assert_eq!(providers[1]["id"], "gemini");
+    }
+
+    #[test]
+    fn doctor_output_includes_provider_diagnostics() {
+        let output = doctor_output().expect("doctor");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("json");
+        let provider = &value["providers"][0];
+
+        assert_eq!(provider["provider_id"], "codex");
+        assert!(provider.get("readiness").is_some());
+        assert!(provider.get("issues").is_some());
+        assert!(provider.get("suggested_actions").is_some());
     }
 
     #[test]
