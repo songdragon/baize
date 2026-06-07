@@ -78,10 +78,10 @@ impl Default for TuiState {
         Self {
             workspace: "Baize MVP TUI".to_string(),
             transcript: vec![
-                "Type a prompt and press Enter.".to_string(),
-                "Esc or Ctrl-C quits.".to_string(),
+                "Baize is ready.".to_string(),
+                "Ask for a code change, investigation, test run, or handoff.".to_string(),
                 String::new(),
-                "Baize starts the local daemon automatically when possible.".to_string(),
+                "The local daemon is started automatically when possible.".to_string(),
             ],
             scroll_offset: 0,
             daemon_status: "daemon: not checked".to_string(),
@@ -253,7 +253,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(4),
         ])
@@ -273,44 +273,40 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let workspace = one_line(&state.workspace);
+    let status_label = state.activity_status.as_str();
     let title = Line::from(vec![
         Span::styled(
             " BAIZE ",
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            " Workspace Fabric",
-            Style::default()
                 .fg(Color::White)
+                .bg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" Workspace Fabric", Style::default().fg(Color::White)),
         Span::raw("  "),
         Span::styled(
-            state.activity_status.as_str(),
-            Style::default().fg(activity_color(&state.activity_status)),
+            format!(" {status_label} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(activity_color(&state.activity_status)),
         ),
     ]);
     let subtitle = Line::from(vec![
-        Span::styled("workspace ", Style::default().fg(Color::DarkGray)),
+        Span::styled("workspace ", muted_style()),
         Span::raw(short_text(&workspace, 34)),
         Span::raw("   "),
-        Span::styled("daemon ", Style::default().fg(Color::DarkGray)),
+        Span::styled("daemon ", muted_style()),
         Span::raw(state.daemon_status.trim_start_matches("daemon: ")),
     ]);
+    let rule = Line::from(Span::styled("─".repeat(area.width as usize), muted_style()));
 
     frame.render_widget(
-        Paragraph::new(Text::from(vec![title, subtitle]))
-            .block(panel_block("Baize"))
-            .alignment(Alignment::Left),
+        Paragraph::new(Text::from(vec![title, subtitle, rule])).alignment(Alignment::Left),
         area,
     );
 }
 
 fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let session_text = state.transcript_text();
     let line_count = state.transcript.len() as u16;
     let visible_height = area.height.saturating_sub(2);
     let is_scrolled = state.scroll_offset > 0;
@@ -332,32 +328,18 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         "Agent Stream".to_string()
     };
     frame.render_widget(
-        Paragraph::new(session_text)
+        Paragraph::new(transcript_text(state))
             .scroll((effective_scroll, 0))
             .wrap(Wrap { trim: false })
-            .block(panel_block(title)),
+            .block(side_panel_block(title)),
         area,
     );
 }
 
 fn render_control_plane(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let text = Text::from(vec![
-        section_line("Provider Mesh"),
-        key_value_line("selected", state.selected_provider()),
-        key_value_line("active", state.active_provider.as_deref().unwrap_or("none")),
-        key_value_line("health", &state.provider_status()),
-        section_line("Session + Route"),
-        key_value_line("current", &state.session_status()),
-        key_value_line("route", &state.route_status()),
-        key_value_line(
-            "queue",
-            &format!("{} | {}", state.permission_status(), state.handoff_status()),
-        ),
-    ]);
-
     frame.render_widget(
-        Paragraph::new(text)
-            .block(panel_block("Control Plane"))
+        Paragraph::new(control_plane_text(state))
+            .block(side_panel_block("Control Plane"))
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -365,11 +347,12 @@ fn render_control_plane(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
 
 fn render_prompt(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let prompt = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::styled("baize ", muted_style()),
+        Span::styled("› ", accent_style()),
         Span::raw(state.input.as_str()),
     ]);
     let help = Line::from(vec![
-        Span::styled("keys ", Style::default().fg(Color::DarkGray)),
+        Span::styled("keys ", muted_style()),
         Span::raw(state.help_text()),
     ]);
 
@@ -390,19 +373,117 @@ fn panel_block(title: impl Into<String>) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
+fn side_panel_block(title: impl Into<String>) -> Block<'static> {
+    Block::default()
+        .title(title.into())
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .padding(Padding::horizontal(1))
+}
+
+fn transcript_text(state: &TuiState) -> Text<'static> {
+    let lines = state
+        .transcript
+        .iter()
+        .map(|line| transcript_line(line))
+        .collect::<Vec<_>>();
+    Text::from(lines)
+}
+
+fn transcript_line(line: &str) -> Line<'static> {
+    if line.trim().is_empty() {
+        return Line::raw("");
+    }
+    if let Some(prompt) = line.strip_prefix("> ") {
+        return Line::from(vec![
+            Span::styled("you ", muted_style()),
+            Span::styled("› ", accent_style()),
+            Span::raw(prompt.to_string()),
+        ]);
+    }
+
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error") || lower.contains("failed") {
+        Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::Red),
+        ))
+    } else if line.ends_with(':') {
+        Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else if line.starts_with("  ") {
+        Line::from(vec![
+            Span::styled("  │ ", muted_style()),
+            Span::raw(line.trim().to_string()),
+        ])
+    } else {
+        Line::from(Span::raw(line.to_string()))
+    }
+}
+
+fn control_plane_text(state: &TuiState) -> Text<'static> {
+    let mut lines = Vec::new();
+    lines.push(section_line("providers"));
+    lines.extend(provider_lines(state));
+    lines.push(Line::raw(""));
+    lines.push(section_line("session"));
+    lines.push(key_value_line("current", &state.session_status()));
+    lines.push(key_value_line("route", &state.route_status()));
+    lines.push(Line::raw(""));
+    lines.push(section_line("queue"));
+    lines.push(key_value_line("perm", &state.permission_status()));
+    lines.push(key_value_line("handoff", &state.handoff_status()));
+    Text::from(lines)
+}
+
+fn provider_lines(state: &TuiState) -> Vec<Line<'static>> {
+    state
+        .providers
+        .iter()
+        .map(|provider| {
+            let selected = provider == state.selected_provider();
+            let active = state.active_provider.as_deref() == Some(provider.as_str());
+            let health = health_status_for(&state.provider_health, provider)
+                .map(short_health_status)
+                .unwrap_or("?");
+            let marker = if selected { "›" } else { " " };
+            let active_label = if active { " active" } else { "" };
+            Line::from(vec![
+                Span::styled(format!("{marker} "), accent_style()),
+                Span::styled(
+                    format!("{:<9}", short_text(provider, 9)),
+                    if selected {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::styled(format!(" {health:<4}"), health_style(health)),
+                Span::styled(active_label, muted_style()),
+            ])
+        })
+        .collect()
+}
+
 fn section_line(label: &'static str) -> Line<'static> {
     Line::from(Span::styled(
-        label,
+        label.to_ascii_uppercase(),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(Color::Blue)
             .add_modifier(Modifier::BOLD),
     ))
 }
 
 fn key_value_line(key: &'static str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{key:<11}"), Style::default().fg(Color::DarkGray)),
-        Span::raw(short_text(value, 44)),
+        Span::styled(format!("{key:<8}"), muted_style()),
+        Span::raw(short_text(value, 32)),
     ])
 }
 
@@ -413,6 +494,25 @@ fn activity_color(status: &str) -> Color {
         Color::Red
     } else {
         Color::Yellow
+    }
+}
+
+fn accent_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn muted_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+fn health_style(health: &str) -> Style {
+    match health {
+        "ok" => Style::default().fg(Color::Green),
+        "warn" => Style::default().fg(Color::Yellow),
+        "down" => Style::default().fg(Color::Red),
+        _ => muted_style(),
     }
 }
 
@@ -1377,6 +1477,7 @@ impl TuiState {
         }
     }
 
+    #[cfg(test)]
     fn provider_status(&self) -> String {
         let selected = self.selected_provider();
         self.providers
@@ -1499,6 +1600,7 @@ impl TuiState {
         self.scroll_offset = self.transcript.len().saturating_sub(1) as u16;
     }
 
+    #[cfg(test)]
     fn transcript_text(&self) -> String {
         self.transcript.join("\n")
     }
@@ -1711,9 +1813,10 @@ mod tests {
         assert!(rendered.contains("not checked"));
         assert!(rendered.contains("Agent Stream"));
         assert!(rendered.contains("Control Plane"));
-        assert!(rendered.contains("Provider Mesh"));
+        assert!(rendered.contains("PROVIDERS"));
         assert!(rendered.contains("selected"));
         assert!(rendered.contains("codex"));
+        assert!(rendered.contains("opencode"));
         assert!(rendered.contains("Prompt"));
         assert!(rendered.contains("keys"));
         assert!(rendered.contains("Ent|Tab|Up/Dn|^N new|^L load|^H hand"));
@@ -1768,7 +1871,49 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = format!("{buffer:?}");
 
-        assert!(rendered.contains("> hello baize"));
+        assert!(rendered.contains("baize"));
+        assert!(rendered.contains("hello baize"));
+    }
+
+    #[test]
+    fn renders_provider_mesh_as_individual_rows() {
+        let backend = TestBackend::new(100, 22);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = TuiState {
+            provider_health: vec![
+                ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "gemini".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "copilot".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "opencode".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: None,
+                },
+            ],
+            ..TuiState::default()
+        };
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("codex"));
+        assert!(rendered.contains("gemini"));
+        assert!(rendered.contains("copilot"));
+        assert!(rendered.contains("opencode"));
+        assert!(!rendered.contains("ope..."));
     }
 
     #[test]
