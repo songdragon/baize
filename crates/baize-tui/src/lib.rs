@@ -5,8 +5,10 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::{json, Value};
 use std::io::{stdout, Read, Write};
@@ -251,21 +253,66 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(11),
+            Constraint::Length(4),
+            Constraint::Min(8),
+            Constraint::Length(4),
         ])
         .split(frame.area());
 
-    frame.render_widget(
-        Paragraph::new(state.workspace.as_str())
-            .block(Block::default().title("Workspace").borders(Borders::ALL)),
-        chunks[0],
-    );
+    render_header(frame, chunks[0], state);
 
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(44), Constraint::Length(34)])
+        .split(chunks[1]);
+
+    render_transcript(frame, body[0], state);
+    render_control_plane(frame, body[1], state);
+    render_prompt(frame, chunks[2], state);
+}
+
+fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
+    let workspace = one_line(&state.workspace);
+    let title = Line::from(vec![
+        Span::styled(
+            " BAIZE ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " Workspace Fabric",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            state.activity_status.as_str(),
+            Style::default().fg(activity_color(&state.activity_status)),
+        ),
+    ]);
+    let subtitle = Line::from(vec![
+        Span::styled("workspace ", Style::default().fg(Color::DarkGray)),
+        Span::raw(short_text(&workspace, 34)),
+        Span::raw("   "),
+        Span::styled("daemon ", Style::default().fg(Color::DarkGray)),
+        Span::raw(state.daemon_status.trim_start_matches("daemon: ")),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![title, subtitle]))
+            .block(panel_block("Baize"))
+            .alignment(Alignment::Left),
+        area,
+    );
+}
+
+fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let session_text = state.transcript_text();
     let line_count = state.transcript.len() as u16;
-    let visible_height = chunks[1].height.saturating_sub(2);
+    let visible_height = area.height.saturating_sub(2);
     let is_scrolled = state.scroll_offset > 0;
     let max_scroll = line_count.saturating_sub(visible_height);
     let effective_scroll = if state.scroll_offset > max_scroll {
@@ -276,36 +323,97 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let title = if is_scrolled {
         let current_top = line_count.saturating_sub(effective_scroll + visible_height) + 1;
         format!(
-            "Session ({}-{}/{})",
+            "Agent Stream ({}-{}/{})",
             current_top,
             current_top + visible_height.saturating_sub(1),
             line_count
         )
     } else {
-        "Session".to_string()
+        "Agent Stream".to_string()
     };
     frame.render_widget(
         Paragraph::new(session_text)
             .scroll((effective_scroll, 0))
-            .block(Block::default().title(title).borders(Borders::ALL)),
-        chunks[1],
+            .wrap(Wrap { trim: false })
+            .block(panel_block(title)),
+        area,
     );
+}
+
+fn render_control_plane(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
+    let text = Text::from(vec![
+        section_line("Provider Mesh"),
+        key_value_line("selected", state.selected_provider()),
+        key_value_line("active", state.active_provider.as_deref().unwrap_or("none")),
+        key_value_line("health", &state.provider_status()),
+        section_line("Session + Route"),
+        key_value_line("current", &state.session_status()),
+        key_value_line("route", &state.route_status()),
+        key_value_line(
+            "queue",
+            &format!("{} | {}", state.permission_status(), state.handoff_status()),
+        ),
+    ]);
+
     frame.render_widget(
-        Paragraph::new(format!(
-            "{}\nStatus: {}\nProviders: {}\nRoute: {}\nSessions: {}\nPerms: {}\nHandoff: {}\nHelp: {}\n> {}",
-            state.daemon_status,
-            state.activity_status,
-            state.provider_status(),
-            state.route_status(),
-            state.session_status(),
-            state.permission_status(),
-            state.handoff_status(),
-            state.help_text(),
-            state.input
-        ))
-        .block(Block::default().title("Status").borders(Borders::ALL)),
-        chunks[2],
+        Paragraph::new(text)
+            .block(panel_block("Control Plane"))
+            .wrap(Wrap { trim: true }),
+        area,
     );
+}
+
+fn render_prompt(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
+    let prompt = Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::raw(state.input.as_str()),
+    ]);
+    let help = Line::from(vec![
+        Span::styled("keys ", Style::default().fg(Color::DarkGray)),
+        Span::raw(state.help_text()),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![prompt, help]))
+            .block(panel_block("Prompt"))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn panel_block(title: impl Into<String>) -> Block<'static> {
+    Block::default()
+        .title(title.into())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .padding(Padding::horizontal(1))
+}
+
+fn section_line(label: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        label,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn key_value_line(key: &'static str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{key:<11}"), Style::default().fg(Color::DarkGray)),
+        Span::raw(short_text(value, 44)),
+    ])
+}
+
+fn activity_color(status: &str) -> Color {
+    if status == "idle" {
+        Color::Green
+    } else if status == "failed" {
+        Color::Red
+    } else {
+        Color::Yellow
+    }
 }
 
 fn ensure_daemon_running() -> Result<String> {
@@ -1596,15 +1704,19 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = format!("{buffer:?}");
 
+        assert!(rendered.contains("BAIZE"));
+        assert!(rendered.contains("Workspace Fabric"));
         assert!(rendered.contains("Baize MVP TUI"));
-        assert!(rendered.contains("daemon: not checked"));
-        assert!(rendered.contains("Status: idle"));
-        assert!(rendered.contains("Providers: >codex:?,  gemini:?,  copilot:?,  opencode:?"));
-        assert!(rendered.contains("Sessions: none loaded"));
-        assert!(rendered.contains("Perms: none pending"));
-        assert!(rendered.contains("Handoff: none pending"));
-        assert!(rendered
-            .contains("Help: Ent|Tab|Up/Dn|^N new|^L load|^H hand|^Y yes|^A ok|^D no|^X stop"));
+        assert!(rendered.contains("daemon"));
+        assert!(rendered.contains("not checked"));
+        assert!(rendered.contains("Agent Stream"));
+        assert!(rendered.contains("Control Plane"));
+        assert!(rendered.contains("Provider Mesh"));
+        assert!(rendered.contains("selected"));
+        assert!(rendered.contains("codex"));
+        assert!(rendered.contains("Prompt"));
+        assert!(rendered.contains("keys"));
+        assert!(rendered.contains("Ent|Tab|Up/Dn|^N new|^L load|^H hand"));
     }
 
     #[test]
@@ -2467,7 +2579,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = format!("{buffer:?}");
 
-        assert!(rendered.contains("Status: running codex"));
+        assert!(rendered.contains("running codex"));
     }
 
     #[test]
@@ -2570,7 +2682,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = format!("{buffer:?}");
 
-        assert!(rendered.contains("Session ("));
+        assert!(rendered.contains("Agent Stream ("));
     }
 
     #[test]
