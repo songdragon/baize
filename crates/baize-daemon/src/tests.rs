@@ -1204,6 +1204,84 @@ async fn creates_handoff_artifact() {
 }
 
 #[tokio::test]
+async fn handoff_facts_include_session_events_and_routes() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let app = router(AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: false,
+                exit_code: Some(1),
+                native_session_id: None,
+                events: vec![AgentExecutionEvent {
+                    kind: AgentExecutionEventKind::ToolCall,
+                    text: Some("cargo test --workspace".to_string()),
+                    raw: None,
+                }],
+                stderr: "429 rate limit while running tests".to_string(),
+                error: Some(AgentErrorDetail {
+                    kind: AgentErrorKind::RateLimit,
+                    message: "rate limit".to_string(),
+                    source: AgentErrorSource::Stderr,
+                }),
+            },
+        }),
+    ));
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let _prompt = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "run tests" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+
+    let handoff = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/handoff"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "to_provider_id": "gemini", "user_constraints": ["keep scope narrow"] })
+                    .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    let facts = &handoff["handoff"]["mechanical_facts"];
+    assert_eq!(facts["commands_run"][0], "cargo test --workspace");
+    assert!(facts["test_result"]
+        .as_str()
+        .expect("test result")
+        .contains("cargo test"));
+    assert!(facts["provider_errors"][0]
+        .as_str()
+        .expect("provider error")
+        .contains("429 rate limit"));
+    assert!(facts["route_history"][0]
+        .as_str()
+        .expect("route history")
+        .contains("none -> codex"));
+
+    let summary = handoff["handoff"]["summary_markdown"]
+        .as_str()
+        .expect("summary");
+    assert!(summary.contains("Provider path: codex -> gemini"));
+    assert!(summary.contains("Recent commands:"));
+    assert!(summary.contains("Provider errors:"));
+}
+
+#[tokio::test]
 async fn handoff_checkpoint_refs_follow_policy() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let project_dir = tempfile::tempdir().expect("project dir");
@@ -1773,6 +1851,62 @@ async fn prompt_success_keeps_session_running() {
 }
 
 #[tokio::test]
+async fn complete_session_marks_completed_and_emits_events() {
+    let (app, _data_dir, project_dir) = test_app();
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let complete = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/complete"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(complete["session"]["status"], "Completed");
+
+    let events = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/events"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let events = events["events"].as_array().expect("events");
+    assert!(events
+        .iter()
+        .any(|event| event["event_type"] == "session.completed"));
+    assert!(events
+        .iter()
+        .any(|event| event["event_type"] == "session.status.changed"
+            && event["payload"]["status"] == "Completed"));
+
+    let prompt = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "continue" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(prompt["session_status"], "Running");
+
+    let session = json_response(
+        app,
+        Request::builder()
+            .uri(format!("/sessions/{session_id}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(session["session"]["status"], "Running");
+}
+
+#[tokio::test]
 async fn prompt_failure_transitions_session_to_failed() {
     let (app, _data_dir, project_dir) = failing_app();
     let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
@@ -2002,6 +2136,35 @@ async fn canceled_session_rejects_prompt() {
     )
     .await;
     assert_eq!(prompt["error"], "session is canceled");
+}
+
+#[tokio::test]
+async fn canceled_session_rejects_complete() {
+    let (app, _data_dir, project_dir) = test_app();
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let _cancel = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/cancel"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    let (status, complete) = json_response_with_status(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/complete"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(complete["error"], "session is canceled");
 }
 
 #[tokio::test]
@@ -2388,6 +2551,65 @@ async fn workspace_projects_lists_projects_for_workspace() {
 }
 
 #[tokio::test]
+async fn create_workspace_reuses_existing_project_root() {
+    let (app, _data_dir, project_dir) = test_app();
+    run_git(project_dir.path(), &["init", "-b", "main"]);
+
+    let first = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path(), "name": "first-name" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = first["workspace"]["id"].as_str().expect("workspace id");
+    let project_id = first["project"]["id"].as_str().expect("project id");
+    assert_eq!(first["project"]["active_branch"], "main");
+
+    run_git(project_dir.path(), &["checkout", "-b", "feature"]);
+    let second = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path(), "name": "second-name" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(second["workspace"]["id"], workspace_id);
+    assert_eq!(second["project"]["id"], project_id);
+    assert_eq!(second["workspace"]["name"], "first-name");
+    assert_eq!(second["project"]["active_branch"], "feature");
+    assert_eq!(second["reused"], true);
+
+    let workspaces = json_response(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/workspaces")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(
+        workspaces["workspaces"]
+            .as_array()
+            .expect("workspaces")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn session_handoffs_lists_handoffs_for_session() {
     let (app, _data_dir, project_dir) = test_app();
     let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
@@ -2609,6 +2831,56 @@ fn unsupported_prompt_runtime_is_not_routable() {
     assert!(!crate::helpers::is_provider_routable(&state, "copilot"));
 }
 
+#[test]
+fn provider_runtime_failure_count_tracks_only_provider_failures_since_success() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    append_provider_event(
+        &store,
+        "codex",
+        "session.agent.failed",
+        json!({ "provider_error": { "kind": "RateLimit", "message": "limited" } }),
+    );
+    append_provider_event(
+        &store,
+        "codex",
+        "session.agent.completed",
+        json!({ "success": true }),
+    );
+    append_provider_event(
+        &store,
+        "codex",
+        "session.agent.failed",
+        json!({ "error": "unit tests failed" }),
+    );
+    append_provider_event(
+        &store,
+        "codex",
+        "session.agent.failed",
+        json!({ "stderr": "quota exceeded" }),
+    );
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+        }),
+    );
+
+    assert_eq!(
+        crate::helpers::provider_runtime_failure_count(&state, "codex"),
+        1
+    );
+}
+
 async fn create_test_workspace(app: &Router) -> serde_json::Value {
     let project_dir = tempfile::tempdir().expect("project dir");
     let response = json_response(
@@ -2814,6 +3086,62 @@ async fn second_session_in_workspace_reuses_provider_when_healthy() {
     }
 }
 
+#[test]
+fn failure_threshold_skips_sticky_provider() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let workspace_id = WorkspaceId::new();
+    let now = chrono::Utc::now();
+    store
+        .upsert_task_session(&TaskSession {
+            id: TaskSessionId::new(),
+            workspace_id: workspace_id.clone(),
+            objective: "continue".to_string(),
+            active_provider_id: Some(ProviderId("codex".to_string())),
+            provider_native_session_ids: Default::default(),
+            status: TaskSessionStatus::Completed,
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("session");
+    append_provider_event(
+        &store,
+        "codex",
+        "session.agent.failed",
+        json!({ "provider_error": { "kind": "Timeout", "message": "timed out" } }),
+    );
+    append_provider_event(
+        &store,
+        "codex",
+        "session.agent.failed",
+        json!({ "limit_inference": { "kind": "RateLimit" } }),
+    );
+    let mut config = BaizeConfig::default();
+    config.providers.order = vec!["codex".to_string(), "gemini".to_string()];
+    config.routing.failure_threshold_count = 2;
+    let state = AppState::with_executor(
+        config,
+        store,
+        Arc::new(FakeAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![],
+                stderr: String::new(),
+                error: None,
+            },
+        }),
+    );
+
+    let result = crate::helpers::select_provider(&state, None, Some(&workspace_id), None);
+
+    assert_ne!(result.provider_id.0, "codex");
+    assert!(result.reason.contains("codex skipped after 2"));
+    assert!(result.reason.contains("threshold 2"));
+}
+
 #[tokio::test]
 async fn sticky_routing_can_be_disabled_by_config() {
     let data_dir = tempfile::tempdir().expect("data dir");
@@ -2968,4 +3296,15 @@ fn run_git(cwd: &std::path::Path, args: &[&str]) {
         args.join(" "),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn append_provider_event(
+    store: &EventStore,
+    provider_id: &str,
+    event_type: &str,
+    payload: serde_json::Value,
+) {
+    let mut event = baize_core::BaizeEvent::new(event_type, payload);
+    event.provider_id = Some(ProviderId(provider_id.to_string()));
+    store.append_event(&event).expect("append event");
 }

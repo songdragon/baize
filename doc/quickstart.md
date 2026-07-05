@@ -39,6 +39,7 @@ cargo run -p baize-cli -- validate codex
 cargo run -p baize-cli -- validate gemini
 cargo run -p baize-cli -- smoke codex
 cargo run -p baize-cli -- smoke gemini
+cargo run -p baize-cli -- ask --provider codex "summarize this project"
 ```
 
 `doctor` reports each provider's readiness, setup issues and suggested next actions. If a provider is not authenticated, Baize will report provider stderr and a structured provider error where possible.
@@ -74,11 +75,14 @@ The default is `ask`. Use `deny` when you want Baize to inspect or plan without 
 | `Ctrl-L` | Load latest session |
 | `Ctrl-N` | Start a new session draft |
 | `Ctrl-X` | Cancel current session |
+| `Ctrl-E` | Mark current session complete |
 | `Ctrl-H` | Create handoff preview |
 | `Ctrl-Y` | Accept pending handoff |
 | `Ctrl-P` | Refresh pending permissions |
 | `Ctrl-A` | Approve selected permission |
 | `Ctrl-D` | Deny selected permission |
+| `F2` / `F3` | Select previous/next recent session |
+| `F4` | Load selected recent session |
 | `Up` / `Down` | Select pending permission |
 | `Esc` or `Ctrl-C` | Exit |
 
@@ -138,6 +142,12 @@ Send a prompt after replacing `SESSION_ID`:
 curl -s -X POST http://127.0.0.1:7878/sessions/SESSION_ID/prompt \
   -H 'content-type: application/json' \
   -d '{"prompt":"summarize the current project","timeout_seconds":30}'
+```
+
+Mark a session complete:
+
+```sh
+curl -s -X POST http://127.0.0.1:7878/sessions/SESSION_ID/complete
 ```
 
 Read session events:

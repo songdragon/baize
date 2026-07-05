@@ -9,6 +9,9 @@ use crate::helpers::{
 };
 use crate::state::AppState;
 
+const HANDOFF_FACT_LIMIT: usize = 8;
+const HANDOFF_LINE_LIMIT: usize = 180;
+
 pub async fn create_handoff(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -39,35 +42,31 @@ pub async fn create_handoff(
         .map(|status| status.changed_files.clone())
         .unwrap_or_default();
     let user_constraints = request.user_constraints.unwrap_or_default();
-    let summary_markdown = format!(
-        "# Handoff\n\nObjective: {}\n\nFrom: {}\nTo: {}\n\nChanged files: {}\n",
-        session.objective,
-        from_provider_id.0,
-        to_provider_id.0,
-        if changed_files.is_empty() {
-            "none".to_string()
-        } else {
-            changed_files.join(", ")
-        }
-    );
     let handoff_id = HandoffId::new();
     let checkpoint_refs = checkpoint_refs_for_handoff(
         &state.config.workspace.checkpoint_policy,
         &session.id,
         &handoff_id,
     );
+    let facts = match build_handoff_facts(
+        &state,
+        &session,
+        changed_files,
+        checkpoint_refs,
+        user_constraints,
+    ) {
+        Ok(facts) => facts,
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let summary_markdown =
+        render_handoff_summary(&session, &from_provider_id, &to_provider_id, &facts);
     let handoff = HandoffSummary {
         id: handoff_id,
         session_id: session.id.clone(),
         from_provider_id: from_provider_id.clone(),
         to_provider_id: to_provider_id.clone(),
         summary_markdown,
-        mechanical_facts: HandoffFacts {
-            changed_files,
-            checkpoint_refs,
-            user_constraints,
-            ..HandoffFacts::default()
-        },
+        mechanical_facts: facts,
         status: HandoffStatus::Draft,
         created_at: Utc::now(),
     };
@@ -104,6 +103,186 @@ fn checkpoint_refs_for_handoff(
         vec![format!("before_handoff:{}:{}", session_id.0, handoff_id.0)]
     } else {
         Vec::new()
+    }
+}
+
+fn build_handoff_facts(
+    state: &AppState,
+    session: &baize_core::TaskSession,
+    changed_files: Vec<String>,
+    checkpoint_refs: Vec<String>,
+    user_constraints: Vec<String>,
+) -> anyhow::Result<HandoffFacts> {
+    let (events, routes) = with_store(state, |store| {
+        Ok((
+            store.list_events_for_session(&session.id, Some(200), None)?,
+            store.list_route_decisions_for_session(&session.id)?,
+        ))
+    })?;
+
+    let commands_run = recent_limited(
+        events
+            .iter()
+            .filter(|event| event.event_type == "session.agent.tool_call")
+            .filter_map(|event| event_detail(&event.payload)),
+    );
+    let test_result = events.iter().rev().find_map(|event| {
+        event_detail(&event.payload).and_then(|detail| {
+            if looks_like_test_result(&detail) {
+                Some(one_line_limit(&detail))
+            } else {
+                None
+            }
+        })
+    });
+    let provider_errors = recent_limited(events.iter().filter_map(provider_error_detail));
+    let route_history = recent_limited(routes.iter().map(|route| {
+        let previous = route
+            .previous_provider_id
+            .as_ref()
+            .map(|provider| provider.0.as_str())
+            .unwrap_or("none");
+        one_line_limit(&format!(
+            "{previous} -> {}: {}",
+            route.selected_provider_id.0, route.reason
+        ))
+    }));
+
+    Ok(HandoffFacts {
+        changed_files: changed_files.into_iter().take(HANDOFF_FACT_LIMIT).collect(),
+        commands_run,
+        test_result,
+        route_history,
+        provider_errors,
+        checkpoint_refs,
+        user_constraints,
+    })
+}
+
+fn render_handoff_summary(
+    session: &baize_core::TaskSession,
+    from_provider_id: &baize_core::ProviderId,
+    to_provider_id: &baize_core::ProviderId,
+    facts: &HandoffFacts,
+) -> String {
+    let mut summary = String::new();
+    summary.push_str("# Handoff\n\n");
+    summary.push_str(&format!(
+        "Objective: {}\n\n",
+        one_line_limit(&session.objective)
+    ));
+    summary.push_str(&format!(
+        "Current status: {}\n\n",
+        session_status(&session.status)
+    ));
+    summary.push_str(&format!(
+        "Provider path: {} -> {}\n\n",
+        from_provider_id.0, to_provider_id.0
+    ));
+    push_markdown_list(&mut summary, "Changed files", &facts.changed_files);
+    push_markdown_list(&mut summary, "Recent commands", &facts.commands_run);
+    if let Some(test_result) = &facts.test_result {
+        summary.push_str(&format!(
+            "Latest test signal: {}\n\n",
+            one_line_limit(test_result)
+        ));
+    } else {
+        summary.push_str("Latest test signal: none recorded\n\n");
+    }
+    push_markdown_list(&mut summary, "Provider errors", &facts.provider_errors);
+    push_markdown_list(&mut summary, "Route history", &facts.route_history);
+    push_markdown_list(&mut summary, "User constraints", &facts.user_constraints);
+    push_markdown_list(&mut summary, "Checkpoint refs", &facts.checkpoint_refs);
+    summary.push_str(&format!(
+        "Recommended next step: Continue with {} using the facts above.\n",
+        to_provider_id.0
+    ));
+    summary
+}
+
+fn push_markdown_list(summary: &mut String, label: &str, values: &[String]) {
+    summary.push_str(label);
+    summary.push_str(":\n");
+    if values.is_empty() {
+        summary.push_str("- none\n\n");
+        return;
+    }
+    for value in values.iter().take(HANDOFF_FACT_LIMIT) {
+        summary.push_str("- ");
+        summary.push_str(&one_line_limit(value));
+        summary.push('\n');
+    }
+    summary.push('\n');
+}
+
+fn recent_limited(values: impl Iterator<Item = String>) -> Vec<String> {
+    let values = values.collect::<Vec<_>>();
+    values
+        .into_iter()
+        .rev()
+        .take(HANDOFF_FACT_LIMIT)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn provider_error_detail(event: &baize_core::BaizeEvent) -> Option<String> {
+    if event.event_type != "session.agent.failed" {
+        return None;
+    }
+    event_detail(&event.payload)
+        .or_else(|| nested_string(&event.payload, &["provider_error", "message"]))
+        .or_else(|| {
+            event
+                .payload
+                .get("limit_inference")
+                .map(|limit| one_line_limit(&format!("provider limit inferred: {limit}")))
+        })
+}
+
+fn event_detail(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| payload.get("error").and_then(serde_json::Value::as_str))
+        .or_else(|| payload.get("stderr").and_then(serde_json::Value::as_str))
+        .map(one_line_limit)
+}
+
+fn nested_string(payload: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let mut value = payload;
+    for key in path {
+        value = value.get(*key)?;
+    }
+    value.as_str().map(one_line_limit)
+}
+
+fn looks_like_test_result(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("cargo test")
+        || lower.contains("pytest")
+        || lower.contains("test result")
+        || lower.contains("tests passed")
+        || lower.contains("test failed")
+}
+
+fn one_line_limit(text: &str) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= HANDOFF_LINE_LIMIT {
+        return one_line;
+    }
+    let keep = HANDOFF_LINE_LIMIT.saturating_sub(3);
+    format!("{}...", one_line.chars().take(keep).collect::<String>())
+}
+
+fn session_status(status: &baize_core::TaskSessionStatus) -> &'static str {
+    match status {
+        baize_core::TaskSessionStatus::Running => "Running",
+        baize_core::TaskSessionStatus::WaitingForPermission => "WaitingForPermission",
+        baize_core::TaskSessionStatus::Completed => "Completed",
+        baize_core::TaskSessionStatus::Failed => "Failed",
+        baize_core::TaskSessionStatus::Canceled => "Canceled",
     }
 }
 

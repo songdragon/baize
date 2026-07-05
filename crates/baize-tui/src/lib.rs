@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use std::io::{stdout, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, sleep};
 use std::time::Duration;
@@ -111,6 +111,22 @@ struct PromptTask {
     receiver: Receiver<Result<PromptTaskCompletion, String>>,
 }
 
+struct DaemonLaunch {
+    status: String,
+    guard: Option<AutoStartedDaemon>,
+}
+
+struct AutoStartedDaemon {
+    child: Child,
+}
+
+impl Drop for AutoStartedDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PromptTaskCompletion {
     prompt_response: Value,
@@ -158,8 +174,12 @@ impl Default for TuiState {
 }
 
 pub fn run() -> Result<()> {
-    let daemon_status =
-        ensure_daemon_running().unwrap_or_else(|error| format!("daemon: unavailable ({error:#})"));
+    let daemon_launch = ensure_daemon_running().unwrap_or_else(|error| DaemonLaunch {
+        status: format!("daemon: unavailable ({error:#})"),
+        guard: None,
+    });
+    let daemon_status = daemon_launch.status.clone();
+    let daemon_guard = daemon_launch.guard;
     let provider_load = load_provider_ids();
     let diagnostics_load = load_provider_diagnostics().or_else(|_| {
         load_provider_health().map(|health| {
@@ -191,6 +211,8 @@ pub fn run() -> Result<()> {
     terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+
+    drop(daemon_guard);
 
     result
 }
@@ -291,6 +313,12 @@ fn run_app(
                             state.push_message(format!("load session failed: {error:#}"));
                         }
                     }
+                    KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(error) = complete_current_session(&mut state) {
+                            state.activity_status = "failed".to_string();
+                            state.push_message(format!("complete error: {error:#}"));
+                        }
+                    }
                     KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         start_new_session(&mut state);
                     }
@@ -308,6 +336,14 @@ fn run_app(
                     KeyCode::PageDown => state.scroll_down(10),
                     KeyCode::Home => state.scroll_to_top(),
                     KeyCode::End => state.scroll_to_bottom(),
+                    KeyCode::F(2) => select_previous_session(&mut state),
+                    KeyCode::F(3) => select_next_session(&mut state),
+                    KeyCode::F(4) => {
+                        if let Err(error) = load_selected_session(&mut state) {
+                            state.activity_status = "failed".to_string();
+                            state.push_message(format!("load selected session failed: {error:#}"));
+                        }
+                    }
                     KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
@@ -647,6 +683,30 @@ fn transcript_line(line: &str) -> Line<'static> {
     if line.trim().is_empty() {
         return Line::raw("");
     }
+    if line.starts_with("╭─") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if line.starts_with("╰─") {
+        return Line::from(Span::styled(line.to_string(), muted_style()));
+    }
+    if let Some(label) = transcript_section_label(line) {
+        return Line::from(vec![
+            Span::styled("╭─ ", muted_style()),
+            Span::styled(
+                label.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", muted_style()),
+            Span::styled("────────", muted_style()),
+        ]);
+    }
     if let Some(prompt) = line.strip_prefix("> ") {
         return Line::from(vec![
             Span::styled("you ", muted_style()),
@@ -656,7 +716,20 @@ fn transcript_line(line: &str) -> Line<'static> {
     }
 
     let lower = line.to_ascii_lowercase();
-    if lower.contains("error") || lower.contains("failed") {
+    if line.starts_with("turn result:")
+        || line.starts_with("prompt result:")
+        || line.starts_with("workspace clean")
+    {
+        Line::from(vec![
+            Span::styled("╰─ ", muted_style()),
+            Span::styled(line.to_string(), Style::default().fg(Color::Green)),
+        ])
+    } else if line.starts_with("workspace dirty") {
+        Line::from(vec![
+            Span::styled("╰─ ", muted_style()),
+            Span::styled(line.to_string(), Style::default().fg(Color::Yellow)),
+        ])
+    } else if lower.contains("error") || lower.contains("failed") {
         Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(Color::Red),
@@ -676,6 +749,20 @@ fn transcript_line(line: &str) -> Line<'static> {
         ])
     } else {
         Line::from(Span::raw(line.to_string()))
+    }
+}
+
+fn transcript_section_label(line: &str) -> Option<&'static str> {
+    match line {
+        "assistant:" => Some("assistant"),
+        "command/tool events:" => Some("tools"),
+        "status:" => Some("status"),
+        "routes:" => Some("routes"),
+        "test results:" => Some("tests"),
+        "provider diagnostics:" => Some("provider diagnostics"),
+        "provider setup issues:" => Some("provider setup"),
+        "sessions:" => Some("sessions"),
+        _ => None,
     }
 }
 
@@ -784,15 +871,23 @@ fn health_signal(health: &str) -> &'static str {
     }
 }
 
-fn ensure_daemon_running() -> Result<String> {
+fn ensure_daemon_running() -> Result<DaemonLaunch> {
     if daemon_healthy() {
-        return Ok(daemon_connected_message());
+        return Ok(DaemonLaunch {
+            status: daemon_connected_message(),
+            guard: None,
+        });
     }
 
-    start_daemon_process()?;
+    let guard = AutoStartedDaemon {
+        child: start_daemon_process()?,
+    };
     for _ in 0..DAEMON_START_ATTEMPTS {
         if daemon_healthy() {
-            return Ok(format!("{} (auto-started)", daemon_connected_message()));
+            return Ok(DaemonLaunch {
+                status: daemon_auto_started_message(),
+                guard: Some(guard),
+            });
         }
         sleep(Duration::from_millis(DAEMON_START_POLL_MS));
     }
@@ -815,7 +910,7 @@ fn daemon_healthy() -> bool {
         == Some("ok")
 }
 
-fn start_daemon_process() -> Result<()> {
+fn start_daemon_process() -> Result<Child> {
     let executable = std::env::current_exe().context("resolve current executable")?;
     Command::new(executable)
         .args(daemon_start_args())
@@ -823,8 +918,7 @@ fn start_daemon_process() -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("start baize daemon")?;
-    Ok(())
+        .context("start baize daemon")
 }
 
 fn daemon_start_args() -> [&'static str; 1] {
@@ -833,6 +927,10 @@ fn daemon_start_args() -> [&'static str; 1] {
 
 fn daemon_connected_message() -> String {
     format!("daemon: connected at {DAEMON_HOST}:{DAEMON_PORT}")
+}
+
+fn daemon_auto_started_message() -> String {
+    format!("{} (auto-started)", daemon_connected_message())
 }
 
 fn load_provider_ids() -> Result<Vec<String>> {
@@ -1263,13 +1361,16 @@ fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmissi
     }
 
     state.activity_status = format!("running {provider_id}");
+    push_transcript_gap(state);
+    state.push_message("╭─ task ─────────────────────────────".to_string());
     state.push_message(format!("> {prompt}"));
-    state.push_message(format!("mesh: dispatching to {provider_id}"));
+    state.push_message(format!("  target: {provider_id}"));
     state.push_message(format!(
-        "policy: {} ({})",
+        "  policy: {} ({})",
         state.command_policy_label(),
         state.execution_mode()
     ));
+    state.push_message("  status: thinking...".to_string());
     state.input.clear();
 
     Some(PendingPromptSubmission {
@@ -1297,6 +1398,44 @@ fn load_latest_session(state: &mut TuiState) -> Result<()> {
     Ok(())
 }
 
+fn load_selected_session(state: &mut TuiState) -> Result<()> {
+    let Some(session_id) = state
+        .recent_sessions
+        .get(state.selected_session_index)
+        .map(|session| session.id.clone())
+    else {
+        state.push_message("load sessions with Ctrl-L before selecting one");
+        return Ok(());
+    };
+
+    state.activity_status = "loading selected session".to_string();
+    let response = get_json(&format!("/sessions/{session_id}"))?;
+    let session = response
+        .get("session")
+        .ok_or_else(|| response_error("session", &response))?;
+    apply_loaded_session(state, session)?;
+    refresh_route_history(state)?;
+    refresh_session_diff(state)?;
+    state.activity_status = "idle".to_string();
+    Ok(())
+}
+
+fn select_previous_session(state: &mut TuiState) {
+    if state.select_previous_recent_session() {
+        state.push_message(format!("selected session: {}", state.session_status()));
+    } else {
+        state.push_message("load sessions with Ctrl-L before selecting one");
+    }
+}
+
+fn select_next_session(state: &mut TuiState) {
+    if state.select_next_recent_session() {
+        state.push_message(format!("selected session: {}", state.session_status()));
+    } else {
+        state.push_message("load sessions with Ctrl-L before selecting one");
+    }
+}
+
 fn start_new_session(state: &mut TuiState) {
     state.session_id = None;
     state.active_provider = None;
@@ -1306,6 +1445,20 @@ fn start_new_session(state: &mut TuiState) {
     state.input.clear();
     state.activity_status = "idle".to_string();
     state.push_message("new session: next prompt will create a fresh task");
+}
+
+fn complete_current_session(state: &mut TuiState) -> Result<()> {
+    let Some(session_id) = state.session_id.clone() else {
+        state.push_message("start a session before marking complete");
+        return Ok(());
+    };
+
+    state.activity_status = "completing session".to_string();
+    let response = post_json(&format!("/sessions/{session_id}/complete"), json!({}))?;
+    append_complete_response(state, &response);
+    refresh_recent_sessions(state)?;
+    state.activity_status = "idle".to_string();
+    Ok(())
 }
 
 fn cancel_current_session(state: &mut TuiState) -> Result<()> {
@@ -1322,6 +1475,31 @@ fn cancel_current_session(state: &mut TuiState) -> Result<()> {
 }
 
 fn append_cancel_response(state: &mut TuiState, response: &Value) {
+    let session = response.get("session").unwrap_or(&Value::Null);
+    let id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let status = session
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    state.session_id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    state.active_provider = session
+        .get("active_provider_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    state.route_reason = None;
+    state.pending_handoff_id = None;
+    state.pending_handoff_session_id = None;
+    state.push_message(format!("session {id}: {status}"));
+}
+
+fn append_complete_response(state: &mut TuiState, response: &Value) {
     let session = response.get("session").unwrap_or(&Value::Null);
     let id = session
         .get("id")
@@ -1443,6 +1621,18 @@ fn append_session_list(state: &mut TuiState) {
             short_text(&session.objective, 40)
         ));
     }
+}
+
+fn refresh_recent_sessions(state: &mut TuiState) -> Result<()> {
+    let response = get_json("/sessions")?;
+    let sessions = parse_session_views(&response)?;
+    let current = state.session_id.clone();
+    state.set_recent_sessions(sessions);
+    if let Some(current) = current {
+        state.select_recent_session(&current);
+    }
+    append_session_list(state);
+    Ok(())
 }
 
 fn request_handoff(state: &mut TuiState) -> Result<()> {
@@ -1749,7 +1939,7 @@ fn append_route_history(state: &mut TuiState, response: &Value) {
         return;
     }
 
-    state.push_message("routes:");
+    push_transcript_section(state, "routes:");
     for route in routes
         .iter()
         .rev()
@@ -1802,6 +1992,7 @@ fn append_session_diff(state: &mut TuiState, response: &Value) {
         .unwrap_or_default();
 
     if !dirty {
+        push_transcript_gap(state);
         state.push_message("workspace clean");
         return;
     }
@@ -1813,6 +2004,7 @@ fn append_session_diff(state: &mut TuiState, response: &Value) {
         .filter(|remaining| *remaining > 0)
         .map(|remaining| format!(" (+{remaining} more)"))
         .unwrap_or_default();
+    push_transcript_gap(state);
     state.push_message(format!(
         "workspace dirty: {}{}",
         if shown.is_empty() {
@@ -1843,6 +2035,7 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
         .get("provider_id")
         .and_then(provider_id)
         .unwrap_or("unknown");
+    push_transcript_gap(state);
     if response.get("turn_status").is_some() || response.get("session_status").is_some() {
         state.push_message(format!(
             "turn result: {turn_status} via {provider} (session {session_status})"
@@ -1933,20 +2126,20 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
     }
 
     if !assistant_lines.is_empty() {
-        state.push_message("assistant:".to_string());
+        push_transcript_section(state, "assistant:");
         for line in &assistant_lines {
             state.push_message(format!("  {line}"));
         }
     }
     if !tool_lines.is_empty() {
-        state.push_message("command/tool events:".to_string());
+        push_transcript_section(state, "command/tool events:");
         for line in tool_lines.iter().take(TRANSCRIPT_TOOL_LINE_LIMIT) {
             state.push_message(format!("  {line}"));
         }
         append_more_line(state, tool_lines.len(), TRANSCRIPT_TOOL_LINE_LIMIT);
     }
     if !status_lines.is_empty() {
-        state.push_message("status:".to_string());
+        push_transcript_section(state, "status:");
         for line in status_lines.iter().take(TRANSCRIPT_STATUS_LINE_LIMIT) {
             state.push_message(format!("  {line}"));
         }
@@ -2014,6 +2207,21 @@ fn append_more_line(state: &mut TuiState, total: usize, shown: usize) {
     }
 }
 
+fn push_transcript_section(state: &mut TuiState, label: &str) {
+    push_transcript_gap(state);
+    state.push_message(format!("╭─ {} ─────────────────────────────", label));
+}
+
+fn push_transcript_gap(state: &mut TuiState) {
+    if state
+        .transcript
+        .last()
+        .is_some_and(|line| !line.trim().is_empty())
+    {
+        state.push_message(String::new());
+    }
+}
+
 fn append_test_result_section(state: &mut TuiState, response: &Value) {
     let Some(events) = response.get("events").and_then(Value::as_array) else {
         return;
@@ -2055,7 +2263,7 @@ fn append_test_result_section(state: &mut TuiState, response: &Value) {
         return;
     }
 
-    state.push_message("test results:".to_string());
+    push_transcript_section(state, "test results:");
     for line in test_lines {
         state.push_message(format!("  {line}"));
     }
@@ -2171,6 +2379,26 @@ impl TuiState {
         {
             self.selected_session_index = index;
         }
+    }
+
+    fn select_next_recent_session(&mut self) -> bool {
+        if self.recent_sessions.is_empty() {
+            return false;
+        }
+        self.selected_session_index =
+            (self.selected_session_index + 1) % self.recent_sessions.len();
+        true
+    }
+
+    fn select_previous_recent_session(&mut self) -> bool {
+        if self.recent_sessions.is_empty() {
+            return false;
+        }
+        self.selected_session_index = self
+            .selected_session_index
+            .checked_sub(1)
+            .unwrap_or(self.recent_sessions.len() - 1);
+        true
     }
 
     #[cfg(test)]
@@ -2299,7 +2527,7 @@ impl TuiState {
     }
 
     fn help_text(&self) -> &'static str {
-        "Ent|Tab|PgUp/PgDn scroll|Home/End|^N new|^L load|^H hand|^X stop"
+        "Ent|Tab|F2/F3 sess|F4 load|^E done|^N new|^L latest|^H hand|^X stop"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -2570,7 +2798,7 @@ mod tests {
         assert!(rendered.contains("opencode"));
         assert!(rendered.contains("Prompt"));
         assert!(rendered.contains("keys"));
-        assert!(rendered.contains("Ent|Tab|PgUp/PgDn scroll"));
+        assert!(rendered.contains("Ent|Tab|F2/F3 sess|F4 load|^E done"));
     }
 
     #[test]
@@ -2695,9 +2923,9 @@ mod tests {
         assert_eq!(state.activity_status, "idle");
         let transcript = state.transcript_text();
         assert!(transcript.contains("turn result: completed via codex"));
-        assert!(transcript.contains("assistant:"));
+        assert!(transcript.contains("╭─ assistant:"));
         assert!(transcript.contains("  done"));
-        assert!(transcript.contains("routes:"));
+        assert!(transcript.contains("╭─ routes:"));
         assert!(transcript.contains("workspace clean"));
     }
 
@@ -2813,13 +3041,24 @@ mod tests {
         assert_eq!(submission.prompt, "你能做什么");
         assert!(state.input.is_empty());
         assert_eq!(state.activity_status, "running gemini");
+        assert!(state.transcript_text().contains("╭─ task"));
         assert!(state.transcript_text().contains("> 你能做什么"));
-        assert!(state
-            .transcript_text()
-            .contains("mesh: dispatching to gemini"));
+        assert!(state.transcript_text().contains("target: gemini"));
         assert!(state
             .transcript_text()
             .contains("policy: read-only (read-only)"));
+        assert!(state.transcript_text().contains("status: thinking..."));
+    }
+
+    #[test]
+    fn transcript_section_labels_are_mapped_for_visual_rendering() {
+        assert_eq!(transcript_section_label("assistant:"), Some("assistant"));
+        assert_eq!(
+            transcript_section_label("command/tool events:"),
+            Some("tools")
+        );
+        assert_eq!(transcript_section_label("routes:"), Some("routes"));
+        assert_eq!(transcript_section_label("plain line"), None);
     }
 
     #[test]
@@ -3176,6 +3415,37 @@ mod tests {
     }
 
     #[test]
+    fn recent_session_selection_cycles_without_loading_session() {
+        let mut state = TuiState {
+            session_id: Some("task_current".to_string()),
+            ..TuiState::default()
+        };
+        state.set_recent_sessions(vec![
+            SessionView {
+                id: "task_1".to_string(),
+                workspace_id: "ws_1".to_string(),
+                objective: "first".to_string(),
+                active_provider_id: Some("codex".to_string()),
+                status: "Running".to_string(),
+            },
+            SessionView {
+                id: "task_2".to_string(),
+                workspace_id: "ws_1".to_string(),
+                objective: "second".to_string(),
+                active_provider_id: Some("gemini".to_string()),
+                status: "Completed".to_string(),
+            },
+        ]);
+
+        assert_eq!(state.selected_session_index, 1);
+        assert!(state.select_next_recent_session());
+        assert_eq!(state.selected_session_index, 0);
+        assert_eq!(state.session_id.as_deref(), Some("task_current"));
+        assert!(state.select_previous_recent_session());
+        assert_eq!(state.selected_session_index, 1);
+    }
+
+    #[test]
     fn appends_recent_session_list_with_selected_marker() {
         let mut state = TuiState::default();
         state.set_recent_sessions(vec![
@@ -3229,6 +3499,36 @@ mod tests {
         assert!(state.input.is_empty());
         assert_eq!(state.activity_status, "idle");
         assert!(state.transcript_text().contains("new session"));
+    }
+
+    #[test]
+    fn append_complete_response_updates_session_and_clears_pending_handoff() {
+        let mut state = TuiState {
+            pending_handoff_id: Some("handoff_1".to_string()),
+            pending_handoff_session_id: Some("task_1".to_string()),
+            route_reason: Some("old route".to_string()),
+            ..TuiState::default()
+        };
+
+        append_complete_response(
+            &mut state,
+            &json!({
+                "session": {
+                    "id": "task_1",
+                    "status": "Completed",
+                    "active_provider_id": "codex"
+                }
+            }),
+        );
+
+        assert_eq!(state.session_id.as_deref(), Some("task_1"));
+        assert_eq!(state.active_provider.as_deref(), Some("codex"));
+        assert!(state.pending_handoff_id.is_none());
+        assert!(state.pending_handoff_session_id.is_none());
+        assert!(state.route_reason.is_none());
+        assert!(state
+            .transcript_text()
+            .contains("session task_1: Completed"));
     }
 
     #[test]
@@ -3468,11 +3768,11 @@ mod tests {
         append_recent_events(&mut state, &response);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("command/tool events:"));
+        assert!(transcript.contains("╭─ command/tool events:"));
         assert!(transcript.contains("  cargo test"));
-        assert!(transcript.contains("assistant:"));
+        assert!(transcript.contains("╭─ assistant:"));
         assert!(transcript.contains("  reading files"));
-        assert!(transcript.contains("status:"));
+        assert!(transcript.contains("╭─ status:"));
         assert!(transcript.contains("  agent failed: tests failed"));
         assert!(transcript.contains("  agent completed"));
         assert!(!transcript.contains("Reading additional input"));
@@ -3630,6 +3930,14 @@ mod tests {
         assert_eq!(
             daemon_connected_message(),
             "daemon: connected at 127.0.0.1:7878"
+        );
+    }
+
+    #[test]
+    fn daemon_auto_started_message_marks_owned_daemon() {
+        assert_eq!(
+            daemon_auto_started_message(),
+            "daemon: connected at 127.0.0.1:7878 (auto-started)"
         );
     }
 

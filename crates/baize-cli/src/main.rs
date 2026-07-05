@@ -1,7 +1,10 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use baize_adapters::{ProviderDiagnostic, ProviderReadiness};
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use serde_json::Value;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 #[derive(Debug, Parser)]
 #[command(name = "baize")]
@@ -39,6 +42,16 @@ enum Command {
         #[arg(long, default_value = ".")]
         path: String,
     },
+    Ask {
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long, default_value = ".")]
+        path: String,
+        #[arg(long, default_value_t = 120)]
+        timeout_seconds: u64,
+        #[arg(required = true, num_args = 1..)]
+        prompt: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -55,7 +68,21 @@ enum ConfigCommand {
 enum CliAction {
     RunTui,
     RunDaemon,
+    RunAsk(AskOptions),
     Print(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AskOptions {
+    provider: Option<String>,
+    path: String,
+    timeout_seconds: u64,
+    prompt: String,
+}
+
+struct DaemonClient {
+    host: String,
+    port: u16,
 }
 
 #[tokio::main]
@@ -67,6 +94,10 @@ async fn main() -> Result<()> {
         CliAction::RunDaemon => {
             let config = baize_config::load_or_default()?;
             baize_daemon::run(config).await
+        }
+        CliAction::RunAsk(options) => {
+            print!("{}", ask_output(options)?);
+            Ok(())
         }
         CliAction::Print(output) => {
             print!("{output}");
@@ -93,6 +124,17 @@ fn plan_cli_action(command: Option<Command>) -> Result<CliAction> {
         } => {
             smoke_output(provider, run_prompt, prompt, timeout_seconds, path).map(CliAction::Print)
         }
+        Command::Ask {
+            provider,
+            path,
+            timeout_seconds,
+            prompt,
+        } => Ok(CliAction::RunAsk(AskOptions {
+            provider,
+            path,
+            timeout_seconds,
+            prompt: prompt.join(" "),
+        })),
     }
 }
 
@@ -188,6 +230,186 @@ fn smoke_output(
     Ok(format!("{}\n", serde_json::to_string_pretty(&report)?))
 }
 
+fn ask_output(options: AskOptions) -> Result<String> {
+    let config = baize_config::load_or_default()?;
+    let client = DaemonClient {
+        host: config.daemon.host,
+        port: config.daemon.port,
+    };
+    let workspace = client.post_json(
+        "/workspaces",
+        json!({
+            "path": options.path.clone(),
+        }),
+    )?;
+    let workspace_id = workspace
+        .get("workspace")
+        .and_then(|workspace| workspace.get("id"))
+        .and_then(id_value)
+        .ok_or_else(|| anyhow!("daemon response missing workspace.id: {workspace}"))?;
+    let mut session_body = json!({
+        "workspace_id": workspace_id,
+        "objective": options.prompt.clone(),
+    });
+    if let Some(provider) = &options.provider {
+        session_body["provider_id"] = Value::String(provider.clone());
+    }
+    let session = client.post_json("/sessions", session_body)?;
+    let session_id = session
+        .get("session")
+        .and_then(|session| session.get("id"))
+        .and_then(id_value)
+        .ok_or_else(|| anyhow!("daemon response missing session.id: {session}"))?;
+    let mut prompt_body = json!({
+        "prompt": options.prompt.clone(),
+        "timeout_seconds": options.timeout_seconds,
+    });
+    if let Some(provider) = &options.provider {
+        prompt_body["provider_id"] = Value::String(provider.clone());
+    }
+    let prompt_response =
+        client.post_json(&format!("/sessions/{session_id}/prompt"), prompt_body)?;
+    let diff_response = client
+        .get_json(&format!("/sessions/{session_id}/diff"))
+        .unwrap_or_else(|error| json!({ "diff_error": error.to_string() }));
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&ask_summary(&prompt_response, &diff_response))?
+    ))
+}
+
+fn ask_summary(prompt_response: &Value, diff_response: &Value) -> Value {
+    json!({
+        "session_id": prompt_response.get("session_id").and_then(Value::as_str),
+        "provider_id": prompt_response.get("provider_id").and_then(id_value),
+        "turn_status": prompt_response.get("turn_status").and_then(Value::as_str),
+        "session_status": prompt_response.get("session_status").and_then(Value::as_str),
+        "assistant_text": assistant_text(prompt_response),
+        "changed_files": changed_files(diff_response),
+        "error": prompt_error(prompt_response),
+    })
+}
+
+fn assistant_text(response: &Value) -> String {
+    response
+        .get("events")
+        .and_then(Value::as_array)
+        .map(|events| {
+            events
+                .iter()
+                .filter(|event| {
+                    event
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .is_none_or(|kind| kind == "Output")
+                })
+                .filter_map(|event| event.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn changed_files(response: &Value) -> Vec<String> {
+    response
+        .get("diff")
+        .and_then(|diff| diff.get("changed_files"))
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn prompt_error(response: &Value) -> Option<String> {
+    response
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| response.get("stderr").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            response
+                .get("provider_error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+impl DaemonClient {
+    fn get_json(&self, path: &str) -> Result<Value> {
+        self.request_json("GET", path, None)
+    }
+
+    fn post_json(&self, path: &str, body: Value) -> Result<Value> {
+        self.request_json("POST", path, Some(body))
+    }
+
+    fn request_json(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+        let body = body.map(|body| body.to_string()).unwrap_or_default();
+        let mut stream =
+            TcpStream::connect((self.host.as_str(), self.port)).with_context(|| {
+                format!(
+                    "baize daemon is not reachable at {}:{}; start it with `baize daemon` first",
+                    self.host, self.port
+                )
+            })?;
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            self.host,
+            self.port,
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .context("send daemon request")?;
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .context("read daemon response")?;
+        parse_http_json_response(&response)
+    }
+}
+
+fn parse_http_json_response(response: &str) -> Result<Value> {
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow!("invalid daemon response"))?;
+    let status_line = head.lines().next().unwrap_or_default();
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(anyhow!("daemon returned {status_line} with empty body"));
+    }
+    let value: Value = serde_json::from_str(body).context("parse daemon JSON response")?;
+    if !status_line.contains(" 200 ") {
+        if matches!(
+            value.get("status").and_then(Value::as_str),
+            Some("failed" | "canceled")
+        ) {
+            return Ok(value);
+        }
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(anyhow!("daemon returned {status_line}: {error}"));
+        }
+        return Err(anyhow!("daemon returned {status_line}"));
+    }
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return Err(anyhow!(error.to_string()));
+    }
+    Ok(value)
+}
+
+fn id_value(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.as_object()?.get("0")?.as_str())
+}
+
 fn handle_config(command: ConfigCommand) -> Result<String> {
     match command {
         ConfigCommand::Path => Ok(format!(
@@ -238,6 +460,27 @@ mod tests {
         let action = plan_cli_action(Some(Command::Daemon)).expect("action");
 
         assert!(matches!(action, CliAction::RunDaemon));
+    }
+
+    #[test]
+    fn ask_command_maps_to_ask_action() {
+        let action = plan_cli_action(Some(Command::Ask {
+            provider: Some("gemini".to_string()),
+            path: "crates".to_string(),
+            timeout_seconds: 30,
+            prompt: vec!["summarize".to_string(), "this".to_string()],
+        }))
+        .expect("action");
+
+        match action {
+            CliAction::RunAsk(options) => {
+                assert_eq!(options.provider.as_deref(), Some("gemini"));
+                assert_eq!(options.path, "crates");
+                assert_eq!(options.timeout_seconds, 30);
+                assert_eq!(options.prompt, "summarize this");
+            }
+            _ => panic!("expected ask action"),
+        }
     }
 
     #[test]
@@ -367,6 +610,35 @@ mod tests {
         assert_eq!(value["provider_id"], "codex");
         assert_eq!(value["prompt_skipped"], true);
         assert_eq!(value["parser_native_session_id"], "smoke_codex_session");
+    }
+
+    #[test]
+    fn ask_summary_formats_prompt_and_diff_response() {
+        let summary = ask_summary(
+            &json!({
+                "session_id": "task_1",
+                "provider_id": "codex",
+                "turn_status": "completed",
+                "session_status": "Running",
+                "events": [
+                    { "kind": "Output", "text": "first" },
+                    { "kind": "ToolCall", "text": "cargo test" },
+                    { "kind": "Output", "text": "second" }
+                ]
+            }),
+            &json!({
+                "diff": {
+                    "changed_files": ["src/lib.rs", "README.md"]
+                }
+            }),
+        );
+
+        assert_eq!(summary["session_id"], "task_1");
+        assert_eq!(summary["provider_id"], "codex");
+        assert_eq!(summary["turn_status"], "completed");
+        assert_eq!(summary["assistant_text"], "first\nsecond");
+        assert_eq!(summary["changed_files"][0], "src/lib.rs");
+        assert!(summary["error"].is_null());
     }
 
     #[test]

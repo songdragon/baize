@@ -30,6 +30,7 @@ cargo run -p baize-cli -- validate
 cargo run -p baize-cli -- validate gemini
 cargo run -p baize-cli -- daemon
 cargo run -p baize-cli -- tui
+cargo run -p baize-cli -- ask --provider codex "summarize this project"
 ```
 
 For local sandboxed development, keep Baize data inside the repository:
@@ -56,6 +57,7 @@ POST /sessions
 GET  /sessions/:id
 POST /sessions/:id/prompt
 POST /sessions/:id/cancel
+POST /sessions/:id/complete
 POST /sessions/:id/handoff
 GET  /sessions/:id/events
 GET  /sessions/:id/diff

@@ -377,6 +377,19 @@ impl EventStore {
         self.get_json("projects", &id.0)
     }
 
+    pub fn get_project_by_root(&self, root: impl AsRef<Path>) -> Result<Option<Project>> {
+        let root = root.as_ref().to_string_lossy();
+        let mut stmt = self
+            .conn
+            .prepare("select json from projects where root = ?1 limit 1")?;
+        let mut rows = stmt.query(params![root.as_ref()])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let raw: String = row.get(0)?;
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+
     pub fn list_projects_for_workspace(&self, workspace_id: &WorkspaceId) -> Result<Vec<Project>> {
         let mut stmt = self
             .conn
@@ -1402,6 +1415,15 @@ mod tests {
             .expect("non-vcs projects");
         assert_eq!(no_vcs.len(), 1);
         assert_eq!(no_vcs[0].id.0, workspace.primary_project_id.0);
+        assert_eq!(
+            store
+                .get_project_by_root(temp.path())
+                .expect("project by root")
+                .expect("project exists")
+                .id
+                .0,
+            workspace.primary_project_id.0
+        );
         assert_eq!(
             store
                 .get_task_session(&session.id)

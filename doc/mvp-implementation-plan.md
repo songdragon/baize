@@ -36,6 +36,7 @@ The MVP target is a single-workspace local agent supervisor:
 - MVP query tables for workspaces, projects, sessions, route decisions, handoffs and permissions;
 - JSON-backed records for fast iteration before final relational schema hardening;
 - workspace/project/session persistence;
+- project lookup by canonical root for idempotent workspace registration;
 - session event lookup;
 - route decision lookup by session;
 - permission insert, list and detail lookup;
@@ -90,6 +91,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `baize providers`;
 - `baize validate [provider]`;
 - `baize smoke <provider>` with gated real-prompt execution;
+- `baize ask` for daemon-backed non-TUI prompt execution;
 - refactored CLI command handling into testable output/action functions.
 
 ### 6. Documentation
@@ -120,6 +122,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `GET /sessions/:id`;
 - `POST /sessions/:id/prompt`;
 - `POST /sessions/:id/cancel`;
+- `POST /sessions/:id/complete`;
 - `GET /sessions/:id/routes`;
 - `POST /sessions/:id/handoff`;
 - `POST /sessions/:id/handoff/:handoff_id/accept`;
@@ -135,6 +138,7 @@ The MVP target is a single-workspace local agent supervisor:
 - `GET /events/history`.
 - Session status transitions: `Running` stays on prompt success, transitions to `Failed` on prompt failure or executor error, recovers from `Failed` on next successful prompt.
 - Canceled sessions reject new prompt requests.
+- Completed sessions can be reopened by a follow-up prompt.
 - Late provider results are ignored when a session was canceled before completion.
 - Unsupported prompt provider overrides are rejected before mutating session route state.
 - `session.status.changed` event emission on status transitions.
@@ -150,6 +154,7 @@ The MVP target is a single-workspace local agent supervisor:
 - route decision event emission;
 - task-type hints on route decisions;
 - configurable sticky routing window;
+- provider/runtime failure threshold skip for sticky and priority routing;
 - route history API;
 - TUI display of recent route history.
 
@@ -158,6 +163,7 @@ The MVP target is a single-workspace local agent supervisor:
 - markdown handoff artifact generation;
 - Baize mechanical facts attachment;
 - changed files and user constraints capture;
+- commands, test signals, route history and provider errors capture from session events;
 - handoff persistence and event emission;
 - handoff markdown artifact persistence;
 - before-handoff checkpoint references in handoff facts;
@@ -201,6 +207,8 @@ The MVP target is a single-workspace local agent supervisor:
 - latest session loading with `Ctrl-L`;
 - new session reset with `Ctrl-N`;
 - current session cancel with `Ctrl-X`;
+- current session complete with `Ctrl-E`;
+- recent session selection with `F2`/`F3` and selected-session loading with `F4`;
 - activity status line;
 - provider status line;
 - route status line;
@@ -221,7 +229,7 @@ The MVP target is a single-workspace local agent supervisor:
 
 ## Test Coverage
 
-Current full test count: 222.
+Current full test count: 234.
 
 Implemented test coverage includes:
 
@@ -231,8 +239,10 @@ Implemented test coverage includes:
 - config defaults, TOML parsing, initialization and validation;
 - CLI action planning and output formatting;
 - CLI smoke command output formatting;
+- CLI ask command mapping and output summary formatting;
 - storage event append/count/session lookup;
 - storage workspace/project/session persistence;
+- storage project lookup by root for idempotent workspace registration;
 - storage query indexes for high-volume session/workspace lookups;
 - storage workspace name/primary-project query columns and indexes;
 - storage project root/kind/vcs query columns and indexes;
@@ -260,6 +270,7 @@ Implemented test coverage includes:
 - adapter timeout handling that treats an already-emitted terminal success result as a successful prompt turn;
 - daemon workspace/session/prompt/events flow;
 - daemon propagation of workspace command policy into adapter prompt requests;
+- daemon idempotent workspace registration by project root;
 - daemon workspace project listing;
 - daemon event history filtering;
 - daemon session diff hunk reporting;
@@ -272,7 +283,9 @@ Implemented test coverage includes:
 - daemon route decision provider/task/mode filtering;
 - daemon session status/provider/workspace filtering;
 - daemon configurable sticky routing policy;
+- daemon provider/runtime failure threshold routing skip;
 - daemon handoff creation and accept flow;
+- daemon handoff fact extraction from session events and routes;
 - daemon handoff status/provider filtering;
 - daemon handoff artifact path response and event payload;
 - daemon checkpoint policy handling for handoff facts;
@@ -280,6 +293,7 @@ Implemented test coverage includes:
 - daemon permission command risk reporting;
 - daemon permission risk-level filtering;
 - daemon session status transitions (Running, Failed, Canceled, recovery);
+- daemon explicit Completed status and prompt reopening behavior;
 - daemon startup recovery for in-flight sessions;
 - daemon canceled session prompt rejection;
 - daemon ignored-result guard for prompts that complete after session cancellation;
@@ -290,9 +304,11 @@ Implemented test coverage includes:
 - TUI selected provider, permission and handoff markers;
 - TUI provider error hints for authentication, timeout and inferred quota/rate limits;
 - TUI latest session state loading;
+- TUI selected recent-session cycling and loading;
 - TUI recent session list parsing and display;
 - TUI new session reset behavior;
 - TUI session cancel state updates;
+- TUI session complete state updates;
 - TUI handoff preview and accept guard behavior;
 - TUI handoff preview detail rendering;
 - TUI permission selection and resolution display;
@@ -303,6 +319,8 @@ Implemented test coverage includes:
 - TUI prompt worker detachment after cancellation.
 - TUI runtime policy rendering and fallback behavior.
 - TUI Codex assistant-message parsing, full assistant output preservation and transcript scrolling.
+- TUI transcript section rendering and immediate per-turn target/policy/thinking feedback.
+- TUI auto-started daemon ownership marker for shutdown lifecycle.
 
 Last measured coverage snapshot:
 

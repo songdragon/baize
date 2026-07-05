@@ -170,6 +170,7 @@ pub fn select_provider(
         };
     }
 
+    let mut skipped = Vec::new();
     if let Some(wid) = workspace_id {
         if let Some(sticky) = try_sticky_provider(state, wid) {
             return sticky;
@@ -178,13 +179,20 @@ pub fn select_provider(
 
     let ordered = ordered_provider_profiles(&state.config);
     for provider in &ordered {
+        if let Some(reason) = provider_failure_block_reason(state, &provider.id.0) {
+            skipped.push(reason);
+            continue;
+        }
         if is_provider_routable(state, &provider.id.0) {
             return RoutingResult {
                 provider_id: provider.id.clone(),
                 previous_provider_id: None,
-                reason: format!(
-                    "Selected {} from configured provider priority.",
-                    provider.id.0
+                reason: append_skipped_provider_reasons(
+                    format!(
+                        "Selected {} from configured provider priority.",
+                        provider.id.0
+                    ),
+                    &skipped,
                 ),
                 confidence: 0.75,
             };
@@ -192,15 +200,26 @@ pub fn select_provider(
     }
     let fallback = ordered
         .iter()
-        .find(|provider| baize_adapters::is_prompt_runtime_supported(&provider.id))
+        .find(|provider| {
+            baize_adapters::is_prompt_runtime_supported(&provider.id)
+                && provider_failure_block_reason(state, &provider.id.0).is_none()
+        })
+        .or_else(|| {
+            ordered
+                .iter()
+                .find(|provider| baize_adapters::is_prompt_runtime_supported(&provider.id))
+        })
         .map(|provider| provider.id.clone())
         .unwrap_or_else(|| baize_core::ProviderId("codex".to_string()));
     RoutingResult {
         provider_id: fallback.clone(),
         previous_provider_id: None,
-        reason: format!(
-            "Selected {} (higher-priority providers unavailable or unsupported).",
-            fallback.0
+        reason: append_skipped_provider_reasons(
+            format!(
+                "Selected {} (higher-priority providers unavailable, unsupported, or failure-limited).",
+                fallback.0
+            ),
+            &skipped,
         ),
         confidence: 0.6,
     }
@@ -229,6 +248,9 @@ fn try_sticky_provider(
     if !is_provider_routable(state, &active.0) {
         return None;
     }
+    if provider_failure_block_reason(state, &active.0).is_some() {
+        return None;
+    }
     Some(RoutingResult {
         provider_id: active.clone(),
         previous_provider_id: Some(active.clone()),
@@ -238,6 +260,99 @@ fn try_sticky_provider(
         ),
         confidence: 0.85,
     })
+}
+
+fn append_skipped_provider_reasons(mut reason: String, skipped: &[String]) -> String {
+    if !skipped.is_empty() {
+        reason.push_str(" Skipped providers: ");
+        reason.push_str(&skipped.join("; "));
+    }
+    reason
+}
+
+pub(crate) fn provider_failure_block_reason(state: &AppState, provider_id: &str) -> Option<String> {
+    let threshold = usize::from(state.config.routing.failure_threshold_count);
+    if threshold == 0 {
+        return None;
+    }
+    let count = provider_runtime_failure_count(state, provider_id);
+    if count < threshold {
+        return None;
+    }
+    Some(format!(
+        "{provider_id} skipped after {count} provider/runtime failures since last success (threshold {threshold})"
+    ))
+}
+
+pub(crate) fn provider_runtime_failure_count(state: &AppState, provider_id: &str) -> usize {
+    let provider_id = baize_core::ProviderId(provider_id.to_string());
+    let events = with_store(state, |store| {
+        store.list_events_for_provider(&provider_id, Some(1000), None)
+    })
+    .unwrap_or_default();
+    let mut count = 0;
+    for event in events {
+        if is_successful_provider_completion(&event) {
+            count = 0;
+        } else if is_provider_runtime_failure(&event) {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn is_successful_provider_completion(event: &baize_core::BaizeEvent) -> bool {
+    event.event_type == "session.agent.completed"
+        && event
+            .payload
+            .get("success")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn is_provider_runtime_failure(event: &baize_core::BaizeEvent) -> bool {
+    if event.event_type != "session.agent.failed" {
+        return false;
+    }
+    event.payload.get("limit_inference").is_some()
+        || provider_error_kind_is_runtime(&event.payload)
+        || payload_text_is_runtime_failure(&event.payload)
+}
+
+fn provider_error_kind_is_runtime(payload: &serde_json::Value) -> bool {
+    payload
+        .get("provider_error")
+        .and_then(|error| error.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                "Authentication" | "Timeout" | "RateLimit" | "QuotaExceeded"
+            )
+        })
+}
+
+fn payload_text_is_runtime_failure(payload: &serde_json::Value) -> bool {
+    let text = payload
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| payload.get("stderr").and_then(serde_json::Value::as_str))
+        .unwrap_or_default();
+    if infer_provider_limit(text).is_some() {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "authentication",
+            "not authenticated",
+            "login required",
+            "please login",
+            "timeout",
+            "timed out",
+        ],
+    )
 }
 
 pub fn is_provider_healthy(_state: &AppState, provider_id: &str) -> bool {

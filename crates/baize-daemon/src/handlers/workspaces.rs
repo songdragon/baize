@@ -49,6 +49,52 @@ pub async fn create_workspace(
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "workspace".to_string())
     });
+    let root = status.git_root.clone().unwrap_or(status.root.clone());
+
+    if let Some((workspace, project)) = match with_store(&state, |store| {
+        let Some(mut project) = store.get_project_by_root(&root)? else {
+            return Ok(None);
+        };
+        let Some(mut workspace) = store.get_workspace(&project.workspace_id)? else {
+            anyhow::bail!(
+                "workspace {} not found for existing project",
+                project.workspace_id.0
+            );
+        };
+
+        workspace.updated_at = now;
+        project.active_branch = status.branch.clone();
+        project.kind = if status.git_root.is_some() {
+            ProjectKind::GitRepo
+        } else {
+            ProjectKind::Directory
+        };
+        project.vcs = if status.git_root.is_some() {
+            VcsKind::Git
+        } else {
+            VcsKind::None
+        };
+        project.updated_at = now;
+        store.upsert_workspace(&workspace)?;
+        store.upsert_project(&project)?;
+        Ok(Some((workspace, project)))
+    }) {
+        Ok(existing) => existing,
+        Err(error) => return internal_error(error.to_string()),
+    } {
+        let mut event = baize_core::BaizeEvent::new(
+            "workspace.status.changed",
+            serde_json::json!({ "workspace": workspace, "project": project, "reused": true }),
+        );
+        event.workspace_id = Some(workspace.id.clone());
+        state.record_event(event);
+        return ok_json(serde_json::json!({
+            "workspace": workspace,
+            "project": project,
+            "reused": true,
+        }));
+    }
+
     let workspace = Workspace {
         id: workspace_id.clone(),
         name,
@@ -59,7 +105,7 @@ pub async fn create_workspace(
     let project = Project {
         id: project_id,
         workspace_id: workspace_id.clone(),
-        root: status.git_root.clone().unwrap_or(status.root.clone()),
+        root,
         kind: if status.git_root.is_some() {
             ProjectKind::GitRepo
         } else {

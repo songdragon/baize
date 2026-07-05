@@ -710,6 +710,50 @@ pub async fn cancel_session(
     ok_json(serde_json::json!({ "session": session }))
 }
 
+pub async fn complete_session(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let session_id = TaskSessionId(id);
+    let mut session = match with_store(&state, |store| store.get_task_session(&session_id)) {
+        Ok(Some(session)) => session,
+        Ok(None) => return not_found("session not found"),
+        Err(error) => return internal_error(error.to_string()),
+    };
+    if matches!(session.status, TaskSessionStatus::Canceled) {
+        return bad_request("session is canceled");
+    }
+
+    let changed = !matches!(session.status, TaskSessionStatus::Completed);
+    session.status = TaskSessionStatus::Completed;
+    session.updated_at = Utc::now();
+    if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
+        return internal_error(error.to_string());
+    }
+
+    let mut completed = baize_core::BaizeEvent::new(
+        "session.completed",
+        serde_json::json!({ "status": "Completed" }),
+    );
+    completed.workspace_id = Some(session.workspace_id.clone());
+    completed.session_id = Some(session.id.clone());
+    completed.provider_id = session.active_provider_id.clone();
+    state.record_event(completed);
+
+    if changed {
+        let mut status_event = baize_core::BaizeEvent::new(
+            "session.status.changed",
+            serde_json::json!({ "status": "Completed" }),
+        );
+        status_event.workspace_id = Some(session.workspace_id.clone());
+        status_event.session_id = Some(session.id.clone());
+        status_event.provider_id = session.active_provider_id.clone();
+        state.record_event(status_event);
+    }
+
+    ok_json(serde_json::json!({ "session": session }))
+}
+
 pub async fn session_events(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
