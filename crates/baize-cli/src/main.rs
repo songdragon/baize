@@ -497,7 +497,7 @@ mod tests {
         let providers: serde_json::Value = serde_json::from_str(&output).expect("json");
 
         assert_eq!(providers[0]["id"], "codex");
-        assert_eq!(providers[1]["id"], "gemini");
+        assert_eq!(providers[1]["id"], "antigravity");
     }
 
     #[test]

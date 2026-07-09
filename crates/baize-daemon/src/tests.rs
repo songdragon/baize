@@ -393,8 +393,8 @@ async fn prompt_provider_target_switches_session_route_and_executor() {
             .header("content-type", "application/json")
             .body(Body::from(
                 json!({
-                    "prompt": "continue on gemini",
-                    "provider_id": "gemini"
+                    "prompt": "continue on antigravity",
+                    "provider_id": "antigravity"
                 })
                 .to_string(),
             ))
@@ -402,7 +402,7 @@ async fn prompt_provider_target_switches_session_route_and_executor() {
     )
     .await;
     assert_eq!(prompt["status"], "running");
-    assert_eq!(prompt["provider_id"], "gemini");
+    assert_eq!(prompt["provider_id"], "antigravity");
 
     let captured_provider = {
         let captured = requests.lock().expect("requests");
@@ -410,7 +410,7 @@ async fn prompt_provider_target_switches_session_route_and_executor() {
         assert_eq!(captured[0].execution_policy, AgentExecutionPolicy::Ask);
         captured[0].provider_id.0.clone()
     };
-    assert_eq!(captured_provider, "gemini");
+    assert_eq!(captured_provider, "antigravity");
 
     let updated = json_response(
         app.clone(),
@@ -421,7 +421,7 @@ async fn prompt_provider_target_switches_session_route_and_executor() {
             .expect("request"),
     )
     .await;
-    assert_eq!(updated["session"]["active_provider_id"], "gemini");
+    assert_eq!(updated["session"]["active_provider_id"], "antigravity");
 
     let routes = json_response(
         app,
@@ -435,7 +435,7 @@ async fn prompt_provider_target_switches_session_route_and_executor() {
     let route_items = routes["routes"].as_array().expect("routes");
     assert_eq!(route_items.len(), 2);
     assert_eq!(route_items[1]["previous_provider_id"], "codex");
-    assert_eq!(route_items[1]["selected_provider_id"], "gemini");
+    assert_eq!(route_items[1]["selected_provider_id"], "antigravity");
     assert_eq!(route_items[1]["mode"], "Manual");
     assert!(route_items[1]["reason"]
         .as_str()
@@ -553,7 +553,7 @@ async fn filters_sessions_by_status_provider_and_workspace() {
                 json!({
                     "workspace_id": second_workspace_id,
                     "objective": "debug failure",
-                    "provider_id": "gemini"
+                    "provider_id": "antigravity"
                 })
                 .to_string(),
             ))
@@ -1104,7 +1104,7 @@ async fn creates_handoff_artifact() {
                 json!({
                     "workspace_id": workspace_id,
                     "objective": "handoff me",
-                    "provider_id": "gemini"
+                    "provider_id": "antigravity"
                 })
                 .to_string(),
             ))
@@ -1130,7 +1130,7 @@ async fn creates_handoff_artifact() {
     )
     .await;
 
-    assert_eq!(handoff["handoff"]["from_provider_id"], "gemini");
+    assert_eq!(handoff["handoff"]["from_provider_id"], "antigravity");
     assert_eq!(handoff["handoff"]["to_provider_id"], "codex");
     assert_eq!(
         handoff["handoff"]["mechanical_facts"]["user_constraints"][0],
@@ -1169,7 +1169,10 @@ async fn creates_handoff_artifact() {
     .await;
     assert_eq!(accepted["handoff"]["status"], "Accepted");
     assert_eq!(accepted["session"]["active_provider_id"], "codex");
-    assert_eq!(accepted["route_decision"]["previous_provider_id"], "gemini");
+    assert_eq!(
+        accepted["route_decision"]["previous_provider_id"],
+        "antigravity"
+    );
     assert_eq!(accepted["route_decision"]["selected_provider_id"], "codex");
 
     let session = json_response(
@@ -1620,7 +1623,7 @@ async fn providers_follow_configured_order() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
     let mut config = BaizeConfig::default();
-    config.providers.order = vec!["gemini".to_string(), "codex".to_string()];
+    config.providers.order = vec!["antigravity".to_string(), "codex".to_string()];
     let app = router(AppState::with_executor(
         config,
         store,
@@ -1646,10 +1649,29 @@ async fn providers_follow_configured_order() {
     )
     .await;
 
-    assert_eq!(providers["providers"][0]["id"], "gemini");
+    assert_eq!(providers["providers"][0]["id"], "antigravity");
     assert_eq!(providers["providers"][1]["id"], "codex");
-    assert_eq!(providers["providers"][2]["id"], "copilot");
-    assert_eq!(providers["providers"][3]["id"], "opencode");
+    assert_eq!(providers["providers"][2]["id"], "opencode");
+    assert_eq!(providers["providers"][3]["id"], "copilot");
+}
+
+#[test]
+fn provider_order_migrates_legacy_gemini_default_to_antigravity() {
+    let mut config = BaizeConfig::default();
+    config.providers.order = vec![
+        "codex".to_string(),
+        "gemini".to_string(),
+        "copilot".to_string(),
+        "opencode".to_string(),
+    ];
+
+    let providers = crate::helpers::ordered_provider_profiles(&config);
+
+    assert_eq!(providers[0].id.0, "codex");
+    assert_eq!(providers[1].id.0, "antigravity");
+    assert_eq!(providers[2].id.0, "opencode");
+    assert_eq!(providers[3].id.0, "copilot");
+    assert!(providers.iter().all(|provider| provider.id.0 != "gemini"));
 }
 
 #[tokio::test]
@@ -1657,7 +1679,7 @@ async fn provider_health_check_follows_configured_order() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
     let mut config = BaizeConfig::default();
-    config.providers.order = vec!["gemini".to_string(), "codex".to_string()];
+    config.providers.order = vec!["antigravity".to_string(), "codex".to_string()];
     let app = router(AppState::with_executor(
         config,
         store,
@@ -1684,7 +1706,7 @@ async fn provider_health_check_follows_configured_order() {
     )
     .await;
 
-    assert_eq!(health["health"][0]["provider_id"], "gemini");
+    assert_eq!(health["health"][0]["provider_id"], "antigravity");
     assert_eq!(health["health"][1]["provider_id"], "codex");
 }
 
@@ -1693,7 +1715,7 @@ async fn provider_diagnostics_follow_configured_order_and_emit_event() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
     let mut config = BaizeConfig::default();
-    config.providers.order = vec!["gemini".to_string(), "codex".to_string()];
+    config.providers.order = vec!["antigravity".to_string(), "codex".to_string()];
     let state = AppState::with_executor(
         config,
         store,
@@ -1721,7 +1743,7 @@ async fn provider_diagnostics_follow_configured_order_and_emit_event() {
     )
     .await;
 
-    assert_eq!(diagnostics["diagnostics"][0]["provider_id"], "gemini");
+    assert_eq!(diagnostics["diagnostics"][0]["provider_id"], "antigravity");
     assert_eq!(diagnostics["diagnostics"][1]["provider_id"], "codex");
 
     let events = crate::helpers::with_store(&state, |store| {
@@ -2777,8 +2799,9 @@ fn select_provider_returns_requested_override() {
             },
         }),
     );
-    let result = crate::helpers::select_provider(&state, Some("gemini".to_string()), None, None);
-    assert_eq!(result.provider_id.0, "gemini");
+    let result =
+        crate::helpers::select_provider(&state, Some("antigravity".to_string()), None, None);
+    assert_eq!(result.provider_id.0, "antigravity");
     assert!(result.reason.contains("User-specified"));
 }
 
@@ -3117,7 +3140,7 @@ fn failure_threshold_skips_sticky_provider() {
         json!({ "limit_inference": { "kind": "RateLimit" } }),
     );
     let mut config = BaizeConfig::default();
-    config.providers.order = vec!["codex".to_string(), "gemini".to_string()];
+    config.providers.order = vec!["codex".to_string(), "antigravity".to_string()];
     config.routing.failure_threshold_count = 2;
     let state = AppState::with_executor(
         config,
@@ -3191,14 +3214,17 @@ async fn sticky_routing_can_be_disabled_by_config() {
                 json!({
                     "workspace_id": workspace_id,
                     "objective": "first session",
-                    "provider_id": "gemini"
+                    "provider_id": "antigravity"
                 })
                 .to_string(),
             ))
             .expect("request"),
     )
     .await;
-    assert_eq!(first_session["session"]["active_provider_id"], "gemini");
+    assert_eq!(
+        first_session["session"]["active_provider_id"],
+        "antigravity"
+    );
 
     let second_session = json_response(
         app,
@@ -3271,12 +3297,12 @@ fn select_provider_uses_custom_override_reason() {
     );
     let result = crate::helpers::select_provider(
         &state,
-        Some("gemini".to_string()),
+        Some("antigravity".to_string()),
         None,
-        Some("Gemini handles multi-file edits better".to_string()),
+        Some("Antigravity handles multi-file edits better".to_string()),
     );
-    assert_eq!(result.provider_id.0, "gemini");
-    assert_eq!(result.reason, "Gemini handles multi-file edits better");
+    assert_eq!(result.provider_id.0, "antigravity");
+    assert_eq!(result.reason, "Antigravity handles multi-file edits better");
     assert!((result.confidence - 1.0).abs() < 0.01);
 }
 

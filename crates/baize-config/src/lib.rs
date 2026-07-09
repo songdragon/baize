@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const KNOWN_PROVIDERS: &[&str] = &["codex", "gemini", "copilot", "opencode"];
+const KNOWN_PROVIDERS: &[&str] = &["codex", "antigravity", "gemini", "copilot", "opencode"];
 const COMMAND_POLICIES: &[&str] = &["ask", "allow_project", "deny"];
 const CHECKPOINT_POLICIES: &[&str] = &["before_handoff", "off"];
 
@@ -66,9 +66,9 @@ impl Default for BaizeConfig {
             providers: ProviderConfig {
                 order: vec![
                     "codex".to_string(),
-                    "gemini".to_string(),
-                    "copilot".to_string(),
+                    "antigravity".to_string(),
                     "opencode".to_string(),
+                    "copilot".to_string(),
                 ],
             },
         }
@@ -200,13 +200,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_uses_codex_gemini_first() {
+    fn default_config_uses_codex_antigravity_first() {
         let config = BaizeConfig::default();
 
         assert_eq!(config.daemon.host, "127.0.0.1");
         assert_eq!(config.daemon.port, 7878);
         assert_eq!(config.providers.order[0], "codex");
-        assert_eq!(config.providers.order[1], "gemini");
+        assert_eq!(config.providers.order[1], "antigravity");
+        assert_eq!(config.providers.order[2], "opencode");
         assert_eq!(config.workspace.command_policy, "ask");
         assert_eq!(config.routing.sticky_window_minutes, 30);
         assert_eq!(config.routing.quota_switch_threshold_percent, 10);

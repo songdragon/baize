@@ -4,14 +4,14 @@ Status: implemented and actively hardening
 
 ## Scope
 
-This MVP implements the review-passed technical spec as a local Rust daemon plus TUI shell. Gemini, Codex and OpenCode prompt execution paths are wired through CLI adapters; tests use fake executors and parser fixtures so CI does not spend model quota.
+This MVP implements the review-passed technical spec as a local Rust daemon plus TUI shell. Codex, Antigravity and OpenCode prompt execution paths are wired through CLI adapters; Gemini CLI is retained only as a legacy diagnostic profile. Tests use fake executors and parser fixtures so CI does not spend model quota.
 
 The MVP target is a single-workspace local agent supervisor:
 
 - inspect and register the current project;
 - create and resume task sessions;
 - route work to configured coding-agent providers;
-- execute prompt requests through Codex/Gemini/OpenCode CLI paths;
+- execute prompt requests through Codex/Antigravity/OpenCode CLI paths;
 - record session events, route decisions, handoffs and permissions;
 - let the user operate the workflow from a TUI;
 - keep the kernel API reusable for a future desktop app.
@@ -55,23 +55,23 @@ The MVP target is a single-workspace local agent supervisor:
 
 ### 4. Provider Validation And Adapters
 
-- default provider order: Codex, Gemini, Copilot, OpenCode;
+- default provider order: Codex, Antigravity, OpenCode, Copilot;
 - provider transport registry;
 - health probing via provider command `--version`;
 - ACP transport metadata for Copilot and OpenCode;
 - ACP initialize proof generation for ACP transports;
-- structured validation for Codex/Gemini/Copilot/OpenCode;
+- structured validation for Codex/OpenCode/Copilot, Antigravity CLI validation, plus legacy Gemini diagnostics;
 - detected capabilities and capability gap reporting;
 - daemon endpoints for provider validation;
-- Gemini `--prompt --output-format stream-json` execution path;
 - Codex `exec --json` execution path;
+- Antigravity `/Users/songdragon/.local/bin/agy --print` execution path;
 - OpenCode `run --format json` execution path;
-- workspace command policy mapping for Codex/Gemini/OpenCode execution arguments;
-- Codex/Gemini/OpenCode smoke validation command for auth, timeout and parser checks;
+- workspace command policy mapping for Codex/Antigravity/OpenCode execution arguments;
+- Codex/Antigravity/OpenCode smoke validation command for auth, timeout and parser checks;
 - stream-json/JSONL parser behavior;
 - native provider session ID extraction from structured output;
 - native provider session ID persistence and reuse for same-provider follow-up prompts;
-- provider-specific resume argument generation for Codex, Gemini and OpenCode follow-up prompts;
+- provider-specific resume argument generation for Codex, Antigravity and OpenCode follow-up prompts;
 - structured provider error classification and daemon reporting;
 - prompt execution timeout to prevent hanging on provider authentication or interactive prompts.
 
@@ -97,7 +97,7 @@ The MVP target is a single-workspace local agent supervisor:
 ### 6. Documentation
 
 - MVP quickstart for TUI usage with `BAIZE_DATA_DIR`;
-- provider CLI setup notes for Codex and Gemini;
+- provider CLI setup notes for Codex, Antigravity and OpenCode;
 - TUI keyboard shortcut reference;
 - local HTTP API examples with curl;
 - test, lint and coverage command reference.
@@ -258,10 +258,10 @@ Implemented test coverage includes:
 - provider priority and ACP transport metadata;
 - provider ACP initialize proof generation;
 - provider validation behavior;
-- Gemini/Codex/OpenCode command construction;
-- Gemini/Codex/OpenCode execution policy argument mapping;
-- Gemini/Codex/OpenCode resume argument generation where supported;
-- Gemini/Codex/OpenCode smoke validation without real prompt execution;
+- Codex/Antigravity/OpenCode command construction;
+- Codex/Antigravity/OpenCode execution policy argument mapping;
+- Codex/Antigravity/OpenCode resume argument generation where supported;
+- Codex/Antigravity/OpenCode smoke validation without real prompt execution;
 - stream-json/JSONL parser behavior;
 - adapter native provider session ID extraction;
 - adapter provider error classification;
@@ -366,7 +366,8 @@ These are still in scope for a more usable MVP.
 ### 4. Adapter Runtime
 
 - ~~Validate real Codex CLI execution end to end with authentication, timeout and JSON parsing~~ (done as `baize smoke codex`, with real prompt gated by `--run-prompt`);
-- ~~validate real Gemini CLI execution end to end with authentication, timeout and stream-json parsing~~ (done as `baize smoke gemini`, with real prompt gated by `--run-prompt`);
+- ~~add Antigravity provider profile and headless CLI command construction~~ (done as `baize smoke antigravity`; real prompt is gated by `--run-prompt`);
+- ~~disable Gemini CLI as a default prompt runtime after the Antigravity migration requirement~~ (done; legacy validation remains available);
 - ~~add OpenCode CLI prompt runtime beyond ACP metadata~~ (done with `opencode run --format json`; real prompt is gated by `baize smoke opencode --run-prompt`);
 - ~~preserve provider-native session/resume IDs when available~~ (done for structured output capture);
 - ~~expose adapter stderr and provider errors in a more structured form~~ (done);
@@ -383,7 +384,7 @@ These are still in scope for a more usable MVP.
 ### 6. Documentation
 
 - ~~Write a quickstart for running `baize tui` with local data directory~~ (done);
-- ~~document required provider CLI setup for Codex and Gemini~~ (done);
+- ~~document required provider CLI setup for Codex, Antigravity and OpenCode~~ (done);
 - ~~document current keyboard shortcuts~~ (done);
 - ~~document local API examples with curl~~ (done);
 - ~~document test and coverage commands~~ (done).

@@ -346,9 +346,12 @@ fn payload_text_is_runtime_failure(payload: &serde_json::Value) -> bool {
         &lower,
         &[
             "authentication",
+            "authenticating",
             "not authenticated",
             "login required",
             "please login",
+            "ineligibletier",
+            "unsupported_client",
             "timeout",
             "timed out",
         ],
@@ -374,14 +377,11 @@ pub fn is_provider_routable(state: &AppState, provider_id: &str) -> bool {
 
 pub fn ordered_provider_profiles(config: &BaizeConfig) -> Vec<baize_core::ProviderProfile> {
     let providers = default_provider_profiles();
-    let mut ordered = config
-        .providers
-        .order
-        .iter()
+    let mut ordered = effective_provider_order(config)
         .filter_map(|id| {
             providers
                 .iter()
-                .find(|provider| provider.id.0 == *id && provider.enabled)
+                .find(|provider| provider.id.0 == id && provider.enabled)
                 .cloned()
         })
         .collect::<Vec<_>>();
@@ -393,6 +393,44 @@ pub fn ordered_provider_profiles(config: &BaizeConfig) -> Vec<baize_core::Provid
     }
 
     ordered
+}
+
+fn effective_provider_order(config: &BaizeConfig) -> impl Iterator<Item = String> + '_ {
+    let old_default = ["codex", "gemini", "copilot", "opencode"];
+    if config
+        .providers
+        .order
+        .iter()
+        .map(String::as_str)
+        .eq(old_default)
+    {
+        return vec![
+            "codex".to_string(),
+            "antigravity".to_string(),
+            "opencode".to_string(),
+            "copilot".to_string(),
+        ]
+        .into_iter();
+    }
+
+    let has_antigravity = config
+        .providers
+        .order
+        .iter()
+        .any(|provider| provider == "antigravity");
+    config
+        .providers
+        .order
+        .iter()
+        .map(move |provider| {
+            if provider == "gemini" && !has_antigravity {
+                "antigravity".to_string()
+            } else {
+                provider.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 pub fn parse_permission_status(status: &str) -> Option<PermissionStatus> {

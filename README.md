@@ -1,6 +1,6 @@
 # Baize
 
-Baize is a workspace-native supervisor for local coding agents. It is designed to route work across agents such as Codex, Gemini CLI, GitHub Copilot CLI, and OpenCode while preserving workspace state and handoff context.
+Baize is a workspace-native supervisor for local coding agents. It is designed to route work across agents such as Codex, Antigravity, OpenCode, and GitHub Copilot CLI while preserving workspace state and handoff context.
 
 ## Current MVP
 
@@ -14,7 +14,7 @@ This repository currently contains the first Rust MVP skeleton:
 - ACP JSON-RPC message primitives;
 - provider registry and health probing stubs;
 - local daemon with HTTP + SSE workspace/session/handoff/permission APIs;
-- Gemini `stream-json` and Codex `exec --json` prompt execution paths;
+- Codex `exec --json`, OpenCode `run --format json`, and Antigravity `/Users/songdragon/.local/bin/agy --print` prompt execution paths;
 - ratatui TUI shell;
 - `baize` CLI entrypoint.
 
@@ -27,7 +27,7 @@ cargo run -p baize-cli -- status .
 cargo run -p baize-cli -- providers
 cargo run -p baize-cli -- doctor
 cargo run -p baize-cli -- validate
-cargo run -p baize-cli -- validate gemini
+cargo run -p baize-cli -- validate antigravity
 cargo run -p baize-cli -- daemon
 cargo run -p baize-cli -- tui
 cargo run -p baize-cli -- ask --provider codex "summarize this project"
@@ -73,4 +73,4 @@ GET  /events
 
 ## Notes
 
-The first adapter execution paths are Gemini `--prompt --output-format stream-json` and Codex `exec --json`. Tests use fake executors and parser fixtures so they do not spend model quota.
+The day-to-day adapter execution paths are Codex `exec --json`, OpenCode `run --format json`, and Antigravity `/Users/songdragon/.local/bin/agy --print`. Gemini CLI is retained only as a legacy diagnostic profile because individual Code Assist accounts are now directed to Antigravity. Tests use fake executors and parser fixtures so they do not spend model quota.

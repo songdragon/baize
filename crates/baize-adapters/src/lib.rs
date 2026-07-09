@@ -11,6 +11,8 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
+const ANTIGRAVITY_COMMAND: &str = "/Users/songdragon/.local/bin/agy";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderValidation {
     pub provider_id: ProviderId,
@@ -184,10 +186,65 @@ pub fn default_provider_profiles() -> Vec<ProviderProfile> {
             enabled: true,
         },
         ProviderProfile {
+            id: ProviderId("antigravity".to_string()),
+            kind: ProviderKind::Antigravity,
+            display_name: "Antigravity".to_string(),
+            priority: 2,
+            transports: vec![ProviderTransport::Cli {
+                command: ANTIGRAVITY_COMMAND.to_string(),
+                args: vec![],
+            }],
+            capabilities: ProviderCapabilities {
+                interactive_chat: true,
+                non_interactive_prompt: true,
+                shell_access: true,
+                session_resume: true,
+                ..ProviderCapabilities::default()
+            },
+            enabled: true,
+        },
+        ProviderProfile {
+            id: ProviderId("opencode".to_string()),
+            kind: ProviderKind::OpenCode,
+            display_name: "OpenCode".to_string(),
+            priority: 3,
+            transports: vec![ProviderTransport::Acp {
+                command: "opencode".to_string(),
+                args: vec!["acp".to_string()],
+            }],
+            capabilities: ProviderCapabilities {
+                interactive_chat: true,
+                non_interactive_prompt: true,
+                shell_access: true,
+                structured_output: true,
+                acp: true,
+                session_resume: true,
+                ..ProviderCapabilities::default()
+            },
+            enabled: true,
+        },
+        ProviderProfile {
+            id: ProviderId("copilot".to_string()),
+            kind: ProviderKind::Copilot,
+            display_name: "GitHub Copilot CLI".to_string(),
+            priority: 4,
+            transports: vec![ProviderTransport::Acp {
+                command: "copilot".to_string(),
+                args: vec!["--acp".to_string(), "--stdio".to_string()],
+            }],
+            capabilities: ProviderCapabilities {
+                interactive_chat: true,
+                shell_access: true,
+                acp: true,
+                ..ProviderCapabilities::default()
+            },
+            enabled: true,
+        },
+        ProviderProfile {
             id: ProviderId("gemini".to_string()),
             kind: ProviderKind::Gemini,
-            display_name: "Gemini CLI".to_string(),
-            priority: 2,
+            display_name: "Gemini CLI (legacy)".to_string(),
+            priority: 90,
             transports: vec![
                 ProviderTransport::Acp {
                     command: "gemini".to_string(),
@@ -207,44 +264,7 @@ pub fn default_provider_profiles() -> Vec<ProviderProfile> {
                 session_resume: true,
                 ..ProviderCapabilities::default()
             },
-            enabled: true,
-        },
-        ProviderProfile {
-            id: ProviderId("copilot".to_string()),
-            kind: ProviderKind::Copilot,
-            display_name: "GitHub Copilot CLI".to_string(),
-            priority: 3,
-            transports: vec![ProviderTransport::Acp {
-                command: "copilot".to_string(),
-                args: vec!["--acp".to_string(), "--stdio".to_string()],
-            }],
-            capabilities: ProviderCapabilities {
-                interactive_chat: true,
-                shell_access: true,
-                acp: true,
-                ..ProviderCapabilities::default()
-            },
-            enabled: true,
-        },
-        ProviderProfile {
-            id: ProviderId("opencode".to_string()),
-            kind: ProviderKind::OpenCode,
-            display_name: "OpenCode".to_string(),
-            priority: 4,
-            transports: vec![ProviderTransport::Acp {
-                command: "opencode".to_string(),
-                args: vec!["acp".to_string()],
-            }],
-            capabilities: ProviderCapabilities {
-                interactive_chat: true,
-                non_interactive_prompt: true,
-                shell_access: true,
-                structured_output: true,
-                acp: true,
-                session_resume: true,
-                ..ProviderCapabilities::default()
-            },
-            enabled: true,
+            enabled: false,
         },
     ]
 }
@@ -350,8 +370,11 @@ pub fn is_prompt_runtime_supported(provider_id: &ProviderId) -> bool {
 
 pub fn run_agent_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
     match request.provider_id.0.as_str() {
-        "gemini" => run_gemini_prompt(request),
+        "antigravity" => run_antigravity_prompt(request),
         "codex" => run_codex_prompt(request),
+        "gemini" => anyhow::bail!(
+            "gemini prompt execution is disabled because Gemini CLI is no longer supported for individual Code Assist accounts; use antigravity instead"
+        ),
         "opencode" => run_opencode_prompt(request),
         other => anyhow::bail!("provider execution is not implemented for {other}"),
     }
@@ -379,12 +402,14 @@ pub fn smoke_provider(
         execution_policy: AgentExecutionPolicy::Deny,
     };
     let prompt_command_args = match provider_id.0.as_str() {
+        "antigravity" => build_antigravity_args(&prompt_request),
         "codex" => build_codex_args(&prompt_request),
         "gemini" => build_gemini_args(&prompt_request),
         "opencode" => build_opencode_args(&prompt_request),
         other => anyhow::bail!("provider smoke is not implemented for {other}"),
     };
     let fixture = match provider_id.0.as_str() {
+        "antigravity" => "baize-smoke",
         "codex" => {
             r#"{"type":"message","session_id":"smoke_codex_session","message":{"content":[{"text":"baize-smoke"}]}}"#
         }
@@ -396,7 +421,7 @@ pub fn smoke_provider(
         }
         _ => unreachable!("provider checked above"),
     };
-    let parser_events = parse_stream_json_lines(fixture);
+    let parser_events = parse_agent_events(&provider_id, fixture);
     let parser_native_session_id = extract_native_session_id(fixture);
     let prompt_result = if options.run_prompt {
         Some(run_agent_prompt(prompt_request)?)
@@ -437,6 +462,35 @@ pub fn build_gemini_args(request: &AgentPromptRequest) -> Vec<String> {
     args
 }
 
+pub fn build_antigravity_args(request: &AgentPromptRequest) -> Vec<String> {
+    let mode = match request.execution_policy {
+        AgentExecutionPolicy::Deny => "plan",
+        AgentExecutionPolicy::Ask | AgentExecutionPolicy::AllowProject => "accept-edits",
+    };
+    let mut args = vec![
+        "--print".to_string(),
+        "--add-dir".to_string(),
+        request.cwd.to_string_lossy().to_string(),
+        "--mode".to_string(),
+        mode.to_string(),
+    ];
+    if matches!(
+        request.execution_policy,
+        AgentExecutionPolicy::Deny | AgentExecutionPolicy::Ask
+    ) {
+        args.push("--sandbox".to_string());
+    }
+    if matches!(request.execution_policy, AgentExecutionPolicy::AllowProject) {
+        args.push("--dangerously-skip-permissions".to_string());
+    }
+    if let Some(session_id) = &request.session_id {
+        args.push("--conversation".to_string());
+        args.push(session_id.clone());
+    }
+    args.push(request.prompt.clone());
+    args
+}
+
 pub fn build_codex_args(request: &AgentPromptRequest) -> Vec<String> {
     let sandbox = match request.execution_policy {
         AgentExecutionPolicy::Deny => "read-only",
@@ -471,7 +525,7 @@ pub fn build_opencode_args(request: &AgentPromptRequest) -> Vec<String> {
         args.push(session_id.clone());
     }
     if matches!(request.execution_policy, AgentExecutionPolicy::AllowProject) {
-        args.push("--dangerously-skip-permissions".to_string());
+        args.push("--auto".to_string());
     }
     args.push(request.prompt.clone());
     args
@@ -519,8 +573,11 @@ pub fn classify_agent_error(text: &str, source: AgentErrorSource) -> Option<Agen
     } else if lower.contains("unauthorized")
         || lower.contains("not authenticated")
         || lower.contains("authentication")
+        || lower.contains("authenticating")
         || lower.contains("login required")
         || lower.contains("please login")
+        || lower.contains("ineligibletier")
+        || lower.contains("unsupported_client")
     {
         AgentErrorKind::Authentication
     } else if lower.contains("429")
@@ -547,17 +604,17 @@ pub fn classify_agent_error(text: &str, source: AgentErrorSource) -> Option<Agen
     })
 }
 
-fn run_gemini_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
+fn run_antigravity_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
     let run = run_command_with_timeout(
-        "gemini",
-        &build_gemini_args(&request),
+        ANTIGRAVITY_COMMAND,
+        &build_antigravity_args(&request),
         &request.cwd,
         timeout_for(&request),
     )
-    .with_context(|| "failed to run gemini prompt")?;
+    .with_context(|| "failed to run agy prompt")?;
     Ok(agent_result_from_command_run(
         request.provider_id,
-        "gemini",
+        "agy",
         run,
     ))
 }
@@ -613,15 +670,30 @@ fn agent_result_from_command_run(
     } else {
         classify_agent_error(&stderr, AgentErrorSource::Stderr)
     };
+    let native_session_id = extract_native_session_id(&stdout);
+    let events = parse_agent_events(&provider_id, &stdout);
     AgentRunResult {
         provider_id,
         success,
         exit_code: run.output.status.code(),
-        native_session_id: extract_native_session_id(&stdout),
-        events: parse_stream_json_lines(&stdout),
+        native_session_id,
+        events,
         error,
         stderr,
     }
+}
+
+fn parse_agent_events(provider_id: &ProviderId, raw: &str) -> Vec<AgentExecutionEvent> {
+    let events = parse_stream_json_lines(raw);
+    if !events.is_empty() || provider_id.0 != "antigravity" || raw.trim().is_empty() {
+        return events;
+    }
+
+    vec![AgentExecutionEvent {
+        kind: AgentExecutionEventKind::Output,
+        text: Some(raw.trim().to_string()),
+        raw: None,
+    }]
 }
 
 fn stream_reports_success(raw: &str) -> bool {
@@ -730,6 +802,12 @@ fn detect_capabilities(
             mcp_server: help.contains("mcp-server"),
             app_server: help.contains("app-server"),
         },
+        ProviderKind::Antigravity => DetectedCapabilities {
+            non_interactive_prompt: help.contains("--print") || help.contains("--prompt"),
+            structured_output: false,
+            session_resume: help.contains("--conversation") || help.contains("--continue"),
+            ..DetectedCapabilities::default()
+        },
         ProviderKind::Gemini => DetectedCapabilities {
             non_interactive_prompt: help.contains("--prompt"),
             structured_output: help.contains("--output-format") && help.contains("stream-json"),
@@ -814,7 +892,9 @@ fn find_text(value: &Value) -> Option<String> {
 }
 
 fn find_event_text(value: &Value) -> Option<String> {
-    find_codex_agent_message_text(value).or_else(|| find_text(value))
+    find_codex_agent_message_text(value)
+        .or_else(|| find_opencode_part_text(value))
+        .or_else(|| find_text(value))
 }
 
 fn find_codex_agent_message_text(value: &Value) -> Option<String> {
@@ -824,6 +904,18 @@ fn find_codex_agent_message_text(value: &Value) -> Option<String> {
         return None;
     }
     find_text(item)
+}
+
+fn find_opencode_part_text(value: &Value) -> Option<String> {
+    let part = value.get("part")?;
+    let part_type = part.get("type").and_then(Value::as_str)?;
+    if part_type != "text" {
+        return None;
+    }
+    part.get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn find_session_id(value: &Value) -> Option<String> {
@@ -951,7 +1043,7 @@ fn diagnostic_from_validation(
 }
 
 fn prompt_runtime_supported(provider_id: &ProviderId) -> bool {
-    matches!(provider_id.0.as_str(), "codex" | "gemini" | "opencode")
+    matches!(provider_id.0.as_str(), "antigravity" | "codex" | "opencode")
 }
 
 fn primary_command(profile: &ProviderProfile) -> Option<&str> {
@@ -1007,13 +1099,15 @@ mod tests {
     use baize_core::ProviderTransport;
 
     #[test]
-    fn default_profiles_prioritize_codex_and_gemini() {
+    fn default_profiles_prioritize_codex_antigravity_and_opencode() {
         let profiles = default_provider_profiles();
 
         assert_eq!(profiles[0].id.0, "codex");
-        assert_eq!(profiles[1].id.0, "gemini");
-        assert_eq!(profiles[2].id.0, "copilot");
-        assert_eq!(profiles[3].id.0, "opencode");
+        assert_eq!(profiles[1].id.0, "antigravity");
+        assert_eq!(profiles[2].id.0, "opencode");
+        assert_eq!(profiles[3].id.0, "copilot");
+        assert_eq!(profiles[4].id.0, "gemini");
+        assert!(!profiles[4].enabled);
     }
 
     #[test]
@@ -1125,6 +1219,27 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_help_detection_finds_agy_print_and_resume() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "antigravity")
+            .expect("antigravity profile");
+        let help = "Usage of agy:\n  --print Run a single prompt non-interactively and print the response\n  --prompt Alias for --print\n  --conversation Resume a previous conversation by ID\n  --continue Continue the most recent conversation\n  --mode Set the agent execution mode for this session (accept-edits, plan)\n";
+
+        let detected = detect_capabilities(&profile, Some(help), None, None);
+
+        assert!(detected.non_interactive_prompt);
+        assert!(!detected.structured_output);
+        assert!(detected.session_resume);
+
+        let chat_only_help =
+            "Subcommands\n  chat         Pass in a prompt to run in a chat session\n";
+        let chat_detected = detect_capabilities(&profile, Some(chat_only_help), None, None);
+        assert!(!chat_detected.non_interactive_prompt);
+        assert!(!chat_detected.session_resume);
+    }
+
+    #[test]
     fn opencode_help_detection_finds_run_json_and_resume() {
         let profile = default_provider_profiles()
             .into_iter()
@@ -1226,11 +1341,11 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_reports_ready_for_supported_healthy_provider() {
+    fn diagnostic_reports_ready_for_antigravity_prompt_runtime() {
         let profile = default_provider_profiles()
             .into_iter()
-            .find(|profile| profile.id.0 == "gemini")
-            .expect("gemini profile");
+            .find(|profile| profile.id.0 == "antigravity")
+            .expect("antigravity profile");
         let validation = ProviderValidation {
             provider_id: profile.id.clone(),
             health: ProviderHealth {
@@ -1240,15 +1355,13 @@ mod tests {
                 last_error: None,
                 checked_at: Utc::now(),
             },
-            version: Some("gemini 1.0.0".to_string()),
+            version: Some("1.1.0".to_string()),
             detected: DetectedCapabilities {
                 non_interactive_prompt: true,
-                structured_output: true,
-                acp: true,
                 session_resume: true,
                 ..DetectedCapabilities::default()
             },
-            acp_proof: build_acp_proof(&profile),
+            acp_proof: None,
             capability_gaps: Vec::new(),
         };
 
@@ -1259,7 +1372,7 @@ mod tests {
         assert!(diagnostic
             .suggested_actions
             .iter()
-            .any(|action| action.contains("baize smoke gemini --run-prompt")));
+            .any(|action| action.contains("baize smoke antigravity --run-prompt")));
     }
 
     #[test]
@@ -1268,10 +1381,13 @@ mod tests {
             "codex".to_string()
         )));
         assert!(is_prompt_runtime_supported(&ProviderId(
-            "gemini".to_string()
+            "antigravity".to_string()
         )));
         assert!(is_prompt_runtime_supported(&ProviderId(
             "opencode".to_string()
+        )));
+        assert!(!is_prompt_runtime_supported(&ProviderId(
+            "gemini".to_string()
         )));
         assert!(!is_prompt_runtime_supported(&ProviderId(
             "copilot".to_string()
@@ -1299,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_deny_gemini_stream_json_command() {
+    fn builds_deny_gemini_stream_json_command_for_legacy_smoke() {
         let request = AgentPromptRequest {
             provider_id: ProviderId("gemini".to_string()),
             prompt: "hello".to_string(),
@@ -1345,6 +1461,61 @@ mod tests {
         assert!(allow_args
             .windows(2)
             .any(|pair| pair == ["--approval-mode", "auto_edit"]));
+    }
+
+    #[test]
+    fn builds_antigravity_print_command() {
+        let request = AgentPromptRequest {
+            provider_id: ProviderId("antigravity".to_string()),
+            prompt: "hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: Some("session-1".to_string()),
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Deny,
+        };
+
+        let args = build_antigravity_args(&request);
+
+        assert_eq!(args[0], "--print");
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--add-dir", "/tmp/project"]));
+        assert!(args.windows(2).any(|pair| pair == ["--mode", "plan"]));
+        assert!(args.contains(&"--sandbox".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--conversation", "session-1"]));
+        assert!(!args.contains(&"run".to_string()));
+        assert!(!args.contains(&"--format".to_string()));
+        assert!(!args.contains(&"json".to_string()));
+        assert_eq!(args.last().expect("prompt"), "hello");
+    }
+
+    #[test]
+    fn antigravity_execution_policy_controls_mode_and_permissions() {
+        let mut request = AgentPromptRequest {
+            provider_id: ProviderId("antigravity".to_string()),
+            prompt: "hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: None,
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Ask,
+        };
+
+        let ask_args = build_antigravity_args(&request);
+        assert!(ask_args
+            .windows(2)
+            .any(|pair| pair == ["--mode", "accept-edits"]));
+        assert!(ask_args.contains(&"--sandbox".to_string()));
+        assert!(!ask_args.contains(&"--dangerously-skip-permissions".to_string()));
+
+        request.execution_policy = AgentExecutionPolicy::AllowProject;
+        let allow_args = build_antigravity_args(&request);
+        assert!(allow_args
+            .windows(2)
+            .any(|pair| pair == ["--mode", "accept-edits"]));
+        assert!(!allow_args.contains(&"--sandbox".to_string()));
+        assert!(allow_args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     #[test]
@@ -1438,6 +1609,7 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--session", "session-1"]));
         assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!args.contains(&"--auto".to_string()));
         assert_eq!(args.last().expect("prompt"), "hello");
     }
 
@@ -1454,7 +1626,7 @@ mod tests {
 
         let args = build_opencode_args(&request);
 
-        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--auto".to_string()));
     }
 
     #[test]
@@ -1512,6 +1684,35 @@ mod tests {
             report.parser_native_session_id.as_deref(),
             Some("smoke_gemini_session")
         );
+        assert_eq!(report.parser_event_count, 1);
+    }
+
+    #[test]
+    fn antigravity_smoke_builds_print_command_without_prompt_run() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "antigravity")
+            .expect("antigravity profile");
+
+        let report = smoke_provider(
+            &profile,
+            ProviderSmokeOptions {
+                cwd: PathBuf::from("."),
+                run_prompt: false,
+                prompt: "baize smoke".to_string(),
+                timeout_seconds: Some(5),
+            },
+        )
+        .expect("smoke report");
+
+        assert!(report.prompt_skipped);
+        assert!(report
+            .prompt_command_args
+            .windows(2)
+            .any(|pair| pair == ["--mode", "plan"]));
+        assert!(report.prompt_command_args.contains(&"--print".to_string()));
+        assert!(!report.prompt_command_args.contains(&"--format".to_string()));
+        assert_eq!(report.parser_native_session_id, None);
         assert_eq!(report.parser_event_count, 1);
     }
 
@@ -1575,6 +1776,41 @@ mod tests {
         assert!(matches!(events[0].kind, AgentExecutionEventKind::Raw));
         assert!(matches!(events[1].kind, AgentExecutionEventKind::Output));
         assert_eq!(events[1].text.as_deref(), Some("baize-smoke"));
+    }
+
+    #[test]
+    fn parses_opencode_text_part_as_assistant_output() {
+        let raw = r#"
+        {"type":"step_start","sessionID":"ses_1","part":{"type":"step-start","sessionID":"ses_1"}}
+        {"type":"text","sessionID":"ses_1","part":{"type":"text","sessionID":"ses_1","text":"hello from opencode"}}
+        {"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","sessionID":"ses_1","reason":"stop"}}
+        "#;
+
+        let events = parse_stream_json_lines(raw);
+
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0].kind, AgentExecutionEventKind::Raw));
+        assert!(matches!(events[1].kind, AgentExecutionEventKind::Output));
+        assert_eq!(events[1].text.as_deref(), Some("hello from opencode"));
+        assert!(matches!(events[2].kind, AgentExecutionEventKind::Raw));
+        assert_eq!(extract_native_session_id(raw).as_deref(), Some("ses_1"));
+    }
+
+    #[test]
+    fn parses_antigravity_plain_print_output_as_assistant_output() {
+        let events = parse_agent_events(&ProviderId("antigravity".to_string()), "hello from agy\n");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, AgentExecutionEventKind::Output));
+        assert_eq!(events[0].text.as_deref(), Some("hello from agy"));
+        assert!(events[0].raw.is_none());
+    }
+
+    #[test]
+    fn plain_output_fallback_only_applies_to_antigravity() {
+        let events = parse_agent_events(&ProviderId("opencode".to_string()), "plain text\n");
+
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -1671,6 +1907,13 @@ mod tests {
         )
         .expect("quota error");
         assert_eq!(quota.kind, AgentErrorKind::QuotaExceeded);
+
+        let ineligible = classify_agent_error(
+            "Error authenticating: IneligibleTierError: UNSUPPORTED_CLIENT",
+            AgentErrorSource::Stderr,
+        )
+        .expect("ineligible error");
+        assert_eq!(ineligible.kind, AgentErrorKind::Authentication);
     }
 
     #[test]

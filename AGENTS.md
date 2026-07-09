@@ -4,7 +4,7 @@ Guide for AI agents working on the Baize codebase.
 
 ## Project Overview
 
-Baize is a workspace-native supervisor for local coding agents. It routes work across providers (Codex, Gemini CLI, GitHub Copilot CLI, OpenCode) while preserving workspace state and handoff context. The architecture is a headless daemon with HTTP+SSE APIs plus a thin TUI client.
+Baize is a workspace-native supervisor for local coding agents. It routes work across providers (Codex, Antigravity, OpenCode, GitHub Copilot CLI, with Gemini CLI retained only as a legacy diagnostic profile) while preserving workspace state and handoff context. The architecture is a headless daemon with HTTP+SSE APIs plus a thin TUI client.
 
 - **Language**: Rust (stable, edition 2021)
 - **Workspace**: 9 crates under `crates/`, resolver = "2"
@@ -159,7 +159,7 @@ These items are in scope for the current MVP but not yet implemented:
 - TUI: scrollback, session list view, handoff detail view, better error display
 - Daemon: proper HTTP status codes, pagination, session status transitions, structured handoff/permission list endpoints
 - Routing: sticky routing, health-aware selection, quota inference, configurable thresholds
-- Adapters: end-to-end Codex/Gemini CLI validation, structured stderr, Copilot/OpenCode ACP proof-of-life
+- Adapters: end-to-end Codex/Antigravity/OpenCode CLI validation, structured stderr, Copilot/OpenCode ACP proof-of-life
 - Persistence: SQLite migration versioning, crash recovery, checkpoint references
 
 Post-MVP items (do not implement): ACP lifecycle, multi-workspace TUI, desktop app, cloud sync, concurrent multi-agent.

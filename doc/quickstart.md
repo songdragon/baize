@@ -27,18 +27,25 @@ BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- daemon
 Baize currently wires prompt execution through:
 
 - Codex: `codex exec --json`
-- Gemini: `gemini --prompt ... --output-format stream-json`
+- OpenCode: `opencode run --format json`
+- Antigravity: `/Users/songdragon/.local/bin/agy --print`
 
-Install and authenticate those CLIs with their own login/setup flows before sending real prompts through Baize. The MVP validation commands do not spend model quota by themselves:
+Gemini CLI is no longer a default prompt provider for Baize because individual Gemini Code Assist accounts are directed to Antigravity. Baize keeps Gemini only as a legacy diagnostic profile, so old sessions remain readable but new default routing avoids it.
+
+If an older config file still contains the previous default order `codex, gemini, copilot, opencode`, the daemon treats that order as `codex, antigravity, opencode, copilot` at runtime.
+
+Install and authenticate provider CLIs with their own login/setup flows before sending real prompts through Baize. The MVP validation commands do not spend model quota by themselves:
 
 ```sh
 cargo run -p baize-cli -- doctor
 cargo run -p baize-cli -- providers
 cargo run -p baize-cli -- validate
 cargo run -p baize-cli -- validate codex
-cargo run -p baize-cli -- validate gemini
+cargo run -p baize-cli -- validate antigravity
+cargo run -p baize-cli -- validate opencode
 cargo run -p baize-cli -- smoke codex
-cargo run -p baize-cli -- smoke gemini
+cargo run -p baize-cli -- smoke antigravity
+cargo run -p baize-cli -- smoke opencode
 cargo run -p baize-cli -- ask --provider codex "summarize this project"
 ```
 
@@ -48,7 +55,8 @@ The smoke commands check provider discovery, command construction and structured
 
 ```sh
 cargo run -p baize-cli -- smoke codex --run-prompt --timeout-seconds 30
-cargo run -p baize-cli -- smoke gemini --run-prompt --timeout-seconds 30
+cargo run -p baize-cli -- smoke opencode --run-prompt --timeout-seconds 30
+cargo run -p baize-cli -- smoke antigravity --run-prompt --timeout-seconds 30
 ```
 
 Only use `--run-prompt` when the provider CLI is installed, authenticated and you are ready to spend provider quota.
@@ -57,11 +65,11 @@ Only use `--run-prompt` when the provider CLI is installed, authenticated and yo
 
 Prompt execution follows `workspace.command_policy` in `~/.config/baize/config.toml`:
 
-| Policy | Codex | Gemini |
-|---|---|---|
-| `ask` | `--sandbox workspace-write` | `--approval-mode default` |
-| `allow_project` | `--sandbox workspace-write` | `--approval-mode auto_edit` |
-| `deny` | `--sandbox read-only` | `--approval-mode plan` |
+| Policy | Codex | Antigravity | OpenCode |
+|---|---|---|---|
+| `ask` | `--sandbox workspace-write` | `--mode accept-edits --sandbox` | no extra approval flag |
+| `allow_project` | `--sandbox workspace-write` | `--mode accept-edits --dangerously-skip-permissions` | `--auto` |
+| `deny` | `--sandbox read-only` | `--mode plan --sandbox` | no extra approval flag |
 
 The default is `ask`. Use `deny` when you want Baize to inspect or plan without modifying files.
 
@@ -100,7 +108,7 @@ In another terminal:
 curl -s http://127.0.0.1:7878/health
 curl -s http://127.0.0.1:7878/providers
 curl -s -X POST http://127.0.0.1:7878/providers/diagnose
-curl -s http://127.0.0.1:7878/providers/gemini/diagnose
+curl -s http://127.0.0.1:7878/providers/antigravity/diagnose
 curl -s http://127.0.0.1:7878/providers/opencode/validate
 curl -s "http://127.0.0.1:7878/workspaces/status?path=."
 ```

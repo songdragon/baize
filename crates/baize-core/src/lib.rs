@@ -167,6 +167,7 @@ pub struct ProviderProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProviderKind {
     Codex,
+    Antigravity,
     Gemini,
     Copilot,
     OpenCode,

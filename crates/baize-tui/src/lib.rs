@@ -150,9 +150,9 @@ impl Default for TuiState {
             activity_status: "idle".to_string(),
             providers: vec![
                 "codex".to_string(),
-                "gemini".to_string(),
-                "copilot".to_string(),
+                "antigravity".to_string(),
                 "opencode".to_string(),
+                "copilot".to_string(),
             ],
             provider_health: Vec::new(),
             provider_diagnostics: Vec::new(),
@@ -439,7 +439,7 @@ fn run_prompt_submission(
         &format!("/sessions/{session_id}/prompt"),
         prompt_request_body(&submission.provider_id, &submission.prompt),
     )?;
-    let events_response = get_json(&format!("/sessions/{session_id}/events"))?;
+    let events_response = get_json(&session_events_path(session_id, &submission.provider_id))?;
     let routes_response = get_json(&format!("/sessions/{session_id}/routes"))?;
     let diff_response = get_json(&format!("/sessions/{session_id}/diff"))?;
 
@@ -449,6 +449,10 @@ fn run_prompt_submission(
         routes_response,
         diff_response,
     })
+}
+
+fn session_events_path(session_id: &str, provider_id: &str) -> String {
+    format!("/sessions/{session_id}/events?provider_id={provider_id}")
 }
 
 fn apply_prompt_completion(state: &mut TuiState, completion: PromptTaskCompletion) {
@@ -3037,13 +3041,13 @@ mod tests {
 
         let submission = begin_prompt_submission(&mut state).expect("submission");
 
-        assert_eq!(submission.provider_id, "gemini");
+        assert_eq!(submission.provider_id, "antigravity");
         assert_eq!(submission.prompt, "你能做什么");
         assert!(state.input.is_empty());
-        assert_eq!(state.activity_status, "running gemini");
+        assert_eq!(state.activity_status, "running antigravity");
         assert!(state.transcript_text().contains("╭─ task"));
         assert!(state.transcript_text().contains("> 你能做什么"));
-        assert!(state.transcript_text().contains("target: gemini"));
+        assert!(state.transcript_text().contains("target: antigravity"));
         assert!(state
             .transcript_text()
             .contains("policy: read-only (read-only)"));
@@ -3102,7 +3106,7 @@ mod tests {
     fn begin_prompt_submission_blocks_unsupported_runtime_provider() {
         let mut state = TuiState {
             input: "summarize project".to_string(),
-            selected_provider_index: 2,
+            selected_provider_index: 3,
             provider_diagnostics: vec![ProviderDiagnosticView {
                 provider_id: "copilot".to_string(),
                 readiness: "UnsupportedRuntime".to_string(),
@@ -3145,7 +3149,7 @@ mod tests {
                     last_error: None,
                 },
                 ProviderHealthView {
-                    provider_id: "gemini".to_string(),
+                    provider_id: "antigravity".to_string(),
                     status: "Healthy".to_string(),
                     last_error: None,
                 },
@@ -3168,7 +3172,7 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("codex"));
-        assert!(rendered.contains("gemini"));
+        assert!(rendered.contains("antigr..."));
         assert!(rendered.contains("copilot"));
         assert!(rendered.contains("opencode"));
         assert!(!rendered.contains("ope..."));
@@ -3206,7 +3210,7 @@ mod tests {
         assert_eq!(state.selected_provider(), "codex");
         state.cycle_provider();
 
-        assert_eq!(state.selected_provider(), "gemini");
+        assert_eq!(state.selected_provider(), "antigravity");
     }
 
     #[test]
@@ -3219,9 +3223,9 @@ mod tests {
 
         state.cycle_provider();
 
-        assert_eq!(state.selected_provider(), "gemini");
+        assert_eq!(state.selected_provider(), "antigravity");
         assert!(state.route_status().contains("codex active"));
-        assert!(state.route_status().contains("target gemini"));
+        assert!(state.route_status().contains("target antigravity"));
     }
 
     #[test]
@@ -3668,14 +3672,22 @@ mod tests {
             "status": "running",
             "turn_status": "completed",
             "session_status": "Running",
-            "provider_id": "gemini"
+            "provider_id": "antigravity"
         });
 
         append_prompt_response(&mut state, &response);
 
         assert!(state
             .transcript_text()
-            .contains("turn result: completed via gemini (session Running)"));
+            .contains("turn result: completed via antigravity (session Running)"));
+    }
+
+    #[test]
+    fn session_events_path_filters_to_prompt_provider() {
+        assert_eq!(
+            session_events_path("task_1", "opencode"),
+            "/sessions/task_1/events?provider_id=opencode"
+        );
     }
 
     #[test]
@@ -4221,7 +4233,7 @@ mod tests {
                     last_error: None,
                 },
                 ProviderHealthView {
-                    provider_id: "gemini".to_string(),
+                    provider_id: "antigravity".to_string(),
                     status: "Unavailable".to_string(),
                     last_error: Some("missing".to_string()),
                 },
@@ -4230,7 +4242,7 @@ mod tests {
         };
 
         assert!(state.provider_status().contains(">codex:ok"));
-        assert!(state.provider_status().contains("gemini:down"));
+        assert!(state.provider_status().contains("antigravity:down"));
     }
 
     #[test]
@@ -4245,7 +4257,7 @@ mod tests {
                     last_error: None,
                 },
                 ProviderHealthView {
-                    provider_id: "gemini".to_string(),
+                    provider_id: "antigravity".to_string(),
                     status: "Healthy".to_string(),
                     last_error: None,
                 },
@@ -4256,7 +4268,7 @@ mod tests {
         let status = state.provider_status();
 
         assert!(status.contains(" codex:ok*"));
-        assert!(status.contains(">gemini:ok"));
+        assert!(status.contains(">antigravity:ok"));
     }
 
     #[test]
@@ -4276,10 +4288,10 @@ mod tests {
                 suggested_actions: Vec::new(),
             },
             ProviderDiagnosticView {
-                provider_id: "gemini".to_string(),
+                provider_id: "antigravity".to_string(),
                 readiness: "Ready".to_string(),
                 health: ProviderHealthView {
-                    provider_id: "gemini".to_string(),
+                    provider_id: "antigravity".to_string(),
                     status: "Healthy".to_string(),
                     last_error: None,
                 },
@@ -4288,8 +4300,11 @@ mod tests {
             },
         ]);
 
-        assert_eq!(switched, Some(("codex".to_string(), "gemini".to_string())));
-        assert_eq!(state.selected_provider(), "gemini");
+        assert_eq!(
+            switched,
+            Some(("codex".to_string(), "antigravity".to_string()))
+        );
+        assert_eq!(state.selected_provider(), "antigravity");
         assert_eq!(state.provider_health[0].provider_id, "codex");
         assert_eq!(state.provider_diagnostics[1].readiness, "Ready");
     }
@@ -4322,10 +4337,10 @@ mod tests {
                 suggested_actions: Vec::new(),
             },
             ProviderDiagnosticView {
-                provider_id: "gemini".to_string(),
+                provider_id: "antigravity".to_string(),
                 readiness: "Ready".to_string(),
                 health: ProviderHealthView {
-                    provider_id: "gemini".to_string(),
+                    provider_id: "antigravity".to_string(),
                     status: "Healthy".to_string(),
                     last_error: None,
                 },
@@ -4334,8 +4349,11 @@ mod tests {
             },
         ]);
 
-        assert_eq!(switched, Some(("codex".to_string(), "gemini".to_string())));
-        assert_eq!(state.selected_provider(), "gemini");
+        assert_eq!(
+            switched,
+            Some(("codex".to_string(), "antigravity".to_string()))
+        );
+        assert_eq!(state.selected_provider(), "antigravity");
     }
 
     #[test]
