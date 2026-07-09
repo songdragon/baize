@@ -26,8 +26,8 @@ BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- daemon
 
 Baize currently wires prompt execution through:
 
-- Codex: `codex exec --json`
-- OpenCode: `opencode run --format json`
+- Codex: `codex exec --json <prompt>`
+- OpenCode: `opencode run --format json <prompt>`
 - Antigravity: `/Users/songdragon/.local/bin/agy --print <prompt>`
 
 Gemini CLI is no longer a default prompt provider for Baize because individual Gemini Code Assist accounts are directed to Antigravity. Baize keeps Gemini only as a legacy diagnostic profile, so old sessions remain readable but new default routing avoids it.

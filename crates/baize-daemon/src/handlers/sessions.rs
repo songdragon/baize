@@ -2,8 +2,8 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::Json;
 use baize_core::{
-    HandoffStatus, ProviderId, RouteDecision, RouteDecisionId, RoutingMode, TaskSession,
-    TaskSessionId, TaskSessionStatus, TaskType,
+    BaizeEvent, HandoffStatus, ProviderId, RouteDecision, RouteDecisionId, RoutingMode,
+    TaskSession, TaskSessionId, TaskSessionStatus, TaskType,
 };
 use chrono::Utc;
 
@@ -15,6 +15,11 @@ use crate::state::{
     AppState, CreateSessionRequest, HandoffsQuery, PaginationQuery, PromptRequest, RoutesQuery,
     SessionsQuery,
 };
+
+const SESSION_CONTEXT_EVENT_LIMIT: u64 = 500;
+const SESSION_CONTEXT_ENTRY_LIMIT: usize = 12;
+const SESSION_CONTEXT_TEXT_LIMIT: usize = 800;
+const SESSION_CONTEXT_TOTAL_LIMIT: usize = 6_000;
 
 pub async fn sessions(
     State(state): State<AppState>,
@@ -418,6 +423,19 @@ pub async fn prompt_session(
         return internal_error(error.to_string());
     }
 
+    let native_resume_session_id = session
+        .provider_native_session_ids
+        .get(&provider_id.0)
+        .cloned();
+    let prompt_for_agent = if native_resume_session_id.is_some() {
+        request.prompt.clone()
+    } else {
+        match prompt_with_session_context(&state, &session, &request.prompt) {
+            Ok(prompt) => prompt,
+            Err(error) => return internal_error(error.to_string()),
+        }
+    };
+
     let mut started = baize_core::BaizeEvent::new(
         "session.agent.started",
         serde_json::json!({ "prompt": request.prompt, "provider_id": provider_id.0 }),
@@ -427,15 +445,11 @@ pub async fn prompt_session(
     started.provider_id = Some(provider_id.clone());
     state.record_event(started);
 
-    let native_resume_session_id = session
-        .provider_native_session_ids
-        .get(&provider_id.0)
-        .cloned();
     let run = state
         .executor
         .run_prompt(baize_adapters::AgentPromptRequest {
             provider_id: provider_id.clone(),
-            prompt: request.prompt,
+            prompt: prompt_for_agent,
             cwd: project.root,
             session_id: native_resume_session_id,
             timeout_seconds: request.timeout_seconds.or(Some(120)),
@@ -613,6 +627,74 @@ pub async fn prompt_session(
             )
         }
     }
+}
+
+fn prompt_with_session_context(
+    state: &AppState,
+    session: &TaskSession,
+    current_prompt: &str,
+) -> anyhow::Result<String> {
+    let events = with_store(state, |store| {
+        store.list_events_for_session(&session.id, Some(SESSION_CONTEXT_EVENT_LIMIT), None)
+    })?;
+    let context = session_prompt_context(&events);
+    if context.is_empty() {
+        return Ok(current_prompt.to_string());
+    }
+
+    Ok(format!(
+        "You are continuing an existing Baize task session. Use the prior conversation context below as history from the same Baize session. Do not treat it as the new user request.\n\n<baize_session_context>\n{context}\n</baize_session_context>\n\nCurrent user request:\n{current_prompt}"
+    ))
+}
+
+fn session_prompt_context(events: &[BaizeEvent]) -> String {
+    let entries = events
+        .iter()
+        .filter_map(session_context_entry)
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let mut selected = Vec::new();
+    let mut total_chars = 0usize;
+    for entry in entries.into_iter().rev() {
+        let entry_chars = entry.chars().count() + 1;
+        if selected.len() >= SESSION_CONTEXT_ENTRY_LIMIT
+            || (!selected.is_empty() && total_chars + entry_chars > SESSION_CONTEXT_TOTAL_LIMIT)
+        {
+            break;
+        }
+        total_chars += entry_chars;
+        selected.push(entry);
+    }
+    selected.reverse();
+    selected.join("\n")
+}
+
+fn session_context_entry(event: &BaizeEvent) -> Option<String> {
+    match event.event_type.as_str() {
+        "session.agent.started" => event
+            .payload
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .map(|prompt| format!("user: {}", context_text(prompt))),
+        "session.agent.output" => event
+            .payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(|text| format!("assistant: {}", context_text(text))),
+        _ => None,
+    }
+}
+
+fn context_text(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= SESSION_CONTEXT_TEXT_LIMIT {
+        return compact;
+    }
+    let keep = SESSION_CONTEXT_TEXT_LIMIT.saturating_sub(3);
+    format!("{}...", compact.chars().take(keep).collect::<String>())
 }
 
 pub(crate) fn session_was_canceled(state: &AppState, session_id: &TaskSessionId) -> bool {

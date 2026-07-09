@@ -767,10 +767,82 @@ async fn prompt_reuses_saved_native_provider_session_id() {
     let captured = requests.lock().expect("requests");
     assert_eq!(captured.len(), 2);
     assert!(captured[0].session_id.is_none());
+    assert_eq!(captured[1].prompt, "second");
     assert_eq!(
         captured[1].session_id.as_deref(),
         Some("codex_native_session_1")
     );
+}
+
+#[tokio::test]
+async fn prompt_includes_prior_session_messages_without_native_resume() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let app = router(AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(RecordingAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: None,
+                events: vec![AgentExecutionEvent {
+                    kind: AgentExecutionEventKind::Output,
+                    text: Some("ready to help".to_string()),
+                    raw: None,
+                }],
+                stderr: String::new(),
+                error: None,
+            },
+            requests: requests.clone(),
+        }),
+    ));
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let first = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "hello" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(first["status"], "running");
+
+    let second = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "prompt": "what did I just say?",
+                    "provider_id": "antigravity"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(second["status"], "running");
+
+    let captured = requests.lock().expect("requests");
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0].prompt, "hello");
+    assert_eq!(captured[1].provider_id.0, "antigravity");
+    assert!(captured[1].session_id.is_none());
+    assert!(captured[1]
+        .prompt
+        .contains("<baize_session_context>\nuser: hello\nassistant: ready to help"));
+    assert!(captured[1]
+        .prompt
+        .contains("Current user request:\nwhat did I just say?"));
 }
 
 #[tokio::test]
