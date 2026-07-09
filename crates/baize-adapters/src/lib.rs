@@ -469,6 +469,7 @@ pub fn build_antigravity_args(request: &AgentPromptRequest) -> Vec<String> {
     };
     let mut args = vec![
         "--print".to_string(),
+        request.prompt.clone(),
         "--add-dir".to_string(),
         request.cwd.to_string_lossy().to_string(),
         "--mode".to_string(),
@@ -487,7 +488,6 @@ pub fn build_antigravity_args(request: &AgentPromptRequest) -> Vec<String> {
         args.push("--conversation".to_string());
         args.push(session_id.clone());
     }
-    args.push(request.prompt.clone());
     args
 }
 
@@ -1477,6 +1477,7 @@ mod tests {
         let args = build_antigravity_args(&request);
 
         assert_eq!(args[0], "--print");
+        assert_eq!(args[1], "hello");
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--add-dir", "/tmp/project"]));
@@ -1488,7 +1489,6 @@ mod tests {
         assert!(!args.contains(&"run".to_string()));
         assert!(!args.contains(&"--format".to_string()));
         assert!(!args.contains(&"json".to_string()));
-        assert_eq!(args.last().expect("prompt"), "hello");
     }
 
     #[test]
@@ -1503,6 +1503,7 @@ mod tests {
         };
 
         let ask_args = build_antigravity_args(&request);
+        assert!(ask_args.windows(2).any(|pair| pair == ["--print", "hello"]));
         assert!(ask_args
             .windows(2)
             .any(|pair| pair == ["--mode", "accept-edits"]));
@@ -1511,6 +1512,9 @@ mod tests {
 
         request.execution_policy = AgentExecutionPolicy::AllowProject;
         let allow_args = build_antigravity_args(&request);
+        assert!(allow_args
+            .windows(2)
+            .any(|pair| pair == ["--print", "hello"]));
         assert!(allow_args
             .windows(2)
             .any(|pair| pair == ["--mode", "accept-edits"]));
@@ -1706,6 +1710,10 @@ mod tests {
         .expect("smoke report");
 
         assert!(report.prompt_skipped);
+        assert!(report
+            .prompt_command_args
+            .windows(2)
+            .any(|pair| pair == ["--print", "baize smoke"]));
         assert!(report
             .prompt_command_args
             .windows(2)

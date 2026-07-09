@@ -64,7 +64,7 @@ The MVP target is a single-workspace local agent supervisor:
 - detected capabilities and capability gap reporting;
 - daemon endpoints for provider validation;
 - Codex `exec --json` execution path;
-- Antigravity `/Users/songdragon/.local/bin/agy --print` execution path;
+- Antigravity `/Users/songdragon/.local/bin/agy --print <prompt>` execution path;
 - OpenCode `run --format json` execution path;
 - workspace command policy mapping for Codex/Antigravity/OpenCode execution arguments;
 - Codex/Antigravity/OpenCode smoke validation command for auth, timeout and parser checks;

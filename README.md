@@ -14,7 +14,7 @@ This repository currently contains the first Rust MVP skeleton:
 - ACP JSON-RPC message primitives;
 - provider registry and health probing stubs;
 - local daemon with HTTP + SSE workspace/session/handoff/permission APIs;
-- Codex `exec --json`, OpenCode `run --format json`, and Antigravity `/Users/songdragon/.local/bin/agy --print` prompt execution paths;
+- Codex `exec --json`, OpenCode `run --format json`, and Antigravity `/Users/songdragon/.local/bin/agy --print <prompt>` execution paths;
 - ratatui TUI shell;
 - `baize` CLI entrypoint.
 
@@ -73,4 +73,4 @@ GET  /events
 
 ## Notes
 
-The day-to-day adapter execution paths are Codex `exec --json`, OpenCode `run --format json`, and Antigravity `/Users/songdragon/.local/bin/agy --print`. Gemini CLI is retained only as a legacy diagnostic profile because individual Code Assist accounts are now directed to Antigravity. Tests use fake executors and parser fixtures so they do not spend model quota.
+The day-to-day adapter execution paths are Codex `exec --json`, OpenCode `run --format json`, and Antigravity `/Users/songdragon/.local/bin/agy --print <prompt>`. Gemini CLI is retained only as a legacy diagnostic profile because individual Code Assist accounts are now directed to Antigravity. Tests use fake executors and parser fixtures so they do not spend model quota.
