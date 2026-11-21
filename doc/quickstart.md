@@ -2,6 +2,10 @@
 
 This guide covers the current local MVP: a headless daemon, HTTP/SSE APIs and a thin TUI client.
 
+Baize's product goal is one persistent development session across execution-agent switches, using workspace state plus relevant recent dialogue. The commands below exercise the current CLI implementation. Provider Desktop execution and shared agent-configuration mapping are not implemented; Baize's own future Desktop UI is a separate concern. See [the vision](vision.md), [requirements](spec.md), and [MVP validation priorities](mvp-implementation-plan.md).
+
+A Baize session is the user-facing conversation, while provider-native session IDs are execution references underneath it. Existing resume/context-pack support is a baseline; do not interpret these examples as proof that all cross-provider context and native tools are preserved.
+
 ## Run The TUI
 
 From a repository or project directory:

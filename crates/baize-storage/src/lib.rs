@@ -4,9 +4,11 @@ use baize_core::{
     PermissionRiskLevel, Project, ProjectId, ProviderId, RouteDecision, RouteDecisionId,
     RoutingMode, TaskSession, TaskSessionId, TaskSessionStatus, TaskType, Workspace, WorkspaceId,
 };
+use chrono::Datelike;
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub struct EventStore {
@@ -200,7 +202,44 @@ impl EventStore {
                 serde_json::to_string(&event.payload)?,
             ],
         )?;
+        self.append_transcript_event(event)?;
         Ok(())
+    }
+
+    fn append_transcript_event(&self, event: &BaizeEvent) -> Result<()> {
+        let Some(path) = self.transcript_path_for_event(event) else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("failed to open transcript {}", path.display()))?;
+        let line = serde_json::json!({
+            "schema_version": 1,
+            "event": event,
+        });
+        serde_json::to_writer(&mut file, &line)
+            .with_context(|| format!("failed to serialize transcript {}", path.display()))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("failed to append transcript {}", path.display()))?;
+        Ok(())
+    }
+
+    fn transcript_path_for_event(&self, event: &BaizeEvent) -> Option<PathBuf> {
+        let session_id = event.session_id.as_ref()?;
+        Some(
+            self.data_dir
+                .join("sessions")
+                .join(format!("{:04}", event.timestamp.year()))
+                .join(format!("{:02}", event.timestamp.month()))
+                .join(format!("{:02}", event.timestamp.day()))
+                .join(format!("{}.jsonl", session_id.0)),
+        )
     }
 
     pub fn event_count(&self) -> Result<u64> {
@@ -1005,6 +1044,71 @@ mod tests {
             .expect("typed events");
         assert_eq!(typed.len(), 1);
         assert_eq!(typed[0].payload["text"], "hello");
+    }
+
+    #[test]
+    fn appends_session_events_to_jsonl_transcript() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("baize.db");
+        let store = EventStore::open(&db_path).expect("store should open");
+        let session_id = TaskSessionId::new();
+        let mut first = BaizeEvent::new("session.agent.started", json!({ "prompt": "hi" }));
+        first.session_id = Some(session_id.clone());
+        let mut second = BaizeEvent::new("session.agent.output", json!({ "text": "hello" }));
+        second.session_id = Some(session_id.clone());
+        let path = store
+            .transcript_path_for_event(&first)
+            .expect("transcript path");
+
+        store.append_event(&first).expect("append first");
+        store.append_event(&second).expect("append second");
+
+        let transcript = fs::read_to_string(&path).expect("transcript");
+        let lines = transcript.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        let first_line: serde_json::Value = serde_json::from_str(lines[0]).expect("jsonl first");
+        let second_line: serde_json::Value = serde_json::from_str(lines[1]).expect("jsonl second");
+        assert_eq!(first_line["schema_version"], 1);
+        assert_eq!(first_line["event"]["event_type"], "session.agent.started");
+        assert_eq!(second_line["event"]["payload"]["text"], "hello");
+    }
+
+    #[test]
+    fn global_events_do_not_create_session_transcripts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
+        let event = BaizeEvent::new("provider.diagnostic.completed", json!({ "ok": true }));
+
+        store.append_event(&event).expect("append global event");
+
+        assert!(!temp.path().join("sessions").exists());
+    }
+
+    #[test]
+    fn reopened_store_continues_existing_session_transcript() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("baize.db");
+        let session_id = TaskSessionId::new();
+        let mut first = BaizeEvent::new("session.agent.output", json!({ "text": "one" }));
+        first.session_id = Some(session_id.clone());
+        let path = {
+            let store = EventStore::open(&db_path).expect("store should open");
+            let path = store
+                .transcript_path_for_event(&first)
+                .expect("transcript path");
+            store.append_event(&first).expect("append first");
+            path
+        };
+        let mut second = BaizeEvent::new("session.agent.output", json!({ "text": "two" }));
+        second.session_id = Some(session_id);
+
+        let store = EventStore::open(&db_path).expect("store should reopen");
+        store.append_event(&second).expect("append second");
+
+        let transcript = fs::read_to_string(path).expect("transcript");
+        assert_eq!(transcript.lines().count(), 2);
+        assert!(transcript.contains("\"one\""));
+        assert!(transcript.contains("\"two\""));
     }
 
     #[test]

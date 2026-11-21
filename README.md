@@ -1,6 +1,12 @@
 # Baize
 
-Baize is a workspace-native supervisor for local coding agents. It is designed to route work across agents such as Codex, Antigravity, OpenCode, and GitHub Copilot CLI while preserving workspace state and handoff context.
+Baize is a persistent development session that can switch coding agents. The user keeps one conversation and workspace while Baize combines current workspace facts, relevant recent dialogue, and still-active constraints to let another agent continue the work.
+
+An agent is its execution environment, including its built-in prompts, MCP servers, skills, computer use, and browser use where available. Baize aims to preserve those native capabilities through supported interfaces, including provider Desktop execution environments; CLI is the initial implementation, not the product boundary. Launching a Desktop app or calling a related CLI alone does not establish access to its capabilities.
+
+Shared configuration reduces repeated setup and should reuse project instructions, MCP, and skills wherever possible. Session continuity is the core value; configuration, routing, quota observation, and handoff summaries support it. Switching does not require importing a provider's private session files or transferring its internal tool state.
+
+See [the product vision](doc/vision.md), [requirements](doc/spec.md), and [technical design](doc/technical-spec.md). These describe target behavior; the current implementation is scoped below.
 
 ## Current MVP
 
@@ -17,6 +23,8 @@ This repository currently contains the first Rust MVP skeleton:
 - Codex `exec --json <prompt>`, OpenCode `run --format json <prompt>`, and Antigravity `/Users/songdragon/.local/bin/agy --print <prompt>` execution paths;
 - ratatui TUI shell;
 - `baize` CLI entrypoint.
+
+The current MVP executes through CLI adapters and preserves Baize session identity and provider-native resume references. Provider Desktop execution, shared agent-configuration mapping, and end-to-end seamless switching are not yet implemented or verified. Baize's own future Desktop UI is separate from integrating a provider's Desktop execution environment.
 
 ## Commands
 

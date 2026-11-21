@@ -1,60 +1,48 @@
 # Baize Technical Spec
 
 Version: 0.1.0
-Status: review passed
+Status: product-aligned target design, updated 2026-11-21
+
+本文中的接口与模型草案描述目标设计，不是当前 API 或能力清单。已实现路径与待验证项见 [MVP 计划](mvp-implementation-plan.md)。
 
 ## 1. 目标
 
-本文描述 Baize 的 Rust 技术设计。目标是先把内核、TUI、adapter、storage、workspace tracking 和 handoff pipeline 的边界定义清楚，供 review 后再进入实现。
+实现持续的 Baize session：保持同一用户主对话和 workspace，切换实际执行 agent 时组合当前工作区、近期相关对话与有效约束，尽可能保留目标环境的原生能力。
 
-本 spec 遵循已确认技术方向：
-
-```text
-Rust core
-+ ratatui TUI
-+ local daemon
-+ SQLite storage
-+ ACP-first adapter layer
-+ future Tauri desktop app
-```
+技术方向保持 Rust core、local daemon、SQLite 与薄客户端。当前 UI 为 ratatui TUI；未来 Baize 自身 Desktop UI 与 provider Desktop 执行接入分别设计。接入协议按能力选择，不把 ACP 或 CLI 作为固定产品边界。
 
 ## 2. 总体架构
 
 Baize 采用 headless daemon + thin client 架构。
 
-```text
-          baize-tui                 future desktop
-        ratatui client              Tauri client
-             │                           │
-             └──────── local API ────────┘
-                         │
-                  baize-daemon
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-   baize-core      baize-workspace   baize-storage
-        │                │                │
-        └────────────────┼────────────────┘
-                         │
-                  baize-adapters
-                         │
-                    baize-acp
-                         │
-      ┌──────────────────┼──────────────────┐
-      │                  │                  │
-    Codex            Gemini CLI       Copilot CLI
-                                           │
-                                      OpenCode
+```mermaid
+flowchart TD
+    TUI["当前 TUI"] --> API["Daemon：HTTP + SSE"]
+    UI["未来 Baize UI"] --> API
+    API --> Session["Baize session 与主对话"]
+    Session --> Workspace["Workspace 事实"]
+    Session --> Storage["历史、上下文与执行引用"]
+    Session --> Adapters["按能力选择 adapter"]
+    Adapters --> Native["官方原生接口"]
+    Adapters --> ACP["ACP"]
+    Adapters --> CLI["CLI"]
+    Native --> Environment["Provider 原生执行环境"]
+    ACP --> Environment
+    CLI --> Environment
 ```
 
-核心原则：
+图中的三个接入路径不保证获得相同能力。Provider Desktop 环境只有在相应接口、配置与原生工具实际可用时才算接入。
 
-- UI 不直接调用 agent；
-- daemon 持有 workspace/session/routing/handoff 状态；
-- TUI 和未来 desktop 都通过同一套 local API 与 daemon 交互；
-- adapter 优先使用 ACP，必要时 fallback 到 native/server/CLI；
-- 所有重要动作都落 event log；
-- provider-specific 状态只作为外部引用保存，不作为 Baize 的唯一事实来源。
+核心约束：
+
+- UI 不直接调用 agent；daemon 持有 Baize session、主对话、执行引用与切换状态；
+- agent 切换不创建新的上层 session，不要求用户复制近期讨论；
+- Baize session 与 provider 原生 session 分离，内部历史不依赖某一家的存档格式；
+- 当前 workspace 与近期相关原始对话共同构成接续输入，摘要按需补充；
+- 原生 prompt、MCP、skills、computer use、browser use 的支持按执行入口验证；
+- provider Desktop 的能力接入与 Baize 自身的窗口或技术栈无必然绑定；
+- 重要输入、输出、切换和已知执行结果关联回同一 session；未知结果不假装已完成；
+- 不静默降级到较低能力入口，不复制厂商内部进程或工具状态来伪造连续性。
 
 ## 3. Rust Workspace
 
@@ -123,7 +111,7 @@ doc/
 
 ### 3.3 `baize-tui`
 
-第一版主 UI。
+当前版本的薄 UI，用于验证 Baize session 连续性。主对话跨 provider 切换保持，agent 和执行入口需要可辨认；TUI 不代表 CLI 与 provider Desktop 能力等效。
 
 包含：
 
@@ -142,7 +130,7 @@ TUI 只调用 daemon API，不直接读写 workspace，也不直接启动 agent�
 
 ### 3.4 `baize-acp`
 
-ACP client 实现。
+ACP 协议能力层。下面是目标职责；当前 MVP 只有消息原语与初始化验证，不代表完整 lifecycle 已实现。
 
 包含：
 
@@ -162,24 +150,13 @@ ACP client 实现。
 
 provider adapter 实现。
 
-第一批 provider：
+当前 CLI 执行基线为 Codex、Antigravity、OpenCode；Copilot 等能力以实际验证范围记录。
 
-```text
-codex
-gemini
-copilot
-opencode
-```
+Adapter 可以使用官方原生服务/RPC/SDK、ACP 或 CLI。优先选择能保留用户所需原生能力的支持接口；ACP 满足需求时复用标准协议；CLI 用于兼容执行，不静默替代声明的 Desktop 环境。
 
-每个 adapter 可分三层：
+能力描述应区分 provider 身份、执行入口、transport、profile/配置范围，以及已验证、未验证、不支持的能力。覆盖内置 prompt、项目指令、MCP、skills、computer/browser use、session/resume、消息/状态回流和权限交互。
 
-```text
-ACP adapter
-native/server adapter
-CLI fallback adapter
-```
-
-同一个 provider 可以同时暴露多个 transport，daemon 根据 capability 和配置选择。
+同一 provider 的多个入口不应只按品牌共用能力结论。Shared configuration 的映射属于 adapter 能力，不能用统一提示词覆盖目标 agent 原生机制。
 
 ### 3.6 `baize-workspace`
 
@@ -222,6 +199,8 @@ TOML 配置。
 - global config；
 - workspace config；
 - provider profiles；
+- 通用用户要求与已有项目配置来源；
+- 按执行入口声明的配置映射、支持项和未支持项（目标能力，当前未实现）；
 - route policy；
 - command policy；
 - checkpoint policy；
@@ -482,12 +461,17 @@ struct TaskSession {
     workspace_id: WorkspaceId,
     objective: String,
     active_provider_id: Option<ProviderId>,
+    provider_native_session_ids: BTreeMap<String, String>,
     status: TaskSessionStatus,
     stickiness: StickyPolicy,
     created_at: DateTime,
     updated_at: DateTime,
 }
 ```
+
+`TaskSession` 是用户工作的稳定身份，agent 切换只改变下层执行引用，主对话和 workspace 仍归原 session。上述模型是设计示意，`stickiness` 等字段以当前代码为准。
+
+当前代码按 provider ID 保存原生 session ID。支持多 profile、不同执行入口或多个原生会话时，引用身份需要进一步区分；不能把当前映射当成完整 Desktop 会话模型。
 
 ### 6.4 Provider Profile
 
@@ -600,7 +584,7 @@ trait AgentProvider {
 }
 ```
 
-Provider session reference 必须可序列化：
+Provider session reference 必须可序列化，用于恢复或关联实际执行入口。下面是设计草案，不表示当前 adapter 已实现所有接口：
 
 ```rust
 struct ProviderSessionRef {
@@ -614,67 +598,63 @@ struct ProviderSessionRef {
 }
 ```
 
+原生引用应能识别执行入口与配置身份，并记录目标已接收上下文的位置。具体字段与存储迁移在实现时确定。Baize 主对话属于上层 session；原生引用不提供跨厂商工具状态迁移。
+
 ## 8. Routing
 
-MVP 使用规则引擎。
+路由支持会话连续性，使用规则与用户显式选择：
 
-默认流程：
+1. 用户指定执行者时检查所选入口是否可用、能否满足所需能力。
+2. 未要求切换且当前执行者可用时，优先继续。
+3. health、额度或失败可以产生建议；用户也可因能力、效果或不同模型/prompt 主动切换。
+4. 在可确认的回合边界准备交接，记录原因、目标入口和能力缺口。
+5. 按 manual/assisted 授权执行，不静默切换到缺少关键工具的入口。
+6. 目标接续结果与主对话仍关联原 Baize session；失败保留该 session 与已知状态。
 
-```text
-1. 如果 session 有 active provider
-2. 检查 provider health
-3. 检查 quota threshold
-4. 检查 sticky window
-5. 如果仍可用，继续使用
-6. 如果不可用或低于阈值，生成候选 provider
-7. 生成 route decision
-8. 根据用户模式 manual/assisted/autopilot 执行或等待确认
-```
+连续性验收不依赖精确额度或基于任务类型的自动性能判断。Autopilot 不进入当前闭环前提。
 
-Routing 输入：
+## 9. 上下文与 Handoff Pipeline
 
-- task objective；
-- active provider；
-- provider priority；
-- provider health；
-- quota state；
-- task type；
-- workspace dirty state；
-- last failures；
-- user policy；
-- provider capabilities。
+交接输入为当前 workspace + 近期相关对话 + 有效约束，必要时追加摘要。
 
-## 9. Handoff Pipeline
+### 9.1 上下文选择
 
-Handoff 分两部分：
+| 情况 | 处理 |
+|---|---|
+| 同 provider 且原生 session 可续接 | 复用原生历史，避免重复注入；workspace 状态仍需检查 |
+| 目标没有原生 session | 为新下层会话提供相关上下文，保留同一 Baize session |
+| 切换或切回旧 provider | 在目标原生历史基础上补充其尚未知晓的相关增量 |
+| 目标不支持 resume | 从 Baize 对话与 workspace 构建接续输入，说明限制 |
+| 源 agent 不可用 | 使用已有记录；不要求源 agent 先生成摘要 |
 
-```text
-Agent-generated summary
-+ Baize mechanical facts
-```
+当前 `context.rs` 已有 raw native resume、full context pack、cross-provider delta 的基础策略，但近期消息截取与机械信号尚不等于完整语义连续性。
 
-流程：
+历史保留来源、角色、顺序和原始依据。选择近期相关消息时也保留较早但仍有效的约束，避免重复注入、把建议当作用户要求或继续使用已失效内容。摘要按预算与相关性辅助，不代替全部原始记录。
 
-```text
-1. Baize 收集 workspace facts
-2. Baize 请求当前 agent 生成 handoff draft
-3. Baize 附加机械事实
-4. Baize 保存 handoff artifact
-5. 用户确认或 policy 自动确认
-6. Baize 将 handoff 注入目标 provider prompt
-7. route decision 记录迁移原因
-```
+### 9.2 切换流程
 
-Mechanical facts 包括：
+1. 记录切换意图及目标入口，保持上层 session 身份。
+2. 等待当前回合结束；需要中断时确认工具和部分修改的状态。
+3. 读取当前 workspace、代码/文档引用、Git 变化及可用验证证据。
+4. 选取目标尚未知晓的相关对话与有效约束；按需生成摘要。
+5. 持久化本次输入依据、执行引用与切换事件，不伪装成用户重述消息。
+6. 按目标支持接口创建或恢复原生会话，发送当前请求与上下文。
+7. 将可取得的消息、状态、审批和结果回流同一 Baize 主对话。
+8. 明确成功、失败或结果未知，保留已知状态；不盲目重放有副作用的操作。
 
-- changed files；
-- git diff summary；
-- commands run；
-- test result；
-- route history；
-- provider errors；
-- checkpoint references；
-- user constraints。
+交接不要求把私有 session 文件转换成另一家的存档，不承诺转移未完成工具调用、内部缓存、进程或隐藏状态。
+
+### 9.3 共享配置
+
+目标是在一份逻辑配置中表达通用要求，自动向支持的 agent 应用相应映射，避免逐家手工复制。优先复用项目 `AGENTS.md`、MCP、skills 与 provider 已有配置。需要映射时记录支持范围、有效作用域、显式覆盖和不支持项。
+
+Adapter 保留目标原生 prompt 与专属工具。不能把配置文件存在视为工具已经加载，也不能用统一系统提示词抹平各家执行机制。当前 TOML loader 不代表已实现跨产品配置映射。
+
+### 9.4 Provider Desktop 执行
+
+在官方接口允许时，连接 Desktop 对应的实际执行环境，验证会话控制、消息与状态回流、workspace 关联及所需工具。仅启动窗口、深链接或同品牌 CLI 不算完成接入。
+
+Baize 自身未来的 Desktop client 继续调用相同 daemon API；它不是 provider Desktop 能力的替代。只有部分能力可接入时，向用户显示实际入口和缺口，不宣称完整等效。
 
 ## 10. Storage Design
 
@@ -759,53 +739,38 @@ Windows: WSL preferred, native best-effort
 - Windows native 单独处理 PowerShell/CMD；
 - WSL 下优先在 Linux filesystem 中运行 workspace。
 
-## 13. MVP Build Plan
+## 13. MVP 验证与实现顺序
 
-建议实现顺序：
+现有 Rust daemon、TUI、CLI adapter、SQLite、事件与上下文包作为验证基线，当前库存见 `mvp-implementation-plan.md`。
 
-```text
-1. Cargo workspace skeleton
-2. baize-core domain types
-3. baize-config TOML loader
-4. baize-storage SQLite event log
-5. baize-workspace git status/diff summary
-6. baize-daemon local API + SSE
-7. baize-acp stdio JSON-RPC transport
-8. Codex/Gemini adapter validation
-9. baize-tui session dashboard
-10. routing decision records
-11. permission prompt loop
-12. handoff artifact pipeline
-```
+下一步按用户闭环安排：
 
-第一批 provider 建议：
+1. 在同一 Baize session 保留主对话、workspace 与至少两个执行者的原生引用。
+2. 验证同 provider 续接、A → B 和 A → B → A 的近期对话与工作区承接。
+3. 验证较早有效约束、源不可用、目标失败、结果未知和恢复后的处理。
+4. 核对现有项目配置复用，并设计通用配置映射的最小支持范围。
+5. 单独验证 provider Desktop 原生执行接口与工具能力，不以开发 Baize 自身 Desktop UI 替代。
+6. 对比原生工具与手工交接基线，评估重述、纠偏、重复操作和产物质量。
 
-```text
-1. Codex
-2. Gemini
-3. Copilot
-4. OpenCode
-```
-
-说明：产品和验证优先级都从 Codex/Gemini 开始。若 Codex/Gemini 的 ACP 入口或 session 控制能力不足，adapter 层应立即记录 capability gap，并通过 native/server/CLI fallback 继续验证 MVP 闭环。
+测试使用 fake executors、协议样本和隔离工作区；真实 provider 验收单独授权，不能在单元测试中消耗模型额度。
 
 ## 14. Review Decisions
 
-已确认：
-
-- local API 第一版使用 HTTP + SSE；
-- 第一条 adapter 验证路径选择 Codex/Gemini；
-- SQLite schema 先做 append-only event log，再补 query tables；
-- TUI 第一版只做单 workspace，暂不做多 workspace 切换；
-- handoff 在 MVP 中允许先保存 markdown artifact，再做结构化字段抽取；
-- desktop app 只保留目录，不进入 MVP。
+- Rust core、local daemon、SQLite 和 HTTP + SSE 保持；
+- 当前薄 TUI 与 CLI adapter 是实现起点，不限制最终执行入口；
+- Baize session 是稳定上层身份，provider 原生会话作为下层引用；
+- 切换结合 workspace 与近期相关原始对话，摘要按需辅助；
+- 配置复用优先使用已有项目机制，并保留 provider 原生能力；
+- 接入顺序由所需能力和可验证接口决定，不再固定 ACP-first；
+- Baize 自身 Desktop UI、provider Desktop 执行接入分别排期；
+- 团队、云同步和并发多 agent 不作为当前持续会话成立的前提。
 
 ## 15. Open Review Questions
 
-待确认：
-
-- MVP 是否允许用户手动选择 project root，而不是总是自动使用 git root；
-- monorepo 中是否需要第一版支持 project subdir；
-- Codex/Gemini fallback 是优先 programmatic CLI，还是优先复用它们自己的 session/resume 机制；
-- event log 的第一版是否需要对 payload 做 schema version；
-- permission policy 是否需要区分 read boundary 和 write boundary。
+- 如何定位目标原生会话最后已知的对话范围，并处理 profile/执行入口变化？
+- 如何在预算内选取近期对话，同时保留用户纠正与有效的较早约束？
+- 同 provider 续接时，如何发现外部 workspace 修改与过期验证证据？
+- 各 provider Desktop 的哪些原生能力可以通过支持的接口实际取得，哪些不能回流？
+- 通用配置在不同入口的作用域、映射和生效证据是什么？
+- 目标失败或结果未知时，如何恢复而不重复副作用？
+- 当前内核与 TUI 能否在真实 A → B → A 场景中降低用户重述和纠偏成本？

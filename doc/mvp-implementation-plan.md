@@ -1,12 +1,12 @@
 # MVP Implementation Plan
 
-Status: implemented and actively hardening
+Status: CLI foundation implemented and actively hardening; continuous-session product acceptance remains open. Product alignment updated 2026-11-21.
 
 ## Scope
 
 This MVP implements the review-passed technical spec as a local Rust daemon plus TUI shell. Codex, Antigravity and OpenCode prompt execution paths are wired through CLI adapters; Gemini CLI is retained only as a legacy diagnostic profile. Tests use fake executors and parser fixtures so CI does not spend model quota.
 
-The MVP target is a single-workspace local agent supervisor:
+The current implementation is a single-workspace CLI foundation for persistent Baize sessions:
 
 - inspect and register the current project;
 - create and resume task sessions;
@@ -15,6 +15,29 @@ The MVP target is a single-workspace local agent supervisor:
 - record session events, route decisions, handoffs and permissions;
 - let the user operate the workflow from a TUI;
 - keep the kernel API reusable for a future desktop app.
+
+## Product Direction And Current Limits
+
+The product goal is one continuous Baize session with interchangeable execution agents. Switching uses current workspace facts plus relevant recent dialogue and still-active constraints; summaries help when needed. Routing, quota observation, and configuration reuse support this goal.
+
+CLI was the initial execution path. Provider Desktop execution means access to its actual built-in prompts, MCP, skills, computer use, browser use, and supported session interfaces; it is distinct from Baize's own future Desktop UI. Launching a window, sharing auth, or invoking a related CLI does not demonstrate Desktop integration.
+
+The inventory below records engineering already implemented. It does not claim shared agent-configuration mapping, provider Desktop execution, or end-to-end seamless switching. Provider capability research is dated and must be verified per execution entry.
+
+## Next Product Validation Priorities
+
+| Priority | Work and acceptance |
+|---|---|
+| 1 | Keep the same Baize session ID, main conversation, and workspace during A → B → A; associate outputs with their execution source |
+| 2 | Combine workspace and relevant recent original messages; preserve still-active older constraints and supply missed changes when returning to an old native session |
+| 3 | Handle source unavailability without a source-generated summary; retain known state on target failure, interrupted tools, or uncertain results |
+| 4 | Reuse project instructions, MCP, and skills; define and verify the minimum shared-configuration mapping without replacing native prompts/tools |
+| 5 | Investigate provider Desktop/native interfaces and verify actual tools and message/status return paths independently of Baize's UI |
+| 6 | Compare with the user's native-tool and manual-handoff workflow: repeated explanations, corrections, repeated work, capability loss, and output quality |
+
+Current native resume IDs and `context.rs` strategies are useful foundations. Recent-message truncation, mechanical test signals, and context-packing tests alone do not prove these user outcomes.
+
+Use fake executors, fixtures, and temporary workspaces for automated regression coverage. Real provider acceptance remains separate and explicitly authorized; automated tests must not consume model quota.
 
 ## Implemented Work
 
@@ -394,7 +417,7 @@ These are still in scope for a more usable MVP.
 - ACP session lifecycle implementation beyond message primitives;
 - exact quota extraction from providers where APIs allow it;
 - multi-workspace TUI switching;
-- desktop app shell;
+- Baize's own Desktop UI shell (separate from provider Desktop execution-interface investigation);
 - final relational schema hardening;
 - ~~workspace name/primary-project query columns/indexes~~ (done as one schema hardening step);
 - ~~project root/kind/vcs query columns/indexes~~ (done as one schema hardening step);

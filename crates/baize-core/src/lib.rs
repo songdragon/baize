@@ -194,6 +194,87 @@ pub struct ProviderCapabilities {
     pub mcp_server: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenBudgetSource {
+    OfficialDocs,
+    LocalHelp,
+    ConfigDefault,
+    Estimated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenBudgetConfidence {
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreferredContextFormat {
+    Markdown,
+    XmlTaggedMarkdown,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextPackStrategy {
+    RawNativeResume,
+    FullContextPack,
+    CrossProviderDelta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderContextProfile {
+    pub provider_id: ProviderId,
+    pub command: String,
+    pub transport: String,
+    pub prompt_entrypoint: String,
+    pub supports_native_resume: bool,
+    pub native_resume_arg: Option<String>,
+    pub native_session_id_capture: Option<String>,
+    pub supports_structured_output: bool,
+    pub structured_output_format: Option<String>,
+    pub supports_acp: bool,
+    pub supports_mcp: bool,
+    pub supports_workspace_arg: bool,
+    pub workspace_arg: Option<String>,
+    pub supports_file_attachment: bool,
+    pub file_arg: Option<String>,
+    pub supports_conversation_export: bool,
+    pub supports_conversation_import: bool,
+    pub context_window_tokens: Option<u32>,
+    pub default_context_budget_tokens: u32,
+    pub reserved_output_tokens: u32,
+    pub token_budget_source: TokenBudgetSource,
+    pub token_budget_confidence: TokenBudgetConfidence,
+    pub preferred_context_format: PreferredContextFormat,
+    pub same_provider_resume_strategy: String,
+    pub cross_provider_handoff_strategy: String,
+    pub risk_level: String,
+    pub workspace_exposure_notes: String,
+    pub last_verified_at: String,
+    pub source_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPackSection {
+    pub name: String,
+    pub priority: u8,
+    pub content: String,
+    pub estimated_tokens: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPackBuildResult {
+    pub strategy: ContextPackStrategy,
+    pub prompt: String,
+    pub estimated_tokens: u32,
+    pub included_sections: Vec<String>,
+    pub truncated_sections: Vec<String>,
+    pub source_event_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderHealth {
     pub provider_id: ProviderId,
@@ -549,6 +630,71 @@ mod tests {
             restored.provider_native_session_ids.get("codex"),
             Some(&"codex_native_1".to_string())
         );
+    }
+
+    #[test]
+    fn provider_context_profile_serializes_round_trip() {
+        let profile = ProviderContextProfile {
+            provider_id: ProviderId("codex".to_string()),
+            command: "codex".to_string(),
+            transport: "cli".to_string(),
+            prompt_entrypoint: "codex exec".to_string(),
+            supports_native_resume: true,
+            native_resume_arg: Some("codex exec resume <SESSION_ID>".to_string()),
+            native_session_id_capture: Some("jsonl thread.started.thread_id".to_string()),
+            supports_structured_output: true,
+            structured_output_format: Some("jsonl events, JSON schema final output".to_string()),
+            supports_acp: false,
+            supports_mcp: true,
+            supports_workspace_arg: true,
+            workspace_arg: Some("--cd <DIR>".to_string()),
+            supports_file_attachment: true,
+            file_arg: Some("--image <FILE>".to_string()),
+            supports_conversation_export: false,
+            supports_conversation_import: false,
+            context_window_tokens: None,
+            default_context_budget_tokens: 24_000,
+            reserved_output_tokens: 4_000,
+            token_budget_source: TokenBudgetSource::ConfigDefault,
+            token_budget_confidence: TokenBudgetConfidence::Low,
+            preferred_context_format: PreferredContextFormat::XmlTaggedMarkdown,
+            same_provider_resume_strategy: "native_resume_without_duplicate_history".to_string(),
+            cross_provider_handoff_strategy: "baize_delta_context".to_string(),
+            risk_level: "medium".to_string(),
+            workspace_exposure_notes: "Can inspect and edit the configured workspace.".to_string(),
+            last_verified_at: "2026-07-09".to_string(),
+            source_refs: vec!["codex --help".to_string()],
+        };
+
+        let raw = serde_json::to_string(&profile).expect("serialize profile");
+        let decoded: ProviderContextProfile =
+            serde_json::from_str(&raw).expect("deserialize profile");
+
+        assert_eq!(decoded.provider_id.0, "codex");
+        assert!(decoded.supports_native_resume);
+        assert_eq!(
+            decoded.preferred_context_format,
+            PreferredContextFormat::XmlTaggedMarkdown
+        );
+        assert_eq!(decoded.token_budget_confidence, TokenBudgetConfidence::Low);
+    }
+
+    #[test]
+    fn context_pack_build_result_serializes_strategy_and_sections() {
+        let result = ContextPackBuildResult {
+            strategy: ContextPackStrategy::CrossProviderDelta,
+            prompt: "<baize_context/>".to_string(),
+            estimated_tokens: 42,
+            included_sections: vec!["objective".to_string()],
+            truncated_sections: vec!["diff_hunks".to_string()],
+            source_event_count: 7,
+        };
+
+        let raw = serde_json::to_value(&result).expect("serialize result");
+
+        assert_eq!(raw["strategy"], "CrossProviderDelta");
+        assert_eq!(raw["included_sections"][0], "objective");
+        assert_eq!(raw["truncated_sections"][0], "diff_hunks");
     }
 
     #[test]

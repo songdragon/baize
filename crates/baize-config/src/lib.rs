@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,8 @@ pub struct BaizeConfig {
     pub workspace: WorkspaceConfig,
     #[serde(default)]
     pub routing: RoutingConfig,
+    #[serde(default)]
+    pub context: ContextConfig,
     pub providers: ProviderConfig,
 }
 
@@ -32,6 +35,12 @@ pub struct WorkspaceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub order: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextConfig {
+    #[serde(default)]
+    pub provider_token_budgets: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +72,7 @@ impl Default for BaizeConfig {
                 checkpoint_policy: "before_handoff".to_string(),
             },
             routing: RoutingConfig::default(),
+            context: ContextConfig::default(),
             providers: ProviderConfig {
                 order: vec![
                     "codex".to_string(),
@@ -173,6 +183,18 @@ pub fn validate_config(config: &BaizeConfig) -> ConfigValidation {
     if config.routing.failure_threshold_count == 0 {
         errors.push("routing.failure_threshold_count must be greater than 0".to_string());
     }
+    for (provider, budget) in &config.context.provider_token_budgets {
+        if !KNOWN_PROVIDERS.contains(&provider.as_str()) {
+            errors.push(format!(
+                "context.provider_token_budgets contains unknown provider: {provider}"
+            ));
+        }
+        if *budget == 0 {
+            errors.push(format!(
+                "context.provider_token_budgets.{provider} must be greater than 0"
+            ));
+        }
+    }
 
     let mut seen = HashSet::new();
     for provider in &config.providers.order {
@@ -231,6 +253,10 @@ mod tests {
             quota_switch_threshold_percent = 15
             failure_threshold_count = 2
 
+            [context.provider_token_budgets]
+            codex = 32000
+            antigravity = 20000
+
             [providers]
             order = ["gemini", "codex"]
             "#,
@@ -243,6 +269,10 @@ mod tests {
         assert_eq!(config.routing.sticky_window_minutes, 45);
         assert_eq!(config.routing.quota_switch_threshold_percent, 15);
         assert_eq!(config.routing.failure_threshold_count, 2);
+        assert_eq!(
+            config.context.provider_token_budgets.get("codex"),
+            Some(&32_000)
+        );
         assert_eq!(config.providers.order, vec!["gemini", "codex"]);
     }
 
@@ -267,6 +297,7 @@ mod tests {
         assert_eq!(config.routing.sticky_window_minutes, 30);
         assert_eq!(config.routing.quota_switch_threshold_percent, 10);
         assert_eq!(config.routing.failure_threshold_count, 3);
+        assert!(config.context.provider_token_budgets.is_empty());
     }
 
     #[test]
@@ -320,6 +351,10 @@ mod tests {
         config.routing.sticky_window_minutes = 1441;
         config.routing.quota_switch_threshold_percent = 101;
         config.routing.failure_threshold_count = 0;
+        config
+            .context
+            .provider_token_budgets
+            .insert("codex".to_string(), 0);
         config.providers.order = vec![
             "codex".to_string(),
             "codex".to_string(),
@@ -353,5 +388,26 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("failure_threshold_count")));
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("codex") && error.contains("greater than 0")));
+    }
+
+    #[test]
+    fn validation_reports_unknown_context_budget_provider() {
+        let mut config = BaizeConfig::default();
+        config
+            .context
+            .provider_token_budgets
+            .insert("unknown".to_string(), 10_000);
+
+        let validation = validate_config(&config);
+
+        assert!(!validation.valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("unknown provider: unknown")));
     }
 }

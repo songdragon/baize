@@ -1,14 +1,14 @@
 # Baize Requirements Spec
 
+更新：2026-11-21。本文规定目标行为；当前已实现能力与产品验收缺口分别记录在 [MVP 计划](mvp-implementation-plan.md)。
+
 ## 1. 概述
 
-Baize 是一个本地 workspace facade，用于连接并调度多个已安装的 coding agent。它在用户和 agent 之间提供统一的 workspace UI、路由策略、配额观察、session 管理和上下文交接能力。
+Baize 提供可更换执行 agent 的持续开发会话。用户在同一个 Baize session 中讨论和开发；更换 agent 时，系统结合当前 workspace、近期相关对话和仍然有效的约束继续工作。
 
-第一阶段目标是验证：
+接入目标包括 CLI 与具备可用接口的 provider Desktop 执行环境。需要保留的原生能力包括内置 prompt、MCP、skills、computer use、browser use 等；不能仅以模型或品牌相同推定两个入口等效。
 
-```text
-多个 coding agent 能否在同一个 repo 上，通过统一工作区状态和 handoff 机制，稳定接力完成任务。
-```
+第一阶段目标是验证：用户在 A → B → A 的切换中能否保持同一个 Baize session，减少重述与纠偏，并获得声明的实际执行能力。统一配置、路由、额度观察和交接摘要服务于这一目标。
 
 ## 2. 用户问题
 
@@ -20,48 +20,50 @@ Baize 是一个本地 workspace facade，用于连接并调度多个已安装的
 
 Claude、OpenAI、Gemini 等 provider 的配额和限速机制不同。用户通常在失败后才知道不可用。
 
-### 2.3 session 上下文不可迁移
+### 2.3 用户工作与 provider session 绑定
 
-每个 agent 都有自己的会话状态。一个 agent 写到一半，另一个 agent 不知道已经发生了什么。
+每个 agent 都有自己的原生会话。换执行者时，用户容易被迫另开对话、重述近期讨论；切回旧 agent 时，它也不知道离开期间的新工作。需要保持 Baize session 连续，而不要求跨产品搬运全部内部状态。
 
-### 2.4 多 agent 协作缺少工作区状态
+### 2.4 工作区与对话无法共同承接
 
-文件修改、命令执行、测试结果、失败原因、用户约束没有统一记录。
+文件、文档、Git 和验证结果反映执行事实，近期对话包含当前意图、修正和下一步要求。只交接其中一类信息都可能导致重新解释或重复尝试。
 
 ### 2.5 用户不信任黑盒路由
 
 如果系统自动切换 agent 但不解释原因，用户会担心质量、成本和安全边界变化。
 
+### 2.6 统一入口损失原生能力
+
+Desktop 产品可能整合内置 prompt、MCP、skills、computer use、browser use 等能力。用户希望保留实际执行环境，不能把关注 Desktop 简化为对窗口、布局或视觉呈现的偏好。
+
+### 2.7 重复配置
+
+用户希望一套通用要求在不同 agent 中生效，但项目指令、MCP 与 skills 已能承担部分复用工作。Baize 应在这些基础上减少重复设置，不要求先建立新的角色和知识管理体系。
+
 ## 3. 产品目标
 
 ### 3.1 MVP 目标
 
-MVP 应该做到：
+- 管理一个本地 workspace，连接至少两个实际可执行的 coding agent；
+- 使用稳定的 Baize session 身份和主对话承接用户工作，不因 agent 更换另建上层会话；
+- 在同 provider 原生续接、跨 provider 接手、切回旧 provider 时组织正确上下文；
+- 组合当前 workspace 与近期相关原始对话，保留仍然有效的较早约束；
+- 无法调用原 agent 时仍能准备交接，不以它先生成摘要作为前提；
+- 记录用户消息、agent 输出、切换、diff、命令、验证结果与已知能力缺口；
+- 提供明确的手动或辅助切换，默认同一时刻一个 agent 执行工作；
+- 复用已有项目配置，标明当前共享配置映射与执行入口的支持范围。
 
-- 管理一个本地 workspace；
-- 连接至少两个 coding agent adapter；
-- 为每个任务创建 Baize-level session；
-- 基于规则做 provider selection；
-- 在同一任务中默认 sticky routing；
-- 观察 provider health 和基础 quota 信号；
-- 检测 rate limit / quota exhaustion / agent failure；
-- 在切换前生成 handoff summary；
-- 记录文件 diff、命令、测试结果和任务状态；
-- 在 UI 或 CLI 中解释路由原因。
+当前工程以 CLI 路径验证上述目标。实现了 session ID、日志或 resume 参数，不等于已完成连续性产品验收。
 
-### 3.2 长期目标
+### 3.2 后续能力
 
-最终版本应该做到：
+- 通过官方接口接入 provider Desktop 等更完整的原生执行环境；
+- 一套用户通用配置在支持的执行入口中映射生效，并报告不支持项；
+- 在接口允许时，将原生环境中的输入、输出、审批与执行状态关联回原 Baize session；
+- 改善 Baize 自身的 UI、原生服务接入、上下文选择和中断恢复；
+- 在连续会话验证后，再评估自动路由、精确额度、回放、团队与云能力。
 
-- 支持主流 coding agent adapter；
-- 支持用户自定义 routing policy；
-- 支持自动、半自动、手动三种切换模式；
-- 支持高质量 workspace memory；
-- 支持 task replay 和 checkpoint restore；
-- 支持 provider performance learning；
-- 支持团队审计和协作；
-- 支持 IDE、desktop、web、CLI 多入口；
-- 支持 adapter SDK 和插件生态。
+Baize 自身的 Desktop UI 和 provider Desktop 执行接入是两个独立方向。
 
 ## 4. 核心概念
 
@@ -82,7 +84,12 @@ MVP 应该做到：
 
 ### 4.2 Task Session
 
-用户发起的一段连续工作。
+用户发起的一段持续开发会话，产品中称 Baize session，代码中沿用 `TaskSession`。它承接讨论、澄清、编码和反馈，不要求先有正式任务单。
+
+- Baize session 的身份、主对话和 workspace 关联跨 agent 切换保持不变；
+- provider 原生 session 是下层执行引用；同一个 Baize session 可以关联多条；
+- 恢复旧 provider session 时必须补充它尚未知晓的新对话与工作区变化；
+- 不同工作目标可以另建 Baize session，连续性不等于无限增长的单一模型上下文。
 
 字段示例：
 
@@ -98,21 +105,22 @@ MVP 应该做到：
 
 ### 4.3 Agent Provider
 
-一个已安装 coding agent 的适配器。
+coding agent 执行环境的适配对象，例如 Codex、Antigravity、OpenCode、Copilot 或 Claude Code。
 
-示例：
+| 概念 | 示例与作用 |
+|---|---|
+| Provider | 产品或工具身份 |
+| 执行入口 | CLI、原生服务、Desktop 会话等，决定实际运行环境 |
+| Transport | ACP、官方 RPC/SDK、HTTP 或 CLI 等通信方式 |
+| 原生配置与能力 | 该入口的内置 prompt、MCP、skills、computer/browser use、权限与工具 |
 
-- Claude Code；
-- Codex CLI；
-- Gemini CLI；
-- Cline；
-- Aider。
+同一个 provider 可以有不同执行入口，其能力不保证相同。打开 Desktop 窗口或深链接仅是导航，不能据此声明已获得 Desktop 的执行能力。
 
 ### 4.4 Handoff Summary
 
-agent 切换时生成的结构化交接材料。
+上下文较长、预算不足或需要人工检查时使用的交接材料。摘要是辅助信息，不是每次切换必经的 agent 调用，也不是全部原始历史的替代。
 
-应包含：
+按相关性可包含：
 
 - task objective；
 - current status；
@@ -159,22 +167,9 @@ Baize 每次选择或继续使用 provider 时生成的决策记录。
 
 系统应维护可用 agent 列表。
 
-MVP 至少支持两个 adapter。支持优先级：
+MVP 至少支持两个实际可执行的 adapter。当前 CLI 基线是 Codex、Antigravity、OpenCode；Copilot 等路径以验证结果标注，不用注册或健康检查代替执行证明。
 
-```text
-1. Codex
-2. Gemini CLI
-3. GitHub Copilot CLI
-4. OpenCode
-```
-
-后续候选：
-
-```text
-5. Claude Code
-6. Cline
-7. Aider
-```
+新增入口按实际能力选择：官方原生接口能保留更多所需能力时优先使用，ACP 能满足需求时复用标准协议，CLI 提供兼容路径。provider Desktop 接入需单独验证能力与会话关联，不与 Baize 自身 UI 的开发混为一项。
 
 每个 adapter 至少提供：
 
@@ -190,7 +185,9 @@ interface AgentProvider {
 
 ### 5.3 Capability-based adapter
 
-不要假设所有 agent 都支持同样能力。
+不要假设所有 agent 或同品牌的不同执行入口都支持同样能力。下列类型只是基础能力示意，不表示当前实现已经覆盖 Desktop。
+
+目标能力声明还需说明原生 prompt、项目指令、MCP、skills、computer use、browser use、会话控制、事件回流和权限交互的支持范围。区分未验证、不支持和已验证，并注明执行入口；缺失能力不能静默被更低能力的入口替代。
 
 capabilities 示例：
 
@@ -211,7 +208,7 @@ type AgentCapabilities = {
 
 MVP 可支持：
 
-- CLI 是否存在；
+- 所选执行入口是否存在或可连接（当前 MVP 检查 CLI）；
 - auth 是否可用；
 - 最近一次调用是否失败；
 - 是否出现 rate limit 或 quota exceeded；
@@ -240,17 +237,16 @@ type QuotaConfidence = "exact" | "estimated" | "unknown"
 
 ### 5.6 Routing engine
 
-MVP 使用规则引擎。
+路由支持持续会话，MVP 使用规则与用户显式选择：
 
-默认规则：
+- 可继续时保持当前 agent；
+- 用户可因为能力、效果、模型或 prompt 差异主动更换执行者；
+- health、quota、rate limit 和失败信号可以提示候选，不是唯一切换理由；
+- 推荐需结合实际入口能力与用户要求，不仅按可调用性选择；
+- 缺少所需工具或无法承接会话时说明缺口，不静默降级；
+- 具体切换是否执行由用户模式和授权决定，切换记录归原 Baize session。
 
-- 如果 task session 已有 active provider，且 provider healthy，且 quota 未低于阈值，则继续使用；
-- 如果 provider quota 低于阈值，提示用户切换；
-- 如果 provider rate limited，建议迁移；
-- 如果 provider unavailable，自动进入 provider selection；
-- 大型重构优先选择强规划 agent；
-- 测试修复和命令密集任务优先选择本地执行稳定的 agent；
-- 搜索、解释和大范围阅读任务可选择长上下文或低成本 agent。
+不以自动判断“哪家更擅长某类任务”作为 MVP 连续性成立的前提。
 
 ### 5.7 Sticky routing
 
@@ -259,7 +255,7 @@ MVP 必须支持 sticky routing。
 默认：
 
 ```text
-同一 task session 内保持同一 provider。
+同一 Baize session 内默认继续使用当前 provider；用户仍可在原 session 中显式更换执行者。
 ```
 
 允许配置：
@@ -269,18 +265,29 @@ MVP 必须支持 sticky routing。
 - failure threshold；
 - manual override。
 
-### 5.8 Handoff generation
+### 5.8 切换上下文与 handoff
 
-当用户或系统决定切换 agent 时，Baize 应生成 handoff summary。
+切换前应组合：
 
-MVP 可以通过 workspace state 和 session log 生成，不要求完美自动理解所有代码。
+1. 当前 workspace、代码/文档引用、Git 修改与可用验证证据；
+2. 近期相关原始对话，包括当前请求、用户纠正和下一步意图；
+3. 仍然有效的较早目标与约束；
+4. 必要时的摘要，注明其来源与局限。
 
-### 5.9 Workspace state tracking
+保留消息角色、执行来源和顺序；agent 建议不能自动变成用户已确认要求。历史按预算选择，不默认全量转发，不把固定最后 N 条当作完整语义保证。
 
-MVP 应记录：
+同 provider 原生续接可避免重复注入已有历史。切回旧 agent 时补充其最后已知位置之后的相关增量，并重新检查 workspace；原生 session ID 不证明它了解最新状态。
 
-- user prompts；
-- selected provider；
+交接不能依赖原 agent 仍在线或有剩余额度。源不可用时，可从 Baize 记录和 workspace 准备上下文；必要信息不足时明确缺口。
+
+默认在可确认的回合边界切换。进行中的工具调用需先结束或明确中断，核对部分修改；失败或结果未知时保留原 Baize session 与已知状态，不盲目重复有副作用的操作。
+
+### 5.9 Workspace 与会话记录
+
+MVP 应在原 Baize session 中关联记录：
+
+- user prompts 与可取得的近期 agent 回复；
+- selected provider、执行入口及原生 session 引用；
 - route decisions；
 - files changed；
 - git diff summary；
@@ -325,93 +332,61 @@ MVP 至少应展示当前 workspace dirty state，并在 agent 切换前提醒�
 - per-agent diff attribution；
 - conflict detection。
 
+### 5.13 共享配置
+
+用户通用要求以一份逻辑配置维护，Baize 自动向支持的 agent 应用相应配置，不要求用户逐家复制。优先复用项目已有的 `AGENTS.md`、MCP、skills 与 provider 配置。需要映射时，显示支持项、有效作用范围、未支持项与显式覆盖，不要求重复创建同义角色。
+
+保留目标产品的内置 prompt、专属工具和配置，不通过统一系统提示词替换原生执行机制。共享配置减少设置负担，但不是跨 agent session 连续性的替代。
+
+此项是目标要求；当前 MVP 尚未实现跨产品配置同步或所有入口的等效配置。
+
+### 5.14 主对话连续
+
+默认使用同一条 Baize 主对话、同一输入入口呈现工作，标明回答来自哪个 agent、在哪个执行环境完成。内部 handoff 是系统操作，不伪装成用户重新输入的消息。
+
+底层原生 session 可多条，用户无需为每次切换管理新标签。读取历史和恢复 Baize session 后，仍能定位工作区、近期讨论、当前执行者与已知进度。
+
+### 5.15 Provider Desktop 执行接入
+
+在 provider 提供可用接口时，研究把其 Desktop 能力环境作为实际执行者接入。验收需证明目标能力确实可用，并将可取得的输入、输出、状态与审批关联回原 Baize session。
+
+仅打开应用、共享认证、使用同品牌模型或启动相关 CLI，都不能单独满足该要求。无法控制或回流的部分应标明；不承诺转移原生工具进程和内部状态。
+
 ## 6. 最终用户视角
 
 ### 6.1 第一次使用
 
-用户打开 Baize，选择本地 repo。
+用户选择本地 workspace，复用已有项目指令、MCP、skills 与 provider 配置。界面显示可用 agent、实际执行入口和已知能力差异，不要求先配置多个角色。
 
-Baize 显示：
+### 6.2 开始讨论和开发
 
-- 当前 branch；
-- dirty state；
-- 检测到的项目类型；
-- 可用 agent；
-- 每个 agent 的 health/quota 概览。
+用户进入或新建 Baize session，可以先讨论方案再编码。主对话、目标与 workspace 始终关联，当前 agent 与实际执行入口可见。
 
-用户无需先选择模型，可以直接输入任务。
+例如：“帮我拆分 auth 模块，先讨论方案。保持公共 API，不引入新数据库。”
 
-### 6.2 发起任务
+### 6.3 持续反馈
 
-用户输入：
+用户查看回答、diff、文档和验证结果，继续纠正或补充要求。Baize 保留近期对话与有效约束，不要求用户先把讨论整理成正式文档。
 
-```text
-帮我重构 auth 模块，把 provider 逻辑拆出来，并补测试。
-```
+### 6.4 选择另一位执行者
 
-Baize 选择 agent，并显示：
+用户因为效果、能力、额度或可用性选择切换，例如：“换 Codex 接着实现刚才确认的方案。”
 
-```text
-Using Claude Code
-Reason: large refactor, healthy quota, no active session conflict.
-```
+Baize 保持原 session，说明目标入口与能力差异，在可确认的边界组合 workspace 与相关对话。摘要按需要辅助，原 agent 不可用不应阻止准备交接。
 
-### 6.3 任务进行中
+### 6.5 接手与切回
 
-用户看到：
+目标 agent 接收当前修改、有效约束和近期意图，继续回答原请求。用户仍在同一个 Baize session 中交流。
 
-- 当前 agent；
-- 正在修改的文件；
-- 运行过的命令；
-- 测试状态；
-- 当前 route confidence；
-- quota warning。
+再切回原 agent 时，Baize 补上它离开期间的新要求、对话与 workspace 变化，避免它按旧状态重做或覆盖工作。
 
-### 6.4 quota 即将耗尽
+如果在 provider Desktop 中执行，应证明使用的是所选能力环境，并通过已支持的接口回流会话信息；无法回流的部分明确显示。
 
-Baize 提示：
+### 6.6 完成与恢复
 
-```text
-Claude quota is low. Estimated remaining: 8%.
-The task is now mostly test/debug work.
+用户检查最终 diff、文档、测试证据和未解决事项后决定完成。后续可恢复该 Baize session；记录的结果需与当前 workspace 核对，不能把旧测试信号当成最新状态。
 
-Recommended: switch to Codex.
-```
-
-用户可以选择：
-
-```text
-Continue Claude
-Switch to Codex
-Enable autopilot for this task
-```
-
-### 6.5 agent 迁移
-
-用户选择切换后，Baize 生成 handoff summary，并交给 Codex。
-
-Codex 接手时知道：
-
-- 当前目标；
-- 已修改文件；
-- 为什么修改；
-- 哪些测试失败；
-- 下一步建议；
-- 用户要求。
-
-用户继续在同一个 UI 里对话，不需要手工复制上下文。
-
-### 6.6 任务完成
-
-Baize 展示：
-
-- 最终 diff；
-- 涉及 agent；
-- route history；
-- commands run；
-- test result；
-- handoff count；
-- unresolved risks。
+不以 handoff 次数、路由规则数量或历史收集规模作为任务完成的依据。
 
 ## 7. 非功能需求
 
@@ -444,7 +419,10 @@ MVP 至少能恢复：
 - task objective；
 - active provider；
 - route history；
-- file change summary。
+- file change summary；
+- 可用的近期对话、有效约束和 provider 原生 session 引用。
+
+可恢复不等于已有执行可以无条件重放；部分完成和结果未知时先核对。
 
 ### 7.5 可扩展
 
@@ -483,7 +461,7 @@ baize/
 - `crates/baize-daemon/`: headless daemon，本地 API、事件流和生命周期管理；
 - `crates/baize-tui/`: ratatui TUI 客户端；
 - `crates/baize-acp/`: ACP client、transport、capability mapping；
-- `crates/baize-adapters/`: Codex、Gemini、Copilot、OpenCode 等 provider adapter；
+- `crates/baize-adapters/`: Codex、Antigravity、OpenCode、Copilot 等 provider 的执行入口适配；
 - `crates/baize-workspace/`: repo 状态、diff、命令、文件上下文；
 - `crates/baize-storage/`: SQLite storage、event log、migration；
 - `crates/baize-config/`: TOML 配置、schema、profile；
@@ -504,39 +482,25 @@ MVP 暂不做：
 - 自动修复复杂 merge conflict；
 - 云端同步；
 - marketplace；
-- 复杂 AI-based routing。
+- 复杂 AI-based routing；
+- 跨产品完整复制私有 session、内部工具状态或后台进程；
+- 把复杂任务管理、角色配置或决策卡片作为持续会话的前提。
+
+Provider Desktop 执行属于产品目标，当前 CLI MVP 不宣称已实现；Baize 自身的 Desktop UI 仍独立排期。
 
 ## 10. 已回答的产品决策
 
 ### 10.1 第一版 UI
 
-第一版使用 TUI。
+当前版本使用薄 TUI 验证持续会话，未来可通过相同 daemon 支持其他 UI。
 
-原因：
+这源于最初 CLI 为主的接入条件，不代表用户只需要终端界面，也不证明 CLI 拥有 Desktop 的原生 prompt、MCP、skills、computer/browser use。Provider Desktop 执行接入不要求先开发 Baize 自身的 Desktop UI。
 
-- 符合 coding agent 用户的终端工作流；
-- 比 desktop/web 更快验证核心调度闭环；
-- 更容易嵌入本地 repo、命令、diff、日志和 agent process；
-- 未来仍可在同一核心层上增加 web 或 desktop UI。
+### 10.2 Adapter 接入原则
 
-### 10.2 Adapter 优先协议
+按实际能力选择官方原生接口、ACP 或 CLI。能保留更多所需能力的官方会话接口优先；ACP 满足需求时复用标准协议；CLI 提供兼容执行路径。
 
-优先 ACP 协议。
-
-如果某个 agent 的 ACP 能力无法覆盖 Baize 的 MVP 或长期需求，再针对该 agent 增加 fallback adapter。
-
-建议 adapter 分层：
-
-```text
-ACP adapter
-  优先使用标准 ACP 能力
-
-Native adapter
-  使用 agent SDK、app server、remote-control 或官方自动化接口
-
-CLI adapter
-  最后 fallback 到命令行进程、stdout/stderr、session 文件和约定式解析
-```
+接口优先级不能替代验证：需确认 session 控制、结果/事件回流、workspace、配置、权限与原生工具。发生能力变化或必须改用其他入口时说明原因，不静默声称等效。
 
 ### 10.3 Session 状态持久化和引用
 
@@ -546,23 +510,11 @@ Baize 不应假设所有 agent 都有统一 session store。应在 Baize 内部�
 
 ### 10.4 Handoff summary
 
-期望由 agent 生成。
+摘要按上下文长度、预算和人工检查需要生成。基本接续材料是当前 workspace 与近期相关对话，再补充仍然有效的约束。
 
-优先方案：
+原 agent 可用时可以提供摘要，Baize 附加工作区事实与验证证据；不可用时从已有记录准备交接。目标不要求原生 transcript 导入，不能依赖读取私有存档完成完整状态迁移。
 
-```text
-当前 agent 生成 handoff summary。
-Baize 用 workspace state、diff、命令记录和测试结果校验/补充。
-目标 agent 接收 handoff 后继续任务。
-```
-
-备选方案：
-
-```text
-如果 provider 暴露 transcript/session 文件，Baize 可让目标 agent 读取这些过程状态，再生成自己的接手摘要。
-```
-
-注意：不能只依赖目标 agent 自行阅读前一个 agent 的原始历史，因为不同 agent 的 transcript 格式、权限边界和压缩语义不同。
+摘要应保留来源、用户要求与 agent 建议的区别，失效内容不能作为当前指令。它不取代主对话，也不是额外维护的必填任务文档。
 
 ### 10.5 Git checkpoint
 
@@ -619,11 +571,29 @@ Long term: line/hunk 级别 + semantic decision log
 
 原因：file 级别容易实现但解释力有限；hunk 级别对 handoff 和 review 最有价值；line 级别成本高，且在格式化、重构、批量移动时容易产生误导。
 
-## 11. 仍需调研的问题
+## 11. 仍需验证的问题
 
-- ACP 在 Codex、Gemini CLI、GitHub Copilot CLI、OpenCode、Claude Code、Cline、Aider 上的实际支持程度；
-- ACP 的 session/load、file system、terminal、permission、plan、diff 能力是否满足 MVP；
-- 各 agent session/transcript/checkpoint 的本地保存位置、格式、保留周期和 resume API；
-- 读取其他 agent transcript 生成 handoff 的安全边界和隐私风险；
-- 不同 attribution 粒度对性能、准确性和用户体验的影响；
-- TUI 中如何展示 provider health、quota、route history、diff 和 handoff。
+- 各执行入口实际提供的内置 prompt、MCP、skills、computer/browser use 是否可用；
+- provider Desktop 的官方接口能否控制会话，并回流输入、输出、状态和审批；
+- 近期对话选择如何保留用户纠正和较早但仍有效的约束；
+- A → B → A 时如何定位已知上下文并补充增量，处理外部 workspace 修改；
+- 原 agent 不可用、目标启动失败或结果未知时如何保持 session 连续；
+- 通用配置能复用哪些现有机制，哪些需要 provider 专属映射；
+- 与用户当前原生工具流程相比，重述、重复尝试和能力损失是否减少。
+
+历史 provider 观察见 `research.md` 和 `provider-context-research.md`；其中的日期与未知项不因本次产品理念更新而视为已重新验证。
+
+## 12. 连续会话验收
+
+| 场景 | 期望结果 |
+|---|---|
+| A → B | Baize session ID 与主对话保持，B 同时获得当前 workspace 和近期相关对话 |
+| A → B → A | A 补齐离开期间的新要求与工作区变化，不只恢复旧原生 session |
+| 较早约束仍有效 | 超出近期窗口的关键要求仍被保留，已失效要求不继续作为指令 |
+| 原 agent 额度耗尽或失联 | 不依赖源 agent 生成摘要，也能准备交接或明确缺失项 |
+| 目标启动失败或结果未知 | 保留原 session 和已知执行状态，不盲目重跑有副作用的操作 |
+| 共享配置 | 可检查支持项、作用范围与未支持项，保留 provider 专属 prompt 和工具 |
+| Provider Desktop 接入 | 证明工作在声明的能力环境中执行；仅启动窗口不算完成 |
+| 用户效果 | 与原生工具及手工交接基线比较，减少重述、纠偏与重复尝试，产物质量和关键能力不下降 |
+
+上述是产品验收要求。当前实现中的 session/resume、上下文包、事件日志和 handoff 是基础能力，不作为全部场景已经通过的声明。

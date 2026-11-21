@@ -2,24 +2,29 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::Json;
 use baize_core::{
-    BaizeEvent, HandoffStatus, ProviderId, RouteDecision, RouteDecisionId, RoutingMode,
-    TaskSession, TaskSessionId, TaskSessionStatus, TaskType,
+    HandoffStatus, ProviderId, RouteDecision, RouteDecisionId, RoutingMode, TaskSession,
+    TaskSessionId, TaskSessionStatus, TaskType,
 };
 use chrono::Utc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use crate::helpers::{
     bad_request, format_error_chain, infer_provider_limit, infer_task_type, internal_error,
     json_result, json_result_option, ok_json, select_provider, with_store,
 };
 use crate::state::{
-    AppState, CreateSessionRequest, HandoffsQuery, PaginationQuery, PromptRequest, RoutesQuery,
-    SessionsQuery,
+    AppState, ContextPreviewQuery, CreateSessionRequest, HandoffsQuery, PaginationQuery,
+    PromptRequest, RoutesQuery, SessionsQuery,
 };
 
-const SESSION_CONTEXT_EVENT_LIMIT: u64 = 500;
-const SESSION_CONTEXT_ENTRY_LIMIT: usize = 12;
-const SESSION_CONTEXT_TEXT_LIMIT: usize = 800;
-const SESSION_CONTEXT_TOTAL_LIMIT: usize = 6_000;
+struct PreparedContextPack {
+    project: baize_core::Project,
+    result: baize_core::ContextPackBuildResult,
+    summary: crate::context::ContextPackSummary,
+}
 
 pub async fn sessions(
     State(state): State<AppState>,
@@ -398,6 +403,7 @@ pub async fn prompt_session(
     if matches!(session.status, TaskSessionStatus::Canceled) {
         return bad_request("session is canceled");
     }
+    let previous_provider_id = session.active_provider_id.clone();
     let provider_id = match apply_prompt_provider_target(&state, &mut session, &request) {
         Ok(provider_id) => provider_id,
         Err(response) => return response,
@@ -408,14 +414,15 @@ pub async fn prompt_session(
             provider_id.0
         ));
     }
-    let workspace = match with_store(&state, |store| store.get_workspace(&session.workspace_id)) {
-        Ok(Some(workspace)) => workspace,
-        _ => return not_found("workspace not found"),
-    };
-    let project = match with_store(&state, |store| store.get_primary_project(&workspace)) {
-        Ok(Some(project)) => project,
-        _ => return not_found("project not found"),
-    };
+    if !request.image_paths.is_empty() && !baize_adapters::supports_file_attachment(&provider_id) {
+        return bad_request(&format!(
+            "provider {} does not support image attachments",
+            provider_id.0
+        ));
+    }
+    if let Err(error) = validate_prompt_image_paths(&request.image_paths) {
+        return bad_request(&error);
+    }
 
     session.status = TaskSessionStatus::Running;
     session.updated_at = Utc::now();
@@ -427,36 +434,82 @@ pub async fn prompt_session(
         .provider_native_session_ids
         .get(&provider_id.0)
         .cloned();
-    let prompt_for_agent = if native_resume_session_id.is_some() {
-        request.prompt.clone()
-    } else {
-        match prompt_with_session_context(&state, &session, &request.prompt) {
-            Ok(prompt) => prompt,
-            Err(error) => return internal_error(error.to_string()),
-        }
+    let prepared_context = match prepare_context_pack(
+        &state,
+        &session,
+        &provider_id,
+        &request.prompt,
+        previous_provider_id.as_ref(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => return internal_error(error.to_string()),
     };
+    let context_summary = prepared_context.summary.clone();
+    let prompt_for_agent = prepared_context.result.prompt.clone();
+
+    let mut context_event = baize_core::BaizeEvent::new(
+        "session.context.built",
+        serde_json::json!({ "context": context_summary }),
+    );
+    context_event.workspace_id = Some(session.workspace_id.clone());
+    context_event.session_id = Some(session.id.clone());
+    context_event.provider_id = Some(provider_id.clone());
+    state.record_event(context_event);
+
+    let project = prepared_context.project;
 
     let mut started = baize_core::BaizeEvent::new(
         "session.agent.started",
-        serde_json::json!({ "prompt": request.prompt, "provider_id": provider_id.0 }),
+        serde_json::json!({
+            "prompt": request.prompt,
+            "provider_id": provider_id.0,
+            "image_paths": request.image_paths.clone(),
+        }),
     );
     started.workspace_id = Some(session.workspace_id.clone());
     started.session_id = Some(session.id.clone());
     started.provider_id = Some(provider_id.clone());
     state.record_event(started);
 
-    let run = state
-        .executor
-        .run_prompt(baize_adapters::AgentPromptRequest {
-            provider_id: provider_id.clone(),
-            prompt: prompt_for_agent,
-            cwd: project.root,
-            session_id: native_resume_session_id,
-            timeout_seconds: request.timeout_seconds.or(Some(120)),
-            execution_policy: baize_adapters::AgentExecutionPolicy::from_command_policy(
-                &state.config.workspace.command_policy,
-            ),
-        });
+    let streamed_event_count = Arc::new(AtomicUsize::new(0));
+    let agent_request = baize_adapters::AgentPromptRequest {
+        provider_id: provider_id.clone(),
+        prompt: prompt_for_agent,
+        cwd: project.root,
+        session_id: native_resume_session_id,
+        image_paths: request.image_paths,
+        timeout_seconds: request.timeout_seconds.or(Some(120)),
+        execution_policy: baize_adapters::AgentExecutionPolicy::from_command_policy(
+            &state.config.workspace.command_policy,
+        ),
+    };
+    let run = {
+        let executor = state.executor.clone();
+        let stream_state = state.clone();
+        let stream_workspace_id = session.workspace_id.clone();
+        let stream_session_id = session.id.clone();
+        let stream_provider_id = provider_id.clone();
+        let stream_count = streamed_event_count.clone();
+        match tokio::task::spawn_blocking(move || {
+            let mut event_sink = |adapter_event: baize_adapters::AgentExecutionEvent| {
+                stream_count.fetch_add(1, Ordering::SeqCst);
+                record_adapter_event(
+                    &stream_state,
+                    &stream_workspace_id,
+                    &stream_session_id,
+                    &stream_provider_id,
+                    &adapter_event,
+                );
+            };
+            executor.run_prompt(agent_request, Some(&mut event_sink))
+        })
+        .await
+        {
+            Ok(run) => run,
+            Err(error) => Err(anyhow::anyhow!("agent worker join failed: {error}")),
+        }
+    };
+    let streamed_event_count = streamed_event_count.load(Ordering::SeqCst);
 
     match run {
         Ok(result) => {
@@ -484,23 +537,14 @@ pub async fn prompt_session(
                     })),
                 );
             }
-            for adapter_event in &result.events {
-                let event_type = match adapter_event.kind {
-                    baize_adapters::AgentExecutionEventKind::Output
-                    | baize_adapters::AgentExecutionEventKind::Raw => "session.agent.output",
-                    baize_adapters::AgentExecutionEventKind::ToolCall => "session.agent.tool_call",
-                };
-                let mut event = baize_core::BaizeEvent::new(
-                    event_type,
-                    serde_json::json!({
-                        "text": adapter_event.text,
-                        "raw": adapter_event.raw,
-                    }),
+            for adapter_event in result.events.iter().skip(streamed_event_count) {
+                record_adapter_event(
+                    &state,
+                    &session.workspace_id,
+                    &session.id,
+                    &provider_id,
+                    adapter_event,
                 );
-                event.workspace_id = Some(session.workspace_id.clone());
-                event.session_id = Some(session.id.clone());
-                event.provider_id = Some(provider_id.clone());
-                state.record_event(event);
             }
 
             let new_status = if result.success {
@@ -578,6 +622,7 @@ pub async fn prompt_session(
                     "stderr": stderr,
                     "provider_error": provider_error,
                     "limit_inference": limit_inference,
+                    "context": context_summary,
                 })),
             )
         }
@@ -623,78 +668,112 @@ pub async fn prompt_session(
                     "provider_id": provider_id,
                     "error": error,
                     "limit_inference": limit_inference,
+                    "context": context_summary,
                 })),
             )
         }
     }
 }
 
-fn prompt_with_session_context(
+pub async fn context_preview(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<ContextPreviewQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let session_id = TaskSessionId(id);
+    let session = match with_store(&state, |store| store.get_task_session(&session_id)) {
+        Ok(Some(session)) => session,
+        Ok(None) => return not_found("session not found"),
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let provider_id = query
+        .provider_id
+        .as_ref()
+        .map(|provider| ProviderId(provider.clone()))
+        .or_else(|| session.active_provider_id.clone())
+        .unwrap_or_else(|| ProviderId("codex".to_string()));
+    let prompt = query
+        .prompt
+        .as_deref()
+        .unwrap_or("<context preview request>");
+    let prepared = match prepare_context_pack(&state, &session, &provider_id, prompt, None) {
+        Ok(prepared) => prepared,
+        Err(error) => return internal_error(error.to_string()),
+    };
+
+    ok_json(serde_json::json!({
+        "context": prepared.summary,
+        "prompt_preview": crate::context::prompt_preview(&prepared.result.prompt),
+    }))
+}
+
+fn record_adapter_event(
+    state: &AppState,
+    workspace_id: &baize_core::WorkspaceId,
+    session_id: &TaskSessionId,
+    provider_id: &ProviderId,
+    adapter_event: &baize_adapters::AgentExecutionEvent,
+) {
+    let event_type = match adapter_event.kind {
+        baize_adapters::AgentExecutionEventKind::Output
+        | baize_adapters::AgentExecutionEventKind::Raw => "session.agent.output",
+        baize_adapters::AgentExecutionEventKind::ToolCall => "session.agent.tool_call",
+    };
+    let mut event = baize_core::BaizeEvent::new(
+        event_type,
+        serde_json::json!({
+            "text": adapter_event.text,
+            "raw": adapter_event.raw,
+        }),
+    );
+    event.workspace_id = Some(workspace_id.clone());
+    event.session_id = Some(session_id.clone());
+    event.provider_id = Some(provider_id.clone());
+    state.record_event(event);
+}
+
+fn prepare_context_pack(
     state: &AppState,
     session: &TaskSession,
+    provider_id: &ProviderId,
     current_prompt: &str,
-) -> anyhow::Result<String> {
-    let events = with_store(state, |store| {
-        store.list_events_for_session(&session.id, Some(SESSION_CONTEXT_EVENT_LIMIT), None)
+    previous_provider_id: Option<&ProviderId>,
+) -> anyhow::Result<PreparedContextPack> {
+    let (workspace, project, events, route_decisions, handoffs) = with_store(state, |store| {
+        let workspace = store
+            .get_workspace(&session.workspace_id)?
+            .ok_or_else(|| anyhow::anyhow!("workspace not found"))?;
+        let project = store
+            .get_primary_project(&workspace)?
+            .ok_or_else(|| anyhow::anyhow!("project not found"))?;
+        let events = store.list_events_for_session(&session.id, Some(500), None)?;
+        let route_decisions = store.list_route_decisions_for_session(&session.id)?;
+        let handoffs = store.list_handoffs_for_session(&session.id)?;
+        Ok((workspace, project, events, route_decisions, handoffs))
     })?;
-    let context = session_prompt_context(&events);
-    if context.is_empty() {
-        return Ok(current_prompt.to_string());
-    }
-
-    Ok(format!(
-        "You are continuing an existing Baize task session. Use the prior conversation context below as history from the same Baize session. Do not treat it as the new user request.\n\n<baize_session_context>\n{context}\n</baize_session_context>\n\nCurrent user request:\n{current_prompt}"
-    ))
-}
-
-fn session_prompt_context(events: &[BaizeEvent]) -> String {
-    let entries = events
-        .iter()
-        .filter_map(session_context_entry)
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        return String::new();
-    }
-
-    let mut selected = Vec::new();
-    let mut total_chars = 0usize;
-    for entry in entries.into_iter().rev() {
-        let entry_chars = entry.chars().count() + 1;
-        if selected.len() >= SESSION_CONTEXT_ENTRY_LIMIT
-            || (!selected.is_empty() && total_chars + entry_chars > SESSION_CONTEXT_TOTAL_LIMIT)
-        {
-            break;
-        }
-        total_chars += entry_chars;
-        selected.push(entry);
-    }
-    selected.reverse();
-    selected.join("\n")
-}
-
-fn session_context_entry(event: &BaizeEvent) -> Option<String> {
-    match event.event_type.as_str() {
-        "session.agent.started" => event
-            .payload
-            .get("prompt")
-            .and_then(serde_json::Value::as_str)
-            .map(|prompt| format!("user: {}", context_text(prompt))),
-        "session.agent.output" => event
-            .payload
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(|text| format!("assistant: {}", context_text(text))),
-        _ => None,
-    }
-}
-
-fn context_text(text: &str) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= SESSION_CONTEXT_TEXT_LIMIT {
-        return compact;
-    }
-    let keep = SESSION_CONTEXT_TEXT_LIMIT.saturating_sub(3);
-    format!("{}...", compact.chars().take(keep).collect::<String>())
+    let _workspace = workspace;
+    let workspace_status = baize_workspace::inspect(&project.root).ok();
+    let diff_hunks = baize_workspace::diff_hunks(&project.root).unwrap_or_default();
+    let profile = crate::context::provider_context_profile(provider_id, &state.config);
+    let result = crate::context::build_context_pack(crate::context::ContextPackInput {
+        session,
+        target_provider: provider_id,
+        current_prompt,
+        profile: &profile,
+        workspace_status: workspace_status.as_ref(),
+        project: &project,
+        events: &events,
+        route_decisions: &route_decisions,
+        handoffs: &handoffs,
+        diff_hunks: &diff_hunks,
+        previous_provider_id,
+    });
+    let summary = crate::context::summarize_context_pack(provider_id, &result);
+    Ok(PreparedContextPack {
+        project,
+        result,
+        summary,
+    })
 }
 
 pub(crate) fn session_was_canceled(state: &AppState, session_id: &TaskSessionId) -> bool {
@@ -702,6 +781,27 @@ pub(crate) fn session_was_canceled(state: &AppState, session_id: &TaskSessionId)
         .ok()
         .flatten()
         .is_some_and(|session| matches!(session.status, TaskSessionStatus::Canceled))
+}
+
+fn validate_prompt_image_paths(image_paths: &[std::path::PathBuf]) -> Result<(), String> {
+    for image_path in image_paths {
+        if image_path.as_os_str().is_empty() {
+            return Err("image attachment path cannot be empty".to_string());
+        }
+        let metadata = image_path.metadata().map_err(|error| {
+            format!(
+                "image attachment {} is not readable: {error}",
+                image_path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "image attachment {} is not a file",
+                image_path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn apply_prompt_provider_target(
@@ -723,6 +823,14 @@ fn apply_prompt_provider_target(
     if !baize_adapters::is_prompt_runtime_supported(&requested_provider) {
         return Err(crate::helpers::bad_request(&format!(
             "provider {} does not support Baize prompt execution yet",
+            requested_provider.0
+        )));
+    }
+    if !request.image_paths.is_empty()
+        && !baize_adapters::supports_file_attachment(&requested_provider)
+    {
+        return Err(crate::helpers::bad_request(&format!(
+            "provider {} does not support image attachments",
             requested_provider.0
         )));
     }

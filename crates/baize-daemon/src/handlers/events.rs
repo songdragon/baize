@@ -1,6 +1,6 @@
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
 use baize_core::{ProviderId, TaskSessionId, WorkspaceId};
 use std::convert::Infallible;
@@ -26,7 +26,7 @@ pub async fn events(
             Err(_) => None,
         });
     let receiver = receiver.map(|result| result);
-    Sse::new(connected.chain(receiver))
+    Sse::new(connected.chain(receiver)).keep_alive(KeepAlive::default())
 }
 
 pub async fn history(

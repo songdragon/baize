@@ -1,37 +1,32 @@
 # Baize Research Notes
 
+产品结论更新：2026-11-21。以下 provider 与协议观察保留原调研口径，未因产品理念更新而重新验证版本、能力或支持状态。当前实现以 `mvp-implementation-plan.md` 和代码为准。
+
 ## 1. 当前结论
 
-### 1.1 UI
+### 1.1 产品目标与入口
 
-第一版采用 TUI。
+Baize 保持同一个上层开发 session，在 agent 切换时组合当前 workspace、近期相关原始对话和有效约束，减少用户重述。历史迁移、摘要、路由和额度观察都是支撑机制。
 
-TUI 更贴近 coding agent 的真实使用环境，也更容易管理：
+当前 TUI/CLI 起点源于最初的工具生态，不代表终端是唯一或能力最完整的执行环境。用户关注 provider Desktop 的内置 prompt、MCP、skills、computer use、browser use 等便利能力，不能把这一诉求归为 UI 美观。
 
-- 本地 repo；
-- agent subprocess；
-- route decision；
-- diff；
-- shell command；
-- checkpoint；
-- handoff log。
+Baize 自身 Desktop UI 与 provider Desktop 实际执行接入分别评估。打开窗口或同品牌 CLI 不证明已经取得 Desktop 能力。
 
 ### 1.2 Adapter strategy
 
-优先 ACP，但不要只押注 ACP。
+按能力和接口可控性选择接入路径：
 
-建议策略：
+- 官方原生接口能够保留更多所需执行能力时优先使用；
+- ACP 满足需求时复用标准会话协议；
+- CLI 提供当前执行基线与兼容路径，不静默声称和其他入口等效。
 
-```text
-ACP first, native second, CLI fallback.
-```
+验证需要覆盖实际入口的 prompt、MCP、skills、computer/browser use、配置作用域、session 控制、消息/状态回流与权限交互。统一协议和同一模型不足以证明开发效果相同。
 
-原因：
+### 1.3 配置与上下文
 
-- ACP 是为 editor/client 与 coding agent 通信设计的协议；
-- 它覆盖 session、prompt turn、permission、file system、terminal、plan、mode 等核心交互；
-- 但不同 agent 的 ACP 支持程度会不同；
-- quota、provider-specific session、transcript、checkpoint 等能力可能仍需要 native 或 CLI adapter。
+通用配置优先复用项目 `AGENTS.md`、MCP、skills 与 provider 已有设置；支持映射时显示生效范围与缺口，保留原生 prompt 和专属工具。
+
+切换使用 workspace + 近期相关对话，摘要按需辅助。无需默认全量转发历史、转换私有存档或等待源 agent 生成摘要。A → B → A 时需要补充旧原生 session 未知的新增信息。
 
 ## 2. ACP 调研摘要
 
@@ -61,7 +56,7 @@ session/cancel
 
 对 Baize 的含义：
 
-- ACP 很适合作为 Baize 的首选 adapter 协议；
+- ACP 是 Baize 可复用的标准接入路径之一，是否优先取决于所需原生能力；
 - Baize 可以扮演 ACP client；
 - agent 作为 ACP server；
 - Baize TUI 负责展示 session updates、diff、tool calls、plans 和 permission prompts；
@@ -231,21 +226,22 @@ OpenCode 还提供 JS/TS SDK，用于连接和控制 OpenCode server。官方站
 
 ### 4.1 推荐方案
 
-handoff summary 由 agent 生成，Baize 校验和补充。
+切换以当前 workspace、近期相关原始对话和有效约束为基础，摘要按预算和相关性辅助。原 agent 可用时可以生成摘要，但源失联或额度耗尽不能阻止交接准备。
 
 流程：
 
 ```text
-1. Baize 收集 workspace state
-2. 当前 agent 生成 handoff summary
-3. Baize 附加机械事实
+1. 保持原 Baize session，在可确认的回合边界准备切换
+2. Baize 收集 workspace state 和目标尚未知晓的近期对话
+3. 补充仍然有效的约束与机械事实
    - git diff summary
    - changed files
    - commands run
    - test result
    - route history
-4. 用户确认或自动批准
-5. 目标 agent 接收 handoff
+4. 需要时生成摘要，按用户模式确认切换
+5. 目标 agent 在实际执行环境中接收上下文和当前请求
+6. 输入、输出和执行结果仍关联原 Baize session
 ```
 
 ### 4.2 读取上一个 agent 状态的方案
@@ -262,9 +258,7 @@ handoff summary 由 agent 生成，Baize 校验和补充。
 
 建议：
 
-```text
-Baize 读取 provider transcript -> 生成 normalized session events -> 交给 agent 生成 handoff。
-```
+优先使用 Baize 主对话记录与 workspace；必要时通过支持的接口读取 provider 历史，保留来源与角色后补充相关上下文。摘要不作为必须再调用原 agent 的前置步骤。
 
 不要：
 
@@ -325,47 +319,27 @@ line 级别 attribution 不建议作为第一目标，因为重构、格式化�
 
 ### 6.1 技术路线
 
-```text
-TUI
-+ Rust daemon/core
-+ ratatui TUI
-+ Baize internal task session
-+ ACP-first provider adapter
-+ per-agent native/CLI fallback
-+ workspace state tracker
-+ agent-generated handoff
-+ configurable checkpoint and command policy
-```
+保留 Rust daemon、薄客户端和本地存储，把 Baize session 与 provider 原生 session 分层。当前 CLI 路径用于验证连续会话，原生服务和 provider Desktop 接入按能力单独验证。
 
-### 6.2 MVP adapter 优先级
+当前上下文包已有原生续接、跨 provider 增量与完整上下文的基础策略，但不等于所有真实切换场景已经无缝完成。
 
-建议：
+### 6.2 验证顺序
 
-```text
-1. Codex
-2. Gemini CLI
-3. GitHub Copilot CLI
-4. OpenCode
-```
+1. 同一 Baize session 下的 A → B → A，承接近期讨论和当前 workspace。
+2. 较早有效约束、原 agent 不可用、目标启动失败与结果未知。
+3. 现有项目配置的复用与一份通用配置的实际映射范围。
+4. Provider Desktop 原生能力能否通过支持的接口用于实际执行并回流状态。
+5. 与原生工具、手工交接比较重述、重复尝试与产物质量。
 
-原因：
-
-- Codex 是 Baize 的核心目标 agent，应优先验证；
-- Gemini CLI 的 checkpointing 对恢复能力很有价值；
-- Copilot CLI 已提供 ACP server，且有 session data、custom agents、hooks、memory、premium request 等值得集成的能力；
-- OpenCode 明确支持 ACP，同时提供 server、SDK、TUI、desktop 多形态，是验证 ACP-first 和 native fallback 的好对象。
-
-Claude Code 暂放入第二梯队，但仍是重要候选，因为它的 session/transcript/resume 机制资料较清晰。
+当前代码的 CLI 基线为 Codex、Antigravity、OpenCode；其他 provider 与入口以单独验证结果记录，不再用早期 provider 排序代替能力验证。
 
 ### 6.3 需要继续确认
 
-- Codex CLI 最新版本是否提供 ACP server；
-- Gemini CLI 是否提供 ACP server；
-- GitHub Copilot CLI ACP server public preview 的稳定性和 capability 覆盖；
-- OpenCode ACP 与 server/SDK 在 session、diff、permissions、events 上的差异；
-- Claude Code 是否提供或计划提供 ACP server；
-- Cline/Aider 的 ACP 或自动化接口成熟度；
-- Baize 是否需要自己实现 ACP server，让 IDE 也能把 Baize 当成一个 agent。
+- 不同入口的能力与配置是否实际生效，而不只是参数或文件存在；
+- session 控制、历史、工具状态和结果回流的公开边界；
+- 上下文选择如何兼顾近期意图、有效约束和目标已有历史；
+- 原生入口切换后是否损失用户依赖的工具能力；
+- 是否需要额外标准协议入口，应在持续会话闭环验证后决定。
 
 ## 7. Sources
 

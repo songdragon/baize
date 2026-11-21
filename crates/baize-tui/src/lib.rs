@@ -1,25 +1,29 @@
 use anyhow::{anyhow, Context, Result};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyModifiers, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::{json, Value};
-use std::io::{stdout, Read, Write};
-use std::net::TcpStream;
-use std::path::Path;
+use std::collections::{HashSet, VecDeque};
+use std::io::{stdout, BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread::{self, sleep};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DAEMON_HOST: &str = "127.0.0.1";
 const DAEMON_PORT: u16 = 7878;
@@ -28,8 +32,14 @@ const TRANSCRIPT_DETAIL_MAX_CHARS: usize = 180;
 const TRANSCRIPT_RECENT_EVENT_LIMIT: usize = 12;
 const TRANSCRIPT_TOOL_LINE_LIMIT: usize = 4;
 const TRANSCRIPT_STATUS_LINE_LIMIT: usize = 4;
+const ASSISTANT_STREAM_MIN_CHARS: usize = 32;
+const ASSISTANT_STREAM_CHARS_PER_TICK: usize = 16;
 const DAEMON_START_ATTEMPTS: usize = 20;
 const DAEMON_START_POLL_MS: u64 = 100;
+const DAEMON_CONNECT_TIMEOUT_MS: u64 = 500;
+const DAEMON_REQUEST_TIMEOUT_SECONDS: u64 = 8;
+const PROMPT_RESPONSE_GRACE_SECONDS: u64 = 5;
+const UI_EVENT_POLL_MS: u64 = 100;
 
 #[derive(Debug, Clone)]
 pub struct TuiState {
@@ -38,6 +48,8 @@ pub struct TuiState {
     pub scroll_offset: u16,
     pub daemon_status: String,
     pub activity_status: String,
+    pub background_status: Option<String>,
+    pub detail_mode: bool,
     pub providers: Vec<String>,
     pub provider_health: Vec<ProviderHealthView>,
     pub provider_diagnostics: Vec<ProviderDiagnosticView>,
@@ -50,10 +62,16 @@ pub struct TuiState {
     pub active_provider: Option<String>,
     pub route_reason: Option<String>,
     pub input: String,
+    pub image_paths: Vec<PathBuf>,
     pub workspace_id: Option<String>,
     pub session_id: Option<String>,
     pub pending_handoff_id: Option<String>,
     pub pending_handoff_session_id: Option<String>,
+    pub seen_event_ids: HashSet<String>,
+    pub streaming_assistant_open: bool,
+    pub pending_assistant_lines: VecDeque<String>,
+    pub pending_assistant_current_line: Option<String>,
+    pub pending_assistant_line_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,10 +123,24 @@ pub struct RuntimePolicyView {
 struct PendingPromptSubmission {
     prompt: String,
     provider_id: String,
+    image_paths: Vec<PathBuf>,
+    workspace_id: Option<String>,
+    session_id: Option<String>,
 }
 
 struct PromptTask {
-    receiver: Receiver<Result<PromptTaskCompletion, String>>,
+    receiver: Receiver<PromptTaskMessage>,
+    stop_stream: Arc<AtomicBool>,
+}
+
+impl Drop for PromptTask {
+    fn drop(&mut self) {
+        self.stop_stream.store(true, Ordering::SeqCst);
+    }
+}
+
+struct UiTask {
+    receiver: Receiver<Result<UiTaskCompletion, String>>,
 }
 
 struct DaemonLaunch {
@@ -129,25 +161,85 @@ impl Drop for AutoStartedDaemon {
 
 #[derive(Debug, Clone)]
 struct PromptTaskCompletion {
+    workspace_id: Option<String>,
+    workspace_display: Option<String>,
+    session_id: String,
+    active_provider: Option<String>,
+    route_reason: Option<String>,
     prompt_response: Value,
     events_response: Value,
     routes_response: Value,
     diff_response: Value,
 }
 
+#[derive(Debug, Clone)]
+struct PromptTaskStarted {
+    workspace_id: Option<String>,
+    workspace_display: Option<String>,
+    session_id: String,
+    active_provider: Option<String>,
+    route_reason: Option<String>,
+    created_session: bool,
+}
+
+#[derive(Debug, Clone)]
+enum PromptTaskMessage {
+    Started(PromptTaskStarted),
+    StreamEvent(Value),
+    Completed(PromptTaskCompletion),
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+struct SubmissionSession {
+    session_id: String,
+    active_provider: Option<String>,
+    route_reason: Option<String>,
+    created: bool,
+}
+
+#[derive(Debug)]
+struct InitialLoadResult {
+    providers: Result<Vec<String>, String>,
+    diagnostics: Result<Vec<ProviderDiagnosticView>, String>,
+    permissions: Result<Vec<PermissionView>, String>,
+    runtime_policy: Result<RuntimePolicyView, String>,
+}
+
+#[derive(Debug)]
+struct LatestSessionLoad {
+    sessions: Vec<SessionView>,
+    latest_session: Option<Value>,
+    routes_response: Option<Value>,
+    diff_response: Option<Value>,
+}
+
+#[derive(Debug)]
+struct SelectedSessionLoad {
+    session: Value,
+    routes_response: Value,
+    diff_response: Value,
+}
+
+#[derive(Debug)]
+enum UiTaskCompletion {
+    InitialLoad(InitialLoadResult),
+    ProviderRefresh(Vec<ProviderDiagnosticView>),
+    PermissionRefresh(Vec<PermissionView>),
+    LatestSessionLoad(LatestSessionLoad),
+    SelectedSessionLoad(SelectedSessionLoad),
+}
+
 impl Default for TuiState {
     fn default() -> Self {
         Self {
             workspace: "Baize MVP TUI".to_string(),
-            transcript: vec![
-                "boot sequence complete".to_string(),
-                "mesh router standing by for code operations".to_string(),
-                String::new(),
-                "daemon link is managed automatically when possible".to_string(),
-            ],
+            transcript: vec!["What are we working on?".to_string()],
             scroll_offset: 0,
             daemon_status: "daemon: not checked".to_string(),
             activity_status: "idle".to_string(),
+            background_status: None,
+            detail_mode: false,
             providers: vec![
                 "codex".to_string(),
                 "antigravity".to_string(),
@@ -165,10 +257,16 @@ impl Default for TuiState {
             active_provider: None,
             route_reason: None,
             input: String::new(),
+            image_paths: Vec::new(),
             workspace_id: None,
             session_id: None,
             pending_handoff_id: None,
             pending_handoff_session_id: None,
+            seen_event_ids: HashSet::new(),
+            streaming_assistant_open: false,
+            pending_assistant_lines: VecDeque::new(),
+            pending_assistant_current_line: None,
+            pending_assistant_line_index: None,
         }
     }
 }
@@ -180,34 +278,18 @@ pub fn run() -> Result<()> {
     });
     let daemon_status = daemon_launch.status.clone();
     let daemon_guard = daemon_launch.guard;
-    let provider_load = load_provider_ids();
-    let diagnostics_load = load_provider_diagnostics().or_else(|_| {
-        load_provider_health().map(|health| {
-            health
-                .into_iter()
-                .map(diagnostic_from_health)
-                .collect::<Vec<_>>()
-        })
-    });
-    let permission_load = load_pending_permissions();
-    let runtime_policy_load = load_runtime_policy();
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.backend_mut().execute(EnableMouseCapture)?;
+    terminal.backend_mut().execute(EnableBracketedPaste)?;
 
-    let result = run_app(
-        &mut terminal,
-        daemon_status,
-        provider_load,
-        diagnostics_load,
-        permission_load,
-        runtime_policy_load,
-    );
+    let result = run_app(&mut terminal, daemon_status);
 
     disable_raw_mode()?;
+    terminal.backend_mut().execute(DisableBracketedPaste)?;
     terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -220,52 +302,21 @@ pub fn run() -> Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     daemon_status: String,
-    provider_load: Result<Vec<String>>,
-    diagnostics_load: Result<Vec<ProviderDiagnosticView>>,
-    permission_load: Result<Vec<PermissionView>>,
-    runtime_policy_load: Result<RuntimePolicyView>,
 ) -> Result<()> {
     let mut state = TuiState {
         daemon_status,
         ..TuiState::default()
     };
-    match provider_load {
-        Ok(providers) if !providers.is_empty() => {
-            state.providers = providers;
-            state.selected_provider_index = 0;
-        }
-        Ok(_) => state.push_message("daemon returned no enabled providers; using defaults"),
-        Err(error) => state.push_message(format!("provider load failed: {error:#}")),
-    }
-    match diagnostics_load {
-        Ok(diagnostics) => {
-            if let Some((from, to)) = state.set_provider_diagnostics(diagnostics) {
-                state.push_message(format!("provider auto-selected: {from} -> {to}"));
-            }
-            append_provider_diagnostic_issues(&mut state);
-        }
-        Err(error) => state.push_message(format!("provider diagnostics failed: {error:#}")),
-    }
-    match permission_load {
-        Ok(permissions) => state.pending_permissions = permissions,
-        Err(error) => state.push_message(format!("permission load failed: {error:#}")),
-    }
-    match runtime_policy_load {
-        Ok(policy) => state.runtime_policy = Some(policy),
-        Err(error) => {
-            state.runtime_policy = Some(default_runtime_policy());
-            state.push_message(format!(
-                "runtime policy unavailable; using safe default ask mode ({})",
-                runtime_policy_error_hint(&error)
-            ));
-        }
-    }
     let mut prompt_task: Option<PromptTask> = None;
+    let mut ui_task: Option<UiTask> = Some(start_initial_load_task());
+    state.background_status = Some("loading status".to_string());
     loop {
         poll_prompt_task(&mut state, &mut prompt_task);
+        poll_ui_task(&mut state, &mut ui_task);
+        advance_pending_assistant_stream(&mut state);
         terminal.draw(|frame| render(frame, &state))?;
 
-        if event::poll(Duration::from_millis(250))? {
+        if event::poll(Duration::from_millis(UI_EVENT_POLL_MS))? {
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Esc => break,
@@ -283,17 +334,20 @@ fn run_app(
                         }
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Err(error) = refresh_provider_health(&mut state) {
-                            state.activity_status = "failed".to_string();
-                            state
-                                .push_message(format!("provider health refresh failed: {error:#}"));
-                        }
+                        start_ui_task_if_idle(
+                            &mut state,
+                            &mut ui_task,
+                            "refreshing provider diagnostics",
+                            start_provider_refresh_task,
+                        );
                     }
                     KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Err(error) = refresh_permissions(&mut state) {
-                            state.activity_status = "failed".to_string();
-                            state.push_message(format!("permission refresh failed: {error:#}"));
-                        }
+                        start_ui_task_if_idle(
+                            &mut state,
+                            &mut ui_task,
+                            "refreshing permissions",
+                            start_permission_refresh_task,
+                        );
                     }
                     KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Err(error) = resolve_selected_permission(&mut state, true) {
@@ -308,10 +362,12 @@ fn run_app(
                         }
                     }
                     KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Err(error) = load_latest_session(&mut state) {
-                            state.activity_status = "failed".to_string();
-                            state.push_message(format!("load session failed: {error:#}"));
-                        }
+                        start_ui_task_if_idle(
+                            &mut state,
+                            &mut ui_task,
+                            "loading latest session",
+                            start_latest_session_load_task,
+                        );
                     }
                     KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Err(error) = complete_current_session(&mut state) {
@@ -330,6 +386,9 @@ fn run_app(
                             detach_prompt_task_after_cancel(&mut state, &mut prompt_task);
                         }
                     }
+                    KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        attach_clipboard_image(&mut state);
+                    }
                     KeyCode::Down => state.select_next_permission(),
                     KeyCode::Up => state.select_previous_permission(),
                     KeyCode::PageUp => state.scroll_up(10),
@@ -339,11 +398,16 @@ fn run_app(
                     KeyCode::F(2) => select_previous_session(&mut state),
                     KeyCode::F(3) => select_next_session(&mut state),
                     KeyCode::F(4) => {
-                        if let Err(error) = load_selected_session(&mut state) {
-                            state.activity_status = "failed".to_string();
-                            state.push_message(format!("load selected session failed: {error:#}"));
+                        if let Some(task) = start_selected_session_load_task(&mut state) {
+                            start_ui_task_if_idle(
+                                &mut state,
+                                &mut ui_task,
+                                "loading selected session",
+                                || task,
+                            );
                         }
                     }
+                    KeyCode::F(8) => state.toggle_detail_mode(),
                     KeyCode::Tab => state.cycle_provider(),
                     KeyCode::Char(ch) => state.input.push(ch),
                     KeyCode::Backspace => {
@@ -358,7 +422,7 @@ fn run_app(
                         }
                         if let Some(submission) = begin_prompt_submission(&mut state) {
                             terminal.draw(|frame| render(frame, &state))?;
-                            match start_prompt_task(&mut state, submission) {
+                            match start_prompt_task(submission) {
                                 Ok(task) => prompt_task = Some(task),
                                 Err(error) => {
                                     state.activity_status = "failed".to_string();
@@ -374,6 +438,7 @@ fn run_app(
                     MouseEventKind::ScrollDown => state.scroll_down(3),
                     _ => {}
                 },
+                Event::Paste(text) => handle_paste(&mut state, &text),
                 _ => {}
             }
         }
@@ -386,22 +451,216 @@ fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<PromptTask>) 
     let Some(task) = prompt_task.as_ref() else {
         return;
     };
+    loop {
+        match task.receiver.try_recv() {
+            Ok(PromptTaskMessage::Started(started)) => apply_prompt_started(state, started),
+            Ok(PromptTaskMessage::StreamEvent(event)) => apply_prompt_stream_event(state, &event),
+            Ok(PromptTaskMessage::Completed(completion)) => {
+                apply_prompt_completion(state, completion);
+                *prompt_task = None;
+                break;
+            }
+            Ok(PromptTaskMessage::Failed(error)) => {
+                flush_pending_assistant_stream(state);
+                state.activity_status = "failed".to_string();
+                state.streaming_assistant_open = false;
+                state.push_message(format!("error: {error}"));
+                *prompt_task = None;
+                break;
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                flush_pending_assistant_stream(state);
+                state.activity_status = "failed".to_string();
+                state.streaming_assistant_open = false;
+                state.push_message("error: prompt worker disconnected".to_string());
+                *prompt_task = None;
+                break;
+            }
+        }
+    }
+}
+
+fn poll_ui_task(state: &mut TuiState, ui_task: &mut Option<UiTask>) {
+    let Some(task) = ui_task.as_ref() else {
+        return;
+    };
     match task.receiver.try_recv() {
         Ok(Ok(completion)) => {
-            apply_prompt_completion(state, completion);
-            *prompt_task = None;
+            apply_ui_task_completion(state, completion);
+            state.background_status = None;
+            *ui_task = None;
         }
         Ok(Err(error)) => {
-            state.activity_status = "failed".to_string();
-            state.push_message(format!("error: {error}"));
-            *prompt_task = None;
+            state.background_status = None;
+            state.push_message(format!("background task failed: {error}"));
+            *ui_task = None;
         }
         Err(TryRecvError::Empty) => {}
         Err(TryRecvError::Disconnected) => {
-            state.activity_status = "failed".to_string();
-            state.push_message("error: prompt worker disconnected".to_string());
-            *prompt_task = None;
+            state.background_status = None;
+            state.push_message("background task disconnected".to_string());
+            *ui_task = None;
         }
+    }
+}
+
+fn start_ui_task_if_idle(
+    state: &mut TuiState,
+    ui_task: &mut Option<UiTask>,
+    label: &'static str,
+    build_task: impl FnOnce() -> UiTask,
+) {
+    if ui_task.is_some() {
+        let current = state
+            .background_status
+            .as_deref()
+            .unwrap_or("background task");
+        state.push_message(format!("{current} already running"));
+        return;
+    }
+
+    state.background_status = Some(label.to_string());
+    state.push_message(format!("{label}..."));
+    *ui_task = Some(build_task());
+}
+
+fn start_initial_load_task() -> UiTask {
+    start_ui_task(|| {
+        Ok(UiTaskCompletion::InitialLoad(InitialLoadResult {
+            providers: load_provider_ids().map_err(|error| format!("{error:#}")),
+            diagnostics: load_provider_diagnostics()
+                .or_else(|_| {
+                    load_provider_health().map(|health| {
+                        health
+                            .into_iter()
+                            .map(diagnostic_from_health)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .map_err(|error| format!("{error:#}")),
+            permissions: load_pending_permissions().map_err(|error| format!("{error:#}")),
+            runtime_policy: load_runtime_policy().map_err(|error| format!("{error:#}")),
+        }))
+    })
+}
+
+fn start_provider_refresh_task() -> UiTask {
+    start_ui_task(|| {
+        let diagnostics = load_provider_diagnostics().or_else(|_| {
+            load_provider_health().map(|health| {
+                health
+                    .into_iter()
+                    .map(diagnostic_from_health)
+                    .collect::<Vec<_>>()
+            })
+        })?;
+        Ok(UiTaskCompletion::ProviderRefresh(diagnostics))
+    })
+}
+
+fn start_permission_refresh_task() -> UiTask {
+    start_ui_task(|| {
+        Ok(UiTaskCompletion::PermissionRefresh(
+            load_pending_permissions()?,
+        ))
+    })
+}
+
+fn start_latest_session_load_task() -> UiTask {
+    start_ui_task(|| {
+        Ok(UiTaskCompletion::LatestSessionLoad(
+            load_latest_session_data()?,
+        ))
+    })
+}
+
+fn start_selected_session_load_task(state: &mut TuiState) -> Option<UiTask> {
+    let Some(session_id) = state
+        .recent_sessions
+        .get(state.selected_session_index)
+        .map(|session| session.id.clone())
+    else {
+        state.push_message("load sessions with Ctrl-L before selecting one");
+        return None;
+    };
+
+    Some(start_ui_task(move || {
+        Ok(UiTaskCompletion::SelectedSessionLoad(
+            load_selected_session_data(&session_id)?,
+        ))
+    }))
+}
+
+fn start_ui_task(work: impl FnOnce() -> Result<UiTaskCompletion> + Send + 'static) -> UiTask {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = work().map_err(|error| format!("{error:#}"));
+        let _ = sender.send(result);
+    });
+    UiTask { receiver }
+}
+
+fn apply_ui_task_completion(state: &mut TuiState, completion: UiTaskCompletion) {
+    match completion {
+        UiTaskCompletion::InitialLoad(result) => apply_initial_load_result(state, result),
+        UiTaskCompletion::ProviderRefresh(diagnostics) => {
+            let summary = summarize_provider_diagnostics(&diagnostics);
+            let switched = state.set_provider_diagnostics(diagnostics);
+            state.push_message(format!("provider diagnostics refreshed: {summary}"));
+            append_provider_diagnostic_issues(state);
+            if let Some((from, to)) = switched {
+                state.push_message(format!("provider auto-selected: {from} -> {to}"));
+            }
+        }
+        UiTaskCompletion::PermissionRefresh(permissions) => {
+            state.set_pending_permissions(permissions);
+            state.push_message(format!(
+                "permissions refreshed: {} pending",
+                state.pending_permissions.len()
+            ));
+        }
+        UiTaskCompletion::LatestSessionLoad(load) => apply_latest_session_load(state, load),
+        UiTaskCompletion::SelectedSessionLoad(load) => apply_selected_session_load(state, load),
+    }
+}
+
+fn apply_initial_load_result(state: &mut TuiState, result: InitialLoadResult) {
+    match result.providers {
+        Ok(providers) if !providers.is_empty() => {
+            state.providers = providers;
+            state.selected_provider_index = 0;
+        }
+        Ok(_) => state.push_message("daemon returned no enabled providers; using defaults"),
+        Err(error) => state.push_message(format!("provider load failed: {error}")),
+    }
+    match result.diagnostics {
+        Ok(diagnostics) => {
+            if let Some((from, to)) = state.set_provider_diagnostics(diagnostics) {
+                state.push_message(format!("provider auto-selected: {from} -> {to}"));
+            }
+            if state.detail_mode {
+                append_provider_diagnostic_issues(state);
+            }
+        }
+        Err(error) => state.push_message(format!("provider diagnostics failed: {error}")),
+    }
+    match result.permissions {
+        Ok(permissions) => state.set_pending_permissions(permissions),
+        Err(error) => state.push_message(format!("permission load failed: {error}")),
+    }
+    match result.runtime_policy {
+        Ok(policy) => state.runtime_policy = Some(policy),
+        Err(error) => {
+            state.runtime_policy = Some(default_runtime_policy());
+            state.push_message(format!(
+                "runtime policy unavailable; using safe default ask mode ({})",
+                runtime_policy_error_hint(&anyhow!(error.clone()))
+            ));
+        }
+    }
+    if state.detail_mode {
+        state.push_message("status load complete");
     }
 }
 
@@ -411,56 +670,343 @@ fn detach_prompt_task_after_cancel(state: &mut TuiState, prompt_task: &mut Optio
     }
 }
 
-fn start_prompt_task(
-    state: &mut TuiState,
-    submission: PendingPromptSubmission,
-) -> Result<PromptTask> {
-    let session_id = match state.session_id.clone() {
-        Some(session_id) => session_id,
-        None => {
-            let workspace_id = ensure_workspace(state)?;
-            ensure_session(state, &workspace_id, &submission.prompt)?
-        }
-    };
+fn start_prompt_task(submission: PendingPromptSubmission) -> Result<PromptTask> {
     let (sender, receiver) = mpsc::channel();
+    let stop_stream = Arc::new(AtomicBool::new(false));
+    let worker_stop_stream = stop_stream.clone();
     thread::spawn(move || {
-        let result =
-            run_prompt_submission(&session_id, &submission).map_err(|error| format!("{error:#}"));
-        let _ = sender.send(result);
+        if let Err(error) = run_prompt_submission(&submission, sender.clone(), worker_stop_stream) {
+            let _ = sender.send(PromptTaskMessage::Failed(format!("{error:#}")));
+        }
     });
-    Ok(PromptTask { receiver })
+    Ok(PromptTask {
+        receiver,
+        stop_stream,
+    })
 }
 
 fn run_prompt_submission(
-    session_id: &str,
     submission: &PendingPromptSubmission,
-) -> Result<PromptTaskCompletion> {
-    let prompt_response = post_json(
-        &format!("/sessions/{session_id}/prompt"),
-        prompt_request_body(&submission.provider_id, &submission.prompt),
-    )?;
-    let events_response = get_json(&session_events_path(session_id, &submission.provider_id))?;
-    let routes_response = get_json(&format!("/sessions/{session_id}/routes"))?;
-    let diff_response = get_json(&format!("/sessions/{session_id}/diff"))?;
+    sender: Sender<PromptTaskMessage>,
+    stop_stream: Arc<AtomicBool>,
+) -> Result<()> {
+    let (workspace_id, workspace_display) = prepare_workspace_for_submission(submission)?;
+    let session = prepare_session_for_submission(submission, &workspace_id)?;
+    let started = PromptTaskStarted {
+        workspace_id: Some(workspace_id.clone()),
+        workspace_display: workspace_display.clone(),
+        session_id: session.session_id.clone(),
+        active_provider: session.active_provider.clone(),
+        route_reason: session.route_reason.clone(),
+        created_session: session.created,
+    };
+    let _ = sender.send(PromptTaskMessage::Started(started));
 
-    Ok(PromptTaskCompletion {
+    start_prompt_sse_reader(
+        sender.clone(),
+        session.session_id.clone(),
+        submission.provider_id.clone(),
+        stop_stream.clone(),
+    );
+    let prompt_response = match post_json_with_timeout(
+        &format!("/sessions/{}/prompt", session.session_id),
+        prompt_request_body(
+            &submission.provider_id,
+            &submission.prompt,
+            &submission.image_paths,
+        ),
+        Duration::from_secs(PROMPT_TIMEOUT_SECONDS + PROMPT_RESPONSE_GRACE_SECONDS),
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            stop_stream.store(true, Ordering::SeqCst);
+            return Err(error);
+        }
+    };
+    stop_stream.store(true, Ordering::SeqCst);
+    let events_response = get_json(&session_events_path(
+        &session.session_id,
+        &submission.provider_id,
+    ))?;
+    let routes_response = get_json(&format!("/sessions/{}/routes", session.session_id))?;
+    let diff_response = get_json(&format!("/sessions/{}/diff", session.session_id))?;
+
+    let completion = PromptTaskCompletion {
+        workspace_id: Some(workspace_id),
+        workspace_display,
+        session_id: session.session_id,
+        active_provider: session.active_provider,
+        route_reason: session.route_reason,
         prompt_response,
         events_response,
         routes_response,
         diff_response,
-    })
+    };
+    let _ = sender.send(PromptTaskMessage::Completed(completion));
+    Ok(())
 }
 
 fn session_events_path(session_id: &str, provider_id: &str) -> String {
     format!("/sessions/{session_id}/events?provider_id={provider_id}")
 }
 
+fn start_prompt_sse_reader(
+    sender: Sender<PromptTaskMessage>,
+    session_id: String,
+    provider_id: String,
+    stop_stream: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let _ = read_prompt_sse_events(sender, &session_id, &provider_id, stop_stream);
+    });
+}
+
+fn read_prompt_sse_events(
+    sender: Sender<PromptTaskMessage>,
+    session_id: &str,
+    provider_id: &str,
+    stop_stream: Arc<AtomicBool>,
+) -> Result<()> {
+    let address: SocketAddr = format!("{DAEMON_HOST}:{DAEMON_PORT}")
+        .parse()
+        .context("parse daemon socket address")?;
+    let mut stream =
+        TcpStream::connect_timeout(&address, Duration::from_millis(DAEMON_CONNECT_TIMEOUT_MS))
+            .with_context(|| format!("connect to baize daemon at {DAEMON_HOST}:{DAEMON_PORT}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .context("set daemon SSE read timeout")?;
+    let request =
+        format!("GET /events HTTP/1.1\r\nHost: {DAEMON_HOST}:{DAEMON_PORT}\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .context("send daemon SSE request")?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line);
+        match read {
+            Ok(0) => return Ok(()),
+            Ok(_) => {
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if stop_stream.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+            }
+            Err(error) => return Err(error).context("read daemon SSE headers"),
+        }
+        if stop_stream.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+    }
+
+    loop {
+        if stop_stream.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {
+                if let Some(event) = parse_sse_data_line(&line) {
+                    if event_matches_session_provider(&event, session_id, provider_id) {
+                        let _ = sender.send(PromptTaskMessage::StreamEvent(event));
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error).context("read daemon SSE event"),
+        }
+    }
+}
+
+fn parse_sse_data_line(line: &str) -> Option<Value> {
+    let data = line.trim_start().strip_prefix("data:")?.trim();
+    serde_json::from_str(data).ok()
+}
+
+fn event_matches_session_provider(event: &Value, session_id: &str, provider_id: &str) -> bool {
+    event
+        .get("session_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == session_id)
+        && event
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == provider_id)
+}
+
 fn apply_prompt_completion(state: &mut TuiState, completion: PromptTaskCompletion) {
+    apply_prompt_completion_context(state, &completion);
+    flush_pending_assistant_stream(state);
     append_prompt_response(state, &completion.prompt_response);
-    append_recent_events_with_sections(state, &completion.events_response);
-    append_route_history(state, &completion.routes_response);
+    let events_response = unseen_events_response(state, &completion.events_response);
+    if state.detail_mode {
+        append_recent_events_with_sections(state, &events_response);
+        append_route_history(state, &completion.routes_response);
+    } else {
+        append_assistant_events(state, &events_response);
+        append_test_result_section(state, &events_response);
+    }
     append_session_diff(state, &completion.diff_response);
+    state.streaming_assistant_open = false;
     state.activity_status = prompt_activity_after_response(&completion.prompt_response).to_string();
+}
+
+fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStarted) {
+    if let Some(workspace_id) = &started.workspace_id {
+        state.workspace_id = Some(workspace_id.clone());
+    }
+    if let Some(workspace_display) = &started.workspace_display {
+        state.workspace = workspace_display.clone();
+    }
+    state.session_id = Some(started.session_id.clone());
+    if let Some(provider) = &started.active_provider {
+        state.active_provider = Some(provider.clone());
+    }
+    if let Some(reason) = &started.route_reason {
+        state.route_reason = Some(reason.clone());
+    }
+    state.seen_event_ids.clear();
+    state.streaming_assistant_open = false;
+    clear_pending_assistant_stream(state);
+    if started.created_session {
+        let provider = started.active_provider.as_deref().unwrap_or("unknown");
+        if state.detail_mode {
+            state.push_message(format!("session: {} ({provider})", started.session_id));
+            if let Some(reason) = &started.route_reason {
+                state.push_message(format!("route: {reason}"));
+            }
+        }
+    }
+}
+
+fn apply_prompt_completion_context(state: &mut TuiState, completion: &PromptTaskCompletion) {
+    if let Some(workspace_id) = &completion.workspace_id {
+        state.workspace_id = Some(workspace_id.clone());
+    }
+    if let Some(workspace_display) = &completion.workspace_display {
+        state.workspace = workspace_display.clone();
+    }
+    state.session_id = Some(completion.session_id.clone());
+    if let Some(provider) = &completion.active_provider {
+        state.active_provider = Some(provider.clone());
+    }
+    if let Some(reason) = &completion.route_reason {
+        state.route_reason = Some(reason.clone());
+    }
+}
+
+fn apply_prompt_stream_event(state: &mut TuiState, event: &Value) {
+    if !mark_event_seen(state, event) {
+        return;
+    }
+    let event_type = event
+        .get("event_type")
+        .and_then(Value::as_str)
+        .unwrap_or("event");
+    let payload = event.get("payload").unwrap_or(&Value::Null);
+    match event_type {
+        "session.agent.output" if !append_stream_assistant_event(state, payload) => {
+            append_stream_status_event(state, payload);
+        }
+        "session.agent.output" => {}
+        "session.agent.tool_call" => append_stream_tool_event(state, payload),
+        "session.agent.failed" => {
+            state.activity_status = "failed".to_string();
+            push_transcript_section(state, "status:");
+            state.push_message(format!("  {}", status_event_line(event_type, payload)));
+        }
+        _ => {}
+    }
+}
+
+fn append_stream_assistant_event(state: &mut TuiState, payload: &Value) -> bool {
+    let lines = assistant_event_lines(payload);
+    if lines.is_empty() {
+        return false;
+    }
+    if !state.streaming_assistant_open {
+        push_transcript_section(state, "assistant:");
+        state.streaming_assistant_open = true;
+    }
+    if should_progressively_render_assistant(state, &lines) {
+        state.pending_assistant_lines.extend(lines);
+        advance_pending_assistant_stream(state);
+    } else {
+        for line in lines {
+            state.push_message(format!("  {line}"));
+        }
+    }
+    true
+}
+
+fn append_stream_tool_event(state: &mut TuiState, payload: &Value) {
+    let detail = event_detail(payload)
+        .or_else(|| raw_stream_event_detail(payload))
+        .unwrap_or_else(|| "tool call".to_string());
+    if state.detail_mode {
+        push_transcript_section(state, "command/tool events:");
+        state.push_message(format!("  {detail}"));
+    } else {
+        push_transcript_section(state, "status:");
+        state.push_message(format!("  stream: {detail}"));
+    }
+}
+
+fn append_stream_status_event(state: &mut TuiState, payload: &Value) {
+    let Some(detail) = raw_stream_event_detail(payload) else {
+        return;
+    };
+    push_transcript_section(state, "status:");
+    state.push_message(format!("  stream: {detail}"));
+}
+
+fn raw_stream_event_detail(payload: &Value) -> Option<String> {
+    let raw = payload.get("raw")?;
+    raw.get("part")
+        .and_then(|part| part.get("type"))
+        .and_then(Value::as_str)
+        .or_else(|| raw.get("type").and_then(Value::as_str))
+        .or_else(|| raw.get("status").and_then(Value::as_str))
+        .or_else(|| raw.get("tool").and_then(Value::as_str))
+        .map(transcript_detail)
+}
+
+fn unseen_events_response(state: &mut TuiState, response: &Value) -> Value {
+    let Some(events) = response.get("events").and_then(Value::as_array) else {
+        return response.clone();
+    };
+    let unseen = events
+        .iter()
+        .filter(|event| mark_event_seen(state, event))
+        .cloned()
+        .collect::<Vec<_>>();
+    json!({ "events": unseen })
+}
+
+fn mark_event_seen(state: &mut TuiState, event: &Value) -> bool {
+    let Some(event_id) = event.get("id").and_then(Value::as_str) else {
+        return true;
+    };
+    state.seen_event_ids.insert(event_id.to_string())
 }
 
 pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
@@ -475,13 +1021,17 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
 
     render_header(frame, chunks[0], state);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(44), Constraint::Length(34)])
-        .split(chunks[1]);
+    if should_show_control_plane(state) {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(48), Constraint::Length(42)])
+            .split(chunks[1]);
 
-    render_transcript(frame, body[0], state);
-    render_control_plane(frame, body[1], state);
+        render_transcript(frame, body[0], state);
+        render_control_plane(frame, body[1], state);
+    } else {
+        render_transcript(frame, chunks[1], state);
+    }
     render_prompt(frame, chunks[2], state);
 }
 
@@ -496,10 +1046,13 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                 .bg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::raw("  "),
         Span::styled(
-            " BAIZE://workspace-fabric",
+            short_text(&workspace, 32),
             Style::default().fg(Color::White),
         ),
+        Span::styled("  target ", muted_style()),
+        Span::styled(state.selected_provider().to_string(), accent_style()),
         Span::raw("  "),
         Span::styled(
             format!(" {status_label} "),
@@ -507,25 +1060,25 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                 .fg(Color::Black)
                 .bg(activity_color(&state.activity_status)),
         ),
-        Span::raw("  "),
-        Span::styled("[mesh:local]", muted_style()),
-        Span::raw(" "),
-        Span::styled("[router:sticky]", muted_style()),
-        Span::raw(" "),
-        Span::styled(format!("[exec:{}]", state.execution_mode()), muted_style()),
     ]);
+    let background = state
+        .background_status
+        .as_deref()
+        .map(|status| format!("   {status}"))
+        .unwrap_or_default();
     let subtitle = Line::from(vec![
-        Span::styled("workspace ", muted_style()),
-        Span::raw(short_text(&workspace, 34)),
-        Span::raw("   "),
         Span::styled("daemon ", muted_style()),
         Span::raw(state.daemon_status.trim_start_matches("daemon: ")),
         Span::raw("   "),
-        Span::styled("target ", muted_style()),
-        Span::styled(state.selected_provider().to_string(), accent_style()),
-        Span::raw("   "),
         Span::styled("policy ", muted_style()),
         Span::raw(state.command_policy_label()),
+        Span::styled("   F8 ", muted_style()),
+        Span::raw(if state.detail_mode {
+            "compact"
+        } else {
+            "details"
+        }),
+        Span::styled(background, muted_style()),
     ]);
     let rule = Line::from(Span::styled("─".repeat(area.width as usize), muted_style()));
 
@@ -535,16 +1088,22 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     );
 }
 
+fn should_show_control_plane(state: &TuiState) -> bool {
+    state.detail_mode || !state.pending_permissions.is_empty() || state.pending_handoff_id.is_some()
+}
+
 fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let line_count = state.transcript.len() as u16;
+    let wrap_width = transcript_wrap_width(area);
+    let text = transcript_text_for_width(state, wrap_width);
+    let line_count = text.lines.len().min(usize::from(u16::MAX)) as u16;
     let visible_height = area.height.saturating_sub(2);
-    let is_scrolled = state.scroll_offset > 0;
     let max_scroll = line_count.saturating_sub(visible_height);
     let effective_scroll = if state.scroll_offset > max_scroll {
         max_scroll
     } else {
         state.scroll_offset
     };
+    let is_scrolled = effective_scroll > 0;
     let viewport_top = max_scroll.saturating_sub(effective_scroll);
     let title = if is_scrolled {
         let current_top = viewport_top + 1;
@@ -558,12 +1117,15 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         "Agent Stream".to_string()
     };
     frame.render_widget(
-        Paragraph::new(transcript_text(state))
+        Paragraph::new(text)
             .scroll((viewport_top, 0))
-            .wrap(Wrap { trim: false })
             .block(side_panel_block(title)),
         area,
     );
+}
+
+fn transcript_wrap_width(area: Rect) -> u16 {
+    area.width.saturating_sub(3).max(1)
 }
 
 fn render_control_plane(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
@@ -576,22 +1138,116 @@ fn render_control_plane(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
 }
 
 fn render_prompt(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let prompt = Line::from(vec![
-        Span::styled("baize ", muted_style()),
-        Span::styled("› ", accent_style()),
-        Span::raw(state.input.as_str()),
-    ]);
-    let help = Line::from(vec![
-        Span::styled("keys ", muted_style()),
-        Span::raw(state.help_text()),
+    let inner = prompt_inner_area(area);
+    let input_width = inner.width.saturating_sub(3).max(1);
+    let input = prompt_visible_input(&state.input, input_width);
+    let prompt = if state.input.is_empty() {
+        Line::from(vec![
+            Span::styled("› ", accent_style()),
+            Span::styled("Ask Baize to work on...", placeholder_style()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("› ", accent_style()),
+            Span::styled(input, Style::default().fg(Color::White)),
+        ])
+    };
+    let status = Line::from(vec![
+        Span::styled(state.selected_provider().to_string(), accent_style()),
+        Span::styled(" · ", muted_style()),
+        Span::styled(state.command_policy_label(), muted_style()),
+        Span::styled(image_status_label(state), muted_style()),
+        Span::styled(" · ", muted_style()),
+        Span::styled(state.help_text(), muted_style()),
     ]);
 
     frame.render_widget(
-        Paragraph::new(Text::from(vec![prompt, help]))
-            .block(prompt_block("Prompt"))
+        Paragraph::new(Text::from(vec![prompt, status]))
+            .style(composer_style())
+            .block(composer_block())
             .wrap(Wrap { trim: false }),
         area,
     );
+
+    frame.set_cursor_position(prompt_cursor_position(area, state));
+}
+
+fn prompt_inner_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(1),
+    }
+}
+
+fn prompt_cursor_position(area: Rect, state: &TuiState) -> Position {
+    let inner = prompt_inner_area(area);
+    let input_width = inner.width.saturating_sub(3).max(1);
+    let visible = prompt_visible_input(&state.input, input_width);
+    let cursor_offset = 2u16.saturating_add(display_width(&visible).min(input_width));
+    Position::new(
+        inner
+            .x
+            .saturating_add(cursor_offset)
+            .min(area.x.saturating_add(area.width.saturating_sub(1))),
+        inner.y,
+    )
+}
+
+fn prompt_visible_input(input: &str, width: u16) -> String {
+    let max_width = usize::from(width);
+    let input_width = display_width(input);
+    if usize::from(input_width) <= max_width {
+        return input.to_string();
+    }
+
+    let mut visible = String::new();
+    let mut visible_width = 0usize;
+    for ch in input.chars().rev() {
+        let ch_width = display_char_width(ch);
+        if visible_width + ch_width > max_width.saturating_sub(1) {
+            break;
+        }
+        visible.insert(0, ch);
+        visible_width += ch_width;
+    }
+    format!("…{visible}")
+}
+
+fn display_width(text: &str) -> u16 {
+    text.chars()
+        .map(display_char_width)
+        .sum::<usize>()
+        .min(usize::from(u16::MAX)) as u16
+}
+
+fn composer_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray).bg(composer_bg()))
+        .padding(Padding::horizontal(1))
+        .style(composer_style())
+}
+
+fn composer_style() -> Style {
+    Style::default().bg(composer_bg())
+}
+
+fn composer_bg() -> Color {
+    Color::Rgb(28, 28, 28)
+}
+
+fn placeholder_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+fn image_status_label(state: &TuiState) -> String {
+    if state.image_paths.is_empty() {
+        String::new()
+    } else {
+        format!(" · {} image(s)", state.image_paths.len())
+    }
 }
 
 fn side_panel_block(title: impl Into<String>) -> Block<'static> {
@@ -602,19 +1258,12 @@ fn side_panel_block(title: impl Into<String>) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
-fn prompt_block(title: impl Into<String>) -> Block<'static> {
-    Block::default()
-        .title(title.into())
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .padding(Padding::horizontal(1))
-}
-
-fn transcript_text(state: &TuiState) -> Text<'static> {
+fn transcript_text_for_width(state: &TuiState, wrap_width: u16) -> Text<'static> {
     let mut lines = state
         .transcript
         .iter()
-        .map(|line| transcript_line(line))
+        .flat_map(|line| wrap_transcript_raw_line(line, wrap_width))
+        .map(|line| transcript_line(&line))
         .collect::<Vec<_>>();
     if should_show_ready_panel(state) {
         lines.extend(ready_panel_lines(state));
@@ -622,8 +1271,90 @@ fn transcript_text(state: &TuiState) -> Text<'static> {
     Text::from(lines)
 }
 
+fn wrap_transcript_raw_line(line: &str, wrap_width: u16) -> Vec<String> {
+    let wrap_width = usize::from(wrap_width.max(1));
+    if line.trim().is_empty() {
+        return vec![line.to_string()];
+    }
+    if line.starts_with("╭─") || line.starts_with("╰─") || transcript_section_label(line).is_some()
+    {
+        return vec![line.to_string()];
+    }
+
+    let (raw_prefix, content, render_prefix_width) = if let Some(content) = line.strip_prefix("  ")
+    {
+        ("  ", content, 4usize)
+    } else if let Some(content) = line.strip_prefix("> ") {
+        ("> ", content, 6usize)
+    } else if line.starts_with("turn result:")
+        || line.starts_with("prompt result:")
+        || line.starts_with("workspace clean")
+        || line.starts_with("workspace dirty")
+        || line.starts_with("changed files:")
+    {
+        ("", line, 3usize)
+    } else {
+        ("", line, 0usize)
+    };
+    let available = wrap_width.saturating_sub(render_prefix_width).max(1);
+    let chunks = wrap_text_chunks(content, available);
+    chunks
+        .into_iter()
+        .map(|chunk| format!("{raw_prefix}{chunk}"))
+        .collect()
+}
+
+fn wrap_text_chunks(text: &str, width: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in text.chars() {
+        let ch_width = display_char_width(ch);
+        if !current.is_empty() && current_width + ch_width > width {
+            chunks.push(current);
+            current = String::new();
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if current.is_empty() {
+        chunks.push(String::new());
+    } else {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn display_char_width(ch: char) -> usize {
+    if ch == '\t' {
+        4
+    } else if ch.is_control() {
+        0
+    } else if is_wide_char(ch) {
+        2
+    } else {
+        1
+    }
+}
+
+fn is_wide_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+    )
+}
+
 fn should_show_ready_panel(state: &TuiState) -> bool {
-    state.session_id.is_none() && state.transcript.len() <= 4
+    state.detail_mode && state.session_id.is_none() && state.transcript.len() <= 4
 }
 
 fn ready_panel_lines(state: &TuiState) -> Vec<Line<'static>> {
@@ -631,11 +1362,12 @@ fn ready_panel_lines(state: &TuiState) -> Vec<Line<'static>> {
         Line::raw(""),
         Line::from(vec![
             Span::styled("╭─", muted_style()),
-            Span::styled(" COMMAND MATRIX ", accent_style()),
+            Span::styled(" QUICK START ", accent_style()),
             Span::styled("────────────────────────────╮", muted_style()),
         ]),
-        ready_action_line("enter", "launch a task into the mesh"),
+        ready_action_line("enter", "run the task with the selected provider"),
         ready_action_line("tab", "rotate target provider"),
+        ready_action_line("F8", "toggle diagnostic detail"),
         ready_action_line("^L", "re-attach latest session"),
         ready_action_line("^H", "generate handoff packet"),
         Line::from(vec![
@@ -654,7 +1386,7 @@ fn ready_panel_lines(state: &TuiState) -> Vec<Line<'static>> {
                     .to_string(),
             ),
             Span::styled("  mode ", muted_style()),
-            Span::raw("supervised"),
+            Span::raw("local"),
         ]),
         Line::from(vec![
             Span::styled("│ ", muted_style()),
@@ -728,7 +1460,7 @@ fn transcript_line(line: &str) -> Line<'static> {
             Span::styled("╰─ ", muted_style()),
             Span::styled(line.to_string(), Style::default().fg(Color::Green)),
         ])
-    } else if line.starts_with("workspace dirty") {
+    } else if line.starts_with("workspace dirty") || line.starts_with("changed files:") {
         Line::from(vec![
             Span::styled("╰─ ", muted_style()),
             Span::styled(line.to_string(), Style::default().fg(Color::Yellow)),
@@ -771,18 +1503,22 @@ fn transcript_section_label(line: &str) -> Option<&'static str> {
 }
 
 fn control_plane_text(state: &TuiState) -> Text<'static> {
-    let mut lines = Vec::new();
-    lines.push(section_line("provider matrix"));
+    let mut lines = vec![
+        section_line("session"),
+        key_value_line("current", &state.session_status()),
+        key_value_line("work", &state.activity_status),
+        key_value_line("bg", &state.background_status_label()),
+        Line::raw(""),
+        section_line("target"),
+    ];
     lines.extend(provider_lines(state));
-    lines.push(Line::raw(""));
-    lines.push(section_line("router"));
-    lines.push(key_value_line("current", &state.session_status()));
     lines.push(key_value_line("route", &state.route_status()));
     lines.push(key_value_line("policy", &state.command_policy_label()));
     lines.push(key_value_line("exec", &state.execution_mode()));
     lines.push(key_value_line("sticky", &state.routing_status()));
+    lines.push(key_value_line("view", &state.view_status()));
     lines.push(Line::raw(""));
-    lines.push(section_line("queue"));
+    lines.push(section_line("work queue"));
     lines.push(key_value_line("perm", &state.permission_status()));
     lines.push(key_value_line("handoff", &state.handoff_status()));
     Text::from(lines)
@@ -982,33 +1718,13 @@ fn runtime_policy_error_hint(error: &anyhow::Error) -> String {
     }
 }
 
-fn prompt_request_body(provider_id: &str, prompt: &str) -> Value {
+fn prompt_request_body(provider_id: &str, prompt: &str, image_paths: &[PathBuf]) -> Value {
     json!({
         "prompt": prompt,
         "provider_id": provider_id,
+        "image_paths": image_paths,
         "timeout_seconds": PROMPT_TIMEOUT_SECONDS,
     })
-}
-
-fn refresh_provider_health(state: &mut TuiState) -> Result<()> {
-    state.activity_status = "refreshing provider diagnostics".to_string();
-    let diagnostics = load_provider_diagnostics().or_else(|_| {
-        load_provider_health().map(|health| {
-            health
-                .into_iter()
-                .map(diagnostic_from_health)
-                .collect::<Vec<_>>()
-        })
-    })?;
-    let summary = summarize_provider_diagnostics(&diagnostics);
-    let switched = state.set_provider_diagnostics(diagnostics);
-    state.activity_status = "idle".to_string();
-    state.push_message(format!("provider diagnostics refreshed: {summary}"));
-    append_provider_diagnostic_issues(state);
-    if let Some((from, to)) = switched {
-        state.push_message(format!("provider auto-selected: {from} -> {to}"));
-    }
-    Ok(())
 }
 
 fn refresh_permissions(state: &mut TuiState) -> Result<()> {
@@ -1287,6 +2003,11 @@ fn append_provider_diagnostic_issues(state: &mut TuiState) {
         return;
     }
 
+    if !state.detail_mode {
+        append_provider_diagnostic_summary(state);
+        return;
+    }
+
     let lines = state
         .provider_diagnostics
         .iter()
@@ -1322,6 +2043,35 @@ fn append_provider_diagnostic_issues(state: &mut TuiState) {
     }
 }
 
+fn append_provider_diagnostic_summary(state: &mut TuiState) {
+    let issues = state
+        .provider_diagnostics
+        .iter()
+        .filter(|entry| entry.readiness != "Ready")
+        .map(|entry| {
+            format!(
+                "{} {}",
+                entry.provider_id,
+                short_readiness_status(&entry.readiness)
+            )
+        })
+        .collect::<Vec<_>>();
+    if issues.is_empty() {
+        return;
+    }
+
+    state.push_message(format!(
+        "provider diagnostics: {} issue(s): {} · F8 details",
+        issues.len(),
+        issues
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+}
+
 fn append_provider_health_errors(state: &mut TuiState) {
     let lines = state
         .provider_health
@@ -1342,15 +2092,321 @@ fn append_provider_health_errors(state: &mut TuiState) {
         return;
     }
 
+    if !state.detail_mode {
+        let providers = lines
+            .iter()
+            .filter_map(|line| {
+                line.split_once(':')
+                    .map(|(provider, _)| provider.to_string())
+            })
+            .collect::<Vec<_>>();
+        state.push_message(format!(
+            "provider setup issues: {} down · F8 details",
+            providers.join(", ")
+        ));
+        return;
+    }
+
     state.push_message("provider setup issues:".to_string());
     for line in lines {
         state.push_message(format!("  {line}"));
     }
 }
 
+fn handle_input_command(state: &mut TuiState, input: &str) -> bool {
+    let input = input.trim();
+    if let Some(rest) = input.strip_prefix("/image ") {
+        attach_images_from_text(state, rest);
+        return true;
+    }
+    if matches!(
+        input,
+        "/image-clipboard" | "/clipboard-image" | "/clip-image"
+    ) {
+        attach_clipboard_image(state);
+        return true;
+    }
+    false
+}
+
+fn handle_paste(state: &mut TuiState, text: &str) {
+    let image_paths = image_paths_from_text(text);
+    if image_paths.is_empty() {
+        append_pasted_text(state, text);
+        return;
+    }
+
+    for path in image_paths {
+        attach_image_path(state, path);
+    }
+}
+
+fn append_pasted_text(state: &mut TuiState, text: &str) {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !text.is_empty() {
+        state.input.push_str(&text);
+    }
+}
+
+fn attach_images_from_text(state: &mut TuiState, text: &str) {
+    let image_paths = image_paths_from_text(text);
+    if image_paths.is_empty() {
+        state.push_message("image attach failed: provide a PNG/JPG/GIF/WebP path".to_string());
+        return;
+    }
+
+    for path in image_paths {
+        attach_image_path(state, path);
+    }
+}
+
+fn attach_image_path(state: &mut TuiState, path: PathBuf) {
+    let path = resolve_user_path(path);
+    if !is_supported_image_path(&path) {
+        state.push_message(format!(
+            "image attach failed: {} is not a supported image file",
+            path.display()
+        ));
+        return;
+    }
+    let path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            state.push_message(format!(
+                "image attach failed: {} is not readable ({error})",
+                path.display()
+            ));
+            return;
+        }
+    };
+    if state.image_paths.iter().any(|existing| existing == &path) {
+        state.push_message(format!("image already attached: {}", path.display()));
+        return;
+    }
+
+    state.image_paths.push(path.clone());
+    state.push_message(format!("image attached: {}", path.display()));
+}
+
+fn attach_clipboard_image(state: &mut TuiState) {
+    match save_clipboard_image_to_temp_file() {
+        Ok(path) => attach_image_path(state, path),
+        Err(error) => state.push_message(format!("clipboard image failed: {error:#}")),
+    }
+}
+
+fn image_paths_from_text(text: &str) -> Vec<PathBuf> {
+    shell_like_words(text)
+        .into_iter()
+        .filter_map(|word| image_path_from_token(&word))
+        .collect()
+}
+
+fn image_path_from_token(token: &str) -> Option<PathBuf> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    let path = if let Some(path) = token.strip_prefix("file://") {
+        percent_decode_file_url_path(path)
+    } else {
+        token.to_string()
+    };
+    let path = PathBuf::from(path);
+    is_supported_image_path(&path).then_some(path)
+}
+
+fn shell_like_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in text.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if ch.is_whitespace() && quote.is_none() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn percent_decode_file_url_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                decoded.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).to_string()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn resolve_user_path(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return std::env::var_os("HOME").map(PathBuf::from).unwrap_or(path);
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
+}
+
+fn is_supported_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn save_clipboard_image_to_temp_file() -> Result<PathBuf> {
+    save_macos_clipboard_image_to_temp_file()
+}
+
+#[cfg(target_os = "macos")]
+fn save_macos_clipboard_image_to_temp_file() -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "baize-clipboard-{}.png",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    let output = Command::new("osascript")
+        .args(macos_clipboard_image_osascript_args(&path))
+        .output()
+        .context("run osascript to read macOS clipboard image")?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        anyhow::bail!(
+            "macOS clipboard does not contain a PNG image{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({detail})")
+            }
+        );
+    }
+    Ok(path)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn save_macos_clipboard_image_to_temp_file() -> Result<PathBuf> {
+    anyhow::bail!("clipboard image capture is only implemented on macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_clipboard_image_osascript_args(path: &Path) -> Vec<String> {
+    vec![
+        "-e".to_string(),
+        format!(
+            "set outPath to POSIX file {}",
+            applescript_string_literal(&path.to_string_lossy())
+        ),
+        "-e".to_string(),
+        "try".to_string(),
+        "-e".to_string(),
+        "set imageData to the clipboard as «class PNGf»".to_string(),
+        "-e".to_string(),
+        "set outFile to open for access outPath with write permission".to_string(),
+        "-e".to_string(),
+        "set eof of outFile to 0".to_string(),
+        "-e".to_string(),
+        "write imageData to outFile".to_string(),
+        "-e".to_string(),
+        "close access outFile".to_string(),
+        "-e".to_string(),
+        "on error errMsg number errNum".to_string(),
+        "-e".to_string(),
+        "try".to_string(),
+        "-e".to_string(),
+        "close access outPath".to_string(),
+        "-e".to_string(),
+        "end try".to_string(),
+        "-e".to_string(),
+        "error errMsg number errNum".to_string(),
+        "-e".to_string(),
+        "end try".to_string(),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_string_literal(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmission> {
     let prompt = state.input.trim().to_string();
     if prompt.is_empty() {
+        return None;
+    }
+    if handle_input_command(state, &prompt) {
+        state.input.clear();
         return None;
     }
 
@@ -1366,62 +2422,108 @@ fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPromptSubmissi
 
     state.activity_status = format!("running {provider_id}");
     push_transcript_gap(state);
-    state.push_message("╭─ task ─────────────────────────────".to_string());
+    if state.detail_mode {
+        state.push_message("╭─ task ─────────────────────────────".to_string());
+    }
     state.push_message(format!("> {prompt}"));
-    state.push_message(format!("  target: {provider_id}"));
-    state.push_message(format!(
-        "  policy: {} ({})",
-        state.command_policy_label(),
-        state.execution_mode()
-    ));
-    state.push_message("  status: thinking...".to_string());
+    if state.detail_mode {
+        state.push_message(format!("  target: {provider_id}"));
+        if !state.image_paths.is_empty() {
+            state.push_message(format!("  images: {} attached", state.image_paths.len()));
+        }
+        state.push_message(format!(
+            "  policy: {} ({})",
+            state.command_policy_label(),
+            state.execution_mode()
+        ));
+        state.push_message("  status: thinking...".to_string());
+    } else {
+        if !state.image_paths.is_empty() {
+            state.push_message(format!("  attached {} image(s)", state.image_paths.len()));
+        }
+        state.push_message(format!("  {provider_id} thinking..."));
+    }
     state.input.clear();
+    let image_paths = std::mem::take(&mut state.image_paths);
 
     Some(PendingPromptSubmission {
         prompt,
         provider_id,
+        image_paths,
+        workspace_id: state.workspace_id.clone(),
+        session_id: state.session_id.clone(),
     })
 }
 
-fn load_latest_session(state: &mut TuiState) -> Result<()> {
-    state.activity_status = "loading latest session".to_string();
+fn load_latest_session_data() -> Result<LatestSessionLoad> {
     let response = get_json("/sessions")?;
     let sessions = parse_session_views(&response)?;
-    state.set_recent_sessions(sessions);
-    append_session_list(state);
-    let Some(session) = latest_session(&response) else {
-        state.push_message("no existing sessions");
-        state.activity_status = "idle".to_string();
-        return Ok(());
+    let latest_session = latest_session(&response).cloned();
+    let (routes_response, diff_response) = if let Some(session) = &latest_session {
+        let session_id = session
+            .get("id")
+            .and_then(task_session_id)
+            .ok_or_else(|| response_error("session.id", session))?;
+        (
+            Some(get_json(&format!("/sessions/{session_id}/routes"))?),
+            Some(get_json(&format!("/sessions/{session_id}/diff"))?),
+        )
+    } else {
+        (None, None)
     };
 
-    apply_loaded_session(state, session)?;
-    refresh_route_history(state)?;
-    refresh_session_diff(state)?;
-    state.activity_status = "idle".to_string();
-    Ok(())
+    Ok(LatestSessionLoad {
+        sessions,
+        latest_session,
+        routes_response,
+        diff_response,
+    })
 }
 
-fn load_selected_session(state: &mut TuiState) -> Result<()> {
-    let Some(session_id) = state
-        .recent_sessions
-        .get(state.selected_session_index)
-        .map(|session| session.id.clone())
-    else {
-        state.push_message("load sessions with Ctrl-L before selecting one");
-        return Ok(());
-    };
-
-    state.activity_status = "loading selected session".to_string();
+fn load_selected_session_data(session_id: &str) -> Result<SelectedSessionLoad> {
     let response = get_json(&format!("/sessions/{session_id}"))?;
     let session = response
         .get("session")
+        .cloned()
         .ok_or_else(|| response_error("session", &response))?;
-    apply_loaded_session(state, session)?;
-    refresh_route_history(state)?;
-    refresh_session_diff(state)?;
-    state.activity_status = "idle".to_string();
-    Ok(())
+    Ok(SelectedSessionLoad {
+        session,
+        routes_response: get_json(&format!("/sessions/{session_id}/routes"))?,
+        diff_response: get_json(&format!("/sessions/{session_id}/diff"))?,
+    })
+}
+
+fn apply_latest_session_load(state: &mut TuiState, load: LatestSessionLoad) {
+    state.set_recent_sessions(load.sessions);
+    append_session_list(state);
+    let Some(session) = load.latest_session else {
+        state.push_message("no existing sessions");
+        return;
+    };
+
+    match apply_loaded_session(state, &session) {
+        Ok(()) => {
+            if let Some(routes) = load.routes_response {
+                append_route_history(state, &routes);
+            }
+            if let Some(diff) = load.diff_response {
+                append_session_diff(state, &diff);
+            }
+            state.push_message("latest session loaded");
+        }
+        Err(error) => state.push_message(format!("load session failed: {error:#}")),
+    }
+}
+
+fn apply_selected_session_load(state: &mut TuiState, load: SelectedSessionLoad) {
+    match apply_loaded_session(state, &load.session) {
+        Ok(()) => {
+            append_route_history(state, &load.routes_response);
+            append_session_diff(state, &load.diff_response);
+            state.push_message("selected session loaded");
+        }
+        Err(error) => state.push_message(format!("load selected session failed: {error:#}")),
+    }
 }
 
 fn select_previous_session(state: &mut TuiState) {
@@ -1447,6 +2549,7 @@ fn start_new_session(state: &mut TuiState) {
     state.pending_handoff_id = None;
     state.pending_handoff_session_id = None;
     state.input.clear();
+    state.image_paths.clear();
     state.activity_status = "idle".to_string();
     state.push_message("new session: next prompt will create a fresh task");
 }
@@ -1853,11 +2956,17 @@ fn append_permission_resolution(state: &mut TuiState, response: &Value) {
     }
 }
 
-fn ensure_workspace(state: &mut TuiState) -> Result<String> {
-    if let Some(id) = &state.workspace_id {
-        return Ok(id.clone());
+fn prepare_workspace_for_submission(
+    submission: &PendingPromptSubmission,
+) -> Result<(String, Option<String>)> {
+    if let Some(id) = &submission.workspace_id {
+        return Ok((id.clone(), None));
     }
 
+    create_workspace_from_current_dir()
+}
+
+fn create_workspace_from_current_dir() -> Result<(String, Option<String>)> {
     let cwd = std::env::current_dir().context("read current directory")?;
     let name = workspace_name(&cwd);
     let response = post_json(
@@ -1880,22 +2989,28 @@ fn ensure_workspace(state: &mut TuiState) -> Result<String> {
         .and_then(Value::as_str)
         .unwrap_or("workspace");
 
-    state.workspace = format!("Workspace: {display_name}\n{id}");
-    state.workspace_id = Some(id.clone());
-    Ok(id)
+    Ok((id.clone(), Some(format!("Workspace: {display_name}\n{id}"))))
 }
 
-fn ensure_session(state: &mut TuiState, workspace_id: &str, prompt: &str) -> Result<String> {
-    if let Some(id) = &state.session_id {
-        return Ok(id.clone());
+fn prepare_session_for_submission(
+    submission: &PendingPromptSubmission,
+    workspace_id: &str,
+) -> Result<SubmissionSession> {
+    if let Some(id) = &submission.session_id {
+        return Ok(SubmissionSession {
+            session_id: id.clone(),
+            active_provider: None,
+            route_reason: None,
+            created: false,
+        });
     }
 
     let response = post_json(
         "/sessions",
         json!({
             "workspace_id": workspace_id,
-            "objective": prompt,
-            "provider_id": state.selected_provider(),
+            "objective": submission.prompt,
+            "provider_id": submission.provider_id,
         }),
     )?;
     let session = response
@@ -1913,17 +3028,15 @@ fn ensure_session(state: &mut TuiState, workspace_id: &str, prompt: &str) -> Res
     let route_reason = response
         .get("route_decision")
         .and_then(|decision| decision.get("reason"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
 
-    state.push_message(format!("session: {id} ({provider})"));
-    if let Some(reason) = route_reason {
-        state.push_message(format!("route: {reason}"));
-        state.route_reason = Some(reason.to_string());
-    }
-    state.active_provider = Some(provider.to_string());
-    state.session_id = Some(id.clone());
-    refresh_route_history(state)?;
-    Ok(id)
+    Ok(SubmissionSession {
+        session_id: id,
+        active_provider: Some(provider.to_string()),
+        route_reason,
+        created: true,
+    })
 }
 
 fn refresh_route_history(state: &mut TuiState) -> Result<()> {
@@ -1936,6 +3049,10 @@ fn refresh_route_history(state: &mut TuiState) -> Result<()> {
 }
 
 fn append_route_history(state: &mut TuiState, response: &Value) {
+    if !state.detail_mode {
+        return;
+    }
+
     let Some(routes) = response.get("routes").and_then(Value::as_array) else {
         return;
     };
@@ -2001,6 +3118,19 @@ fn append_session_diff(state: &mut TuiState, response: &Value) {
         return;
     }
 
+    if !state.detail_mode {
+        push_transcript_gap(state);
+        if changed_files.is_empty() {
+            state.push_message("changed files: unknown · F8 details".to_string());
+        } else {
+            state.push_message(format!(
+                "changed files: {} · F8 details",
+                changed_files.len()
+            ));
+        }
+        return;
+    }
+
     let shown = changed_files.iter().take(5).cloned().collect::<Vec<_>>();
     let suffix = changed_files
         .len()
@@ -2039,16 +3169,33 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
         .get("provider_id")
         .and_then(provider_id)
         .unwrap_or("unknown");
-    push_transcript_gap(state);
-    if response.get("turn_status").is_some() || response.get("session_status").is_some() {
-        state.push_message(format!(
-            "turn result: {turn_status} via {provider} (session {session_status})"
-        ));
-    } else {
-        state.push_message(format!("prompt result: {legacy_status} via {provider}"));
+    let mut response_block_started = false;
+    if state.detail_mode {
+        push_transcript_gap(state);
+        response_block_started = true;
+        if response.get("turn_status").is_some() || response.get("session_status").is_some() {
+            state.push_message(format!(
+                "turn result: {turn_status} via {provider} (session {session_status})"
+            ));
+        } else {
+            state.push_message(format!("prompt result: {legacy_status} via {provider}"));
+        }
+        if let Some(status) = context_status_line(response) {
+            state.push_message(status);
+        }
+    } else if let Some(status) =
+        compact_prompt_status_line(response, turn_status, legacy_status, provider)
+    {
+        push_transcript_gap(state);
+        response_block_started = true;
+        state.push_message(status);
     }
 
     if let Some(error) = response.get("error").and_then(Value::as_str) {
+        if !response_block_started {
+            push_transcript_gap(state);
+            response_block_started = true;
+        }
         state.push_message(format!("  error: {}", transcript_detail(error)));
     }
     if let Some(stderr) = response
@@ -2057,12 +3204,93 @@ fn append_prompt_response(state: &mut TuiState, response: &Value) {
         .filter(|stderr| should_show_prompt_stderr(response, stderr))
     {
         if !stderr.trim().is_empty() {
+            if !response_block_started {
+                push_transcript_gap(state);
+                response_block_started = true;
+            }
             state.push_message(format!("  stderr: {}", transcript_detail(stderr)));
         }
     }
     if let Some(hint) = provider_error_hint(response) {
+        if !response_block_started {
+            push_transcript_gap(state);
+        }
         state.push_message(hint);
     }
+}
+
+fn compact_prompt_status_line(
+    response: &Value,
+    turn_status: &str,
+    legacy_status: &str,
+    provider: &str,
+) -> Option<String> {
+    let status =
+        if response.get("turn_status").is_some() || response.get("session_status").is_some() {
+            turn_status
+        } else {
+            legacy_status
+        };
+    match status {
+        "completed" | "running" | "ok" | "success" | "unknown" => None,
+        status => Some(format!(
+            "{status} · {provider}{}",
+            context_summary_suffix(response)
+        )),
+    }
+}
+
+fn context_summary_suffix(response: &Value) -> String {
+    context_summary(response)
+        .map(|summary| format!(" · {summary}"))
+        .unwrap_or_default()
+}
+
+fn context_summary(response: &Value) -> Option<String> {
+    let context = response.get("context")?;
+    let strategy = context.get("strategy").and_then(Value::as_str)?;
+    let estimated_tokens = context
+        .get("estimated_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let strategy_label = match strategy {
+        "RawNativeResume" => "native resume",
+        "CrossProviderDelta" => "cross-provider delta",
+        "FullContextPack" => "full context pack",
+        _ => strategy,
+    };
+    Some(format!("{strategy_label} · {estimated_tokens} tokens"))
+}
+
+fn context_status_line(response: &Value) -> Option<String> {
+    let context = response.get("context")?;
+    let strategy = context.get("strategy").and_then(Value::as_str)?;
+    let estimated_tokens = context
+        .get("estimated_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let truncated = context
+        .get("truncated_sections")
+        .and_then(Value::as_array)
+        .map(|sections| {
+            sections
+                .iter()
+                .filter_map(Value::as_str)
+                .take(3)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let strategy_label = match strategy {
+        "RawNativeResume" => "native resume",
+        "CrossProviderDelta" => "cross-provider delta",
+        "FullContextPack" => "full context pack",
+        _ => strategy,
+    };
+    let mut line = format!("context: {strategy_label} {estimated_tokens} est tokens");
+    if !truncated.is_empty() {
+        line.push_str(&format!(" / truncated {}", truncated.join(", ")));
+    }
+    Some(line)
 }
 
 fn prompt_activity_after_response(response: &Value) -> &'static str {
@@ -2151,6 +3379,31 @@ fn append_recent_events(state: &mut TuiState, response: &Value) {
     }
 }
 
+fn append_assistant_events(state: &mut TuiState, response: &Value) {
+    let Some(events) = response.get("events").and_then(Value::as_array) else {
+        return;
+    };
+    let assistant_lines = events
+        .iter()
+        .filter(|event| {
+            event
+                .get("event_type")
+                .and_then(Value::as_str)
+                .is_some_and(|event_type| event_type == "session.agent.output")
+        })
+        .filter_map(|event| event.get("payload"))
+        .flat_map(assistant_event_lines)
+        .collect::<Vec<_>>();
+    if assistant_lines.is_empty() {
+        return;
+    }
+
+    push_transcript_section(state, "assistant:");
+    for line in assistant_lines {
+        state.push_message(format!("  {line}"));
+    }
+}
+
 fn assistant_event_lines(payload: &Value) -> Vec<String> {
     payload
         .get("text")
@@ -2165,6 +3418,77 @@ fn split_display_lines(text: &str) -> Vec<String> {
         vec![text.to_string()]
     } else {
         lines
+    }
+}
+
+fn should_progressively_render_assistant(state: &TuiState, lines: &[String]) -> bool {
+    has_pending_assistant_stream(state)
+        || lines.iter().map(|line| line.chars().count()).sum::<usize>()
+            >= ASSISTANT_STREAM_MIN_CHARS
+}
+
+fn advance_pending_assistant_stream(state: &mut TuiState) {
+    advance_pending_assistant_stream_by(state, ASSISTANT_STREAM_CHARS_PER_TICK);
+}
+
+fn flush_pending_assistant_stream(state: &mut TuiState) {
+    while has_pending_assistant_stream(state) {
+        advance_pending_assistant_stream_by(state, usize::MAX / 4);
+    }
+}
+
+fn clear_pending_assistant_stream(state: &mut TuiState) {
+    state.pending_assistant_lines.clear();
+    state.pending_assistant_current_line = None;
+    state.pending_assistant_line_index = None;
+}
+
+fn has_pending_assistant_stream(state: &TuiState) -> bool {
+    state.pending_assistant_current_line.is_some() || !state.pending_assistant_lines.is_empty()
+}
+
+fn advance_pending_assistant_stream_by(state: &mut TuiState, mut budget: usize) {
+    while budget > 0 {
+        if state.pending_assistant_current_line.is_none() {
+            let Some(next_line) = state.pending_assistant_lines.pop_front() else {
+                state.pending_assistant_line_index = None;
+                return;
+            };
+            state.push_message("  ".to_string());
+            state.pending_assistant_line_index = state.transcript.len().checked_sub(1);
+            state.pending_assistant_current_line = Some(next_line);
+        }
+
+        let Some(line_index) = state.pending_assistant_line_index else {
+            clear_pending_assistant_stream(state);
+            return;
+        };
+        if line_index >= state.transcript.len() {
+            clear_pending_assistant_stream(state);
+            return;
+        }
+
+        let current = state
+            .pending_assistant_current_line
+            .take()
+            .unwrap_or_default();
+        if current.is_empty() {
+            state.pending_assistant_line_index = None;
+            continue;
+        }
+
+        let chunk = current.chars().take(budget).collect::<String>();
+        let consumed = chunk.chars().count();
+        state.transcript[line_index].push_str(&chunk);
+        budget = budget.saturating_sub(consumed);
+
+        let remaining = current.chars().skip(consumed).collect::<String>();
+        if remaining.is_empty() {
+            state.pending_assistant_line_index = None;
+        } else {
+            state.pending_assistant_current_line = Some(remaining);
+            break;
+        }
     }
 }
 
@@ -2291,6 +3615,11 @@ impl TuiState {
             return;
         }
         self.selected_provider_index = (self.selected_provider_index + 1) % self.providers.len();
+    }
+
+    fn toggle_detail_mode(&mut self) {
+        self.detail_mode = !self.detail_mode;
+        self.push_message(format!("view: {}", self.view_status()));
     }
 
     fn set_provider_diagnostics(
@@ -2471,6 +3800,14 @@ impl TuiState {
         )
     }
 
+    fn view_status(&self) -> String {
+        if self.detail_mode {
+            "details; F8 returns compact".to_string()
+        } else {
+            "compact; F8 shows details".to_string()
+        }
+    }
+
     fn session_status(&self) -> String {
         if let Some(session) = self.recent_sessions.get(self.selected_session_index) {
             let current_marker = if self.session_id.as_deref() == Some(session.id.as_str()) {
@@ -2530,8 +3867,15 @@ impl TuiState {
         }
     }
 
+    fn background_status_label(&self) -> String {
+        self.background_status
+            .as_deref()
+            .unwrap_or("idle")
+            .to_string()
+    }
+
     fn help_text(&self) -> &'static str {
-        "Ent|Tab|F2/F3 sess|F4 load|^E done|^N new|^L latest|^H hand|^X stop"
+        "Enter run | Tab provider | ^V image | /image path | F8 details | ^X cancel"
     }
 
     fn push_message(&mut self, message: impl Into<String>) {
@@ -2541,10 +3885,6 @@ impl TuiState {
 
     fn scroll_up(&mut self, amount: u16) {
         self.scroll_offset = self.scroll_offset.saturating_add(amount);
-        let max_scroll = self.transcript.len().saturating_sub(1) as u16;
-        if self.scroll_offset > max_scroll {
-            self.scroll_offset = max_scroll;
-        }
     }
 
     fn scroll_down(&mut self, amount: u16) {
@@ -2556,7 +3896,7 @@ impl TuiState {
     }
 
     fn scroll_to_top(&mut self) {
-        self.scroll_offset = self.transcript.len().saturating_sub(1) as u16;
+        self.scroll_offset = u16::MAX;
     }
 
     #[cfg(test)]
@@ -2586,17 +3926,45 @@ fn short_readiness_status(status: &str) -> &str {
 }
 
 fn get_json(path: &str) -> Result<Value> {
-    request_json("GET", path, None)
+    request_json_with_timeout(
+        "GET",
+        path,
+        None,
+        Duration::from_secs(DAEMON_REQUEST_TIMEOUT_SECONDS),
+    )
 }
 
 fn post_json(path: &str, body: Value) -> Result<Value> {
-    request_json("POST", path, Some(body))
+    post_json_with_timeout(
+        path,
+        body,
+        Duration::from_secs(DAEMON_REQUEST_TIMEOUT_SECONDS),
+    )
 }
 
-fn request_json(method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+fn post_json_with_timeout(path: &str, body: Value, read_timeout: Duration) -> Result<Value> {
+    request_json_with_timeout("POST", path, Some(body), read_timeout)
+}
+
+fn request_json_with_timeout(
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    read_timeout: Duration,
+) -> Result<Value> {
     let body = body.map(|body| body.to_string()).unwrap_or_default();
-    let mut stream = TcpStream::connect((DAEMON_HOST, DAEMON_PORT))
-        .with_context(|| format!("connect to baize daemon at {DAEMON_HOST}:{DAEMON_PORT}"))?;
+    let address: SocketAddr = format!("{DAEMON_HOST}:{DAEMON_PORT}")
+        .parse()
+        .context("parse daemon socket address")?;
+    let mut stream =
+        TcpStream::connect_timeout(&address, Duration::from_millis(DAEMON_CONNECT_TIMEOUT_MS))
+            .with_context(|| format!("connect to baize daemon at {DAEMON_HOST}:{DAEMON_PORT}"))?;
+    stream
+        .set_read_timeout(Some(read_timeout))
+        .context("set daemon read timeout")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(DAEMON_REQUEST_TIMEOUT_SECONDS)))
+        .context("set daemon write timeout")?;
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: {DAEMON_HOST}:{DAEMON_PORT}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
@@ -2774,7 +4142,7 @@ fn transcript_detail(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
 
     #[test]
     fn renders_mvp_dashboard_text() {
@@ -2787,22 +4155,65 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("BAIZE"));
-        assert!(rendered.contains("BAIZE://workspace-fabric"));
         assert!(rendered.contains("Baize MVP TUI"));
         assert!(rendered.contains("daemon"));
         assert!(rendered.contains("not checked"));
         assert!(rendered.contains("Agent Stream"));
-        assert!(rendered.contains("COMMAND MATRIX"));
-        assert!(rendered.contains("enter"));
         assert!(rendered.contains("target"));
+        assert!(rendered.contains("What are we working on?"));
+        assert!(rendered.contains("codex"));
+        assert!(!rendered.contains("Control Plane"));
+        assert!(!rendered.contains("SESSION"));
+        assert!(!rendered.contains("Prompt"));
+        assert!(rendered.contains("Ask Baize to work on"));
+        assert!(rendered.contains("Enter run"));
+        assert!(rendered.contains("F8 details"));
+    }
+
+    #[test]
+    fn renders_control_plane_in_detail_mode() {
+        let backend = TestBackend::new(100, 22);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
         assert!(rendered.contains("Control Plane"));
-        assert!(rendered.contains("PROVIDER MATRIX"));
-        assert!(rendered.contains("ROUTER"));
+        assert!(rendered.contains("SESSION"));
+        assert!(rendered.contains("TARGET"));
         assert!(rendered.contains("codex"));
         assert!(rendered.contains("opencode"));
-        assert!(rendered.contains("Prompt"));
-        assert!(rendered.contains("keys"));
-        assert!(rendered.contains("Ent|Tab|F2/F3 sess|F4 load|^E done"));
+        assert!(rendered.contains("QUICK START"));
+    }
+
+    #[test]
+    fn renders_control_plane_for_pending_permission_in_compact_mode() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = TuiState {
+            pending_permissions: vec![PermissionView {
+                id: "perm_1".to_string(),
+                session_id: None,
+                command: "cargo test".to_string(),
+                reason: "verify".to_string(),
+                status: "Pending".to_string(),
+                risk_level: None,
+            }],
+            ..TuiState::default()
+        };
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("Control Plane"));
+        assert!(rendered.contains("WORK QUEUE"));
+        assert!(rendered.contains("cargo test"));
     }
 
     #[test]
@@ -2887,7 +4298,12 @@ mod tests {
         };
         let (sender, receiver) = mpsc::channel();
         sender
-            .send(Ok(PromptTaskCompletion {
+            .send(PromptTaskMessage::Completed(PromptTaskCompletion {
+                workspace_id: Some("ws_1".to_string()),
+                workspace_display: Some("Workspace: baize\nws_1".to_string()),
+                session_id: "task_1".to_string(),
+                active_provider: Some("codex".to_string()),
+                route_reason: Some("Selected codex".to_string()),
                 prompt_response: json!({
                     "status": "running",
                     "turn_status": "completed",
@@ -2919,17 +4335,22 @@ mod tests {
                 }),
             }))
             .expect("send completion");
-        let mut task = Some(PromptTask { receiver });
+        let mut task = Some(PromptTask {
+            receiver,
+            stop_stream: Arc::new(AtomicBool::new(false)),
+        });
 
         poll_prompt_task(&mut state, &mut task);
 
         assert!(task.is_none());
         assert_eq!(state.activity_status, "idle");
         let transcript = state.transcript_text();
-        assert!(transcript.contains("turn result: completed via codex"));
+        assert!(!transcript.contains("turn: completed via codex"));
+        assert!(!transcript.contains("session: task_1"));
+        assert!(!transcript.contains("route:"));
         assert!(transcript.contains("╭─ assistant:"));
         assert!(transcript.contains("  done"));
-        assert!(transcript.contains("╭─ routes:"));
+        assert!(!transcript.contains("╭─ routes:"));
         assert!(transcript.contains("workspace clean"));
     }
 
@@ -2941,9 +4362,12 @@ mod tests {
         };
         let (sender, receiver) = mpsc::channel();
         sender
-            .send(Err("provider failed".to_string()))
+            .send(PromptTaskMessage::Failed("provider failed".to_string()))
             .expect("send error");
-        let mut task = Some(PromptTask { receiver });
+        let mut task = Some(PromptTask {
+            receiver,
+            stop_stream: Arc::new(AtomicBool::new(false)),
+        });
 
         poll_prompt_task(&mut state, &mut task);
 
@@ -2953,10 +4377,137 @@ mod tests {
     }
 
     #[test]
+    fn apply_prompt_submission_context_records_created_session_metadata() {
+        let mut state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
+        let started = PromptTaskStarted {
+            workspace_id: Some("ws_1".to_string()),
+            workspace_display: Some("Workspace: baize\nws_1".to_string()),
+            session_id: "task_1".to_string(),
+            active_provider: Some("codex".to_string()),
+            route_reason: Some("Selected codex for implementation".to_string()),
+            created_session: true,
+        };
+
+        apply_prompt_started(&mut state, started);
+
+        assert_eq!(state.workspace_id.as_deref(), Some("ws_1"));
+        assert_eq!(state.session_id.as_deref(), Some("task_1"));
+        assert_eq!(state.active_provider.as_deref(), Some("codex"));
+        assert_eq!(
+            state.route_reason.as_deref(),
+            Some("Selected codex for implementation")
+        );
+        assert!(state.transcript_text().contains("session: task_1 (codex)"));
+        assert!(state
+            .transcript_text()
+            .contains("route: Selected codex for implementation"));
+    }
+
+    #[test]
+    fn compact_prompt_submission_context_keeps_metadata_out_of_transcript() {
+        let mut state = TuiState::default();
+        let started = PromptTaskStarted {
+            workspace_id: Some("ws_1".to_string()),
+            workspace_display: Some("Workspace: baize\nws_1".to_string()),
+            session_id: "task_1".to_string(),
+            active_provider: Some("codex".to_string()),
+            route_reason: Some("Selected codex for implementation".to_string()),
+            created_session: true,
+        };
+
+        apply_prompt_started(&mut state, started);
+
+        assert_eq!(state.session_id.as_deref(), Some("task_1"));
+        assert_eq!(state.active_provider.as_deref(), Some("codex"));
+        assert!(!state.transcript_text().contains("session: task_1"));
+        assert!(!state.transcript_text().contains("route:"));
+    }
+
+    #[test]
+    fn apply_initial_load_result_updates_status_without_blocking_state() {
+        let mut state = TuiState::default();
+        apply_initial_load_result(
+            &mut state,
+            InitialLoadResult {
+                providers: Ok(vec!["opencode".to_string(), "codex".to_string()]),
+                diagnostics: Ok(vec![ProviderDiagnosticView {
+                    provider_id: "opencode".to_string(),
+                    readiness: "Ready".to_string(),
+                    health: ProviderHealthView {
+                        provider_id: "opencode".to_string(),
+                        status: "Healthy".to_string(),
+                        last_error: None,
+                    },
+                    issues: Vec::new(),
+                    suggested_actions: Vec::new(),
+                }]),
+                permissions: Ok(vec![PermissionView {
+                    id: "perm_1".to_string(),
+                    session_id: Some("task_1".to_string()),
+                    command: "cargo test".to_string(),
+                    reason: "verify".to_string(),
+                    status: "Pending".to_string(),
+                    risk_level: Some("Low".to_string()),
+                }]),
+                runtime_policy: Ok(RuntimePolicyView {
+                    command_policy: "deny".to_string(),
+                    execution_mode: "read_only".to_string(),
+                    checkpoint_policy: "before_handoff".to_string(),
+                    sticky_window_minutes: 10,
+                    quota_switch_threshold_percent: 20,
+                    failure_threshold_count: 2,
+                }),
+            },
+        );
+
+        assert_eq!(state.providers, vec!["opencode", "codex"]);
+        assert_eq!(state.pending_permissions.len(), 1);
+        assert_eq!(state.command_policy_label(), "read-only");
+        assert!(!state.transcript_text().contains("status load complete"));
+    }
+
+    #[test]
+    fn poll_ui_task_applies_permission_refresh_and_clears_background_status() {
+        let mut state = TuiState {
+            background_status: Some("refreshing permissions".to_string()),
+            ..TuiState::default()
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(UiTaskCompletion::PermissionRefresh(vec![
+                PermissionView {
+                    id: "perm_1".to_string(),
+                    session_id: None,
+                    command: "cargo fmt".to_string(),
+                    reason: "format".to_string(),
+                    status: "Pending".to_string(),
+                    risk_level: None,
+                },
+            ])))
+            .expect("send refresh");
+        let mut task = Some(UiTask { receiver });
+
+        poll_ui_task(&mut state, &mut task);
+
+        assert!(task.is_none());
+        assert!(state.background_status.is_none());
+        assert_eq!(state.pending_permissions.len(), 1);
+        assert!(state
+            .transcript_text()
+            .contains("permissions refreshed: 1 pending"));
+    }
+
+    #[test]
     fn detach_prompt_task_after_cancel_drops_worker() {
         let mut state = TuiState::default();
         let (_sender, receiver) = mpsc::channel();
-        let mut task = Some(PromptTask { receiver });
+        let mut task = Some(PromptTask {
+            receiver,
+            stop_stream: Arc::new(AtomicBool::new(false)),
+        });
 
         detach_prompt_task_after_cancel(&mut state, &mut task);
 
@@ -2979,17 +4530,171 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = format!("{buffer:?}");
 
-        assert!(rendered.contains("baize"));
+        assert!(!rendered.contains("Ask Baize"));
         assert!(rendered.contains("hello baize"));
+        assert!(rendered.contains("codex"));
+        let cursor = terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("cursor");
+        assert_eq!(cursor, Position::new(14, 16));
+    }
+
+    #[test]
+    fn prompt_cursor_accounts_for_wide_input_characters() {
+        let area = Rect::new(0, 15, 80, 4);
+        let state = TuiState {
+            input: "你好".to_string(),
+            ..TuiState::default()
+        };
+
+        assert_eq!(prompt_cursor_position(area, &state), Position::new(7, 16));
+    }
+
+    #[test]
+    fn prompt_visible_input_keeps_tail_when_input_is_long() {
+        let visible = prompt_visible_input("abcdefghijklmnopqrstuvwxyz", 8);
+
+        assert_eq!(visible, "…tuvwxyz");
     }
 
     #[test]
     fn prompt_request_body_includes_target_provider() {
-        let body = prompt_request_body("gemini", "continue task");
+        let image_paths = vec![PathBuf::from("/tmp/screen.png")];
+        let body = prompt_request_body("gemini", "continue task", &image_paths);
 
         assert_eq!(body["prompt"], "continue task");
         assert_eq!(body["provider_id"], "gemini");
+        assert_eq!(body["image_paths"][0], "/tmp/screen.png");
         assert_eq!(body["timeout_seconds"], PROMPT_TIMEOUT_SECONDS);
+    }
+
+    #[test]
+    fn image_paths_from_text_parses_shell_paths_and_file_urls() {
+        let paths = image_paths_from_text(
+            r#""/tmp/screen shot.png" file:///tmp/clip%20image.jpg /tmp/readme.txt"#,
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/screen shot.png"),
+                PathBuf::from("/tmp/clip image.jpg")
+            ]
+        );
+    }
+
+    #[test]
+    fn handle_paste_attaches_image_paths() {
+        let image_path = std::env::temp_dir().join(format!(
+            "baize-tui-paste-{}.png",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        std::fs::write(&image_path, b"fake image").expect("image");
+        let mut state = TuiState::default();
+
+        handle_paste(&mut state, &image_path.to_string_lossy());
+
+        assert_eq!(state.image_paths, vec![image_path.canonicalize().unwrap()]);
+        assert!(state.input.is_empty());
+        assert!(state.transcript_text().contains("image attached:"));
+        std::fs::remove_file(image_path).ok();
+    }
+
+    #[test]
+    fn handle_paste_appends_plain_text() {
+        let mut state = TuiState::default();
+
+        handle_paste(&mut state, "hello\nbaize");
+
+        assert_eq!(state.input, "hello baize");
+        assert!(state.image_paths.is_empty());
+    }
+
+    #[test]
+    fn parse_sse_data_line_reads_json_payload() {
+        let event = parse_sse_data_line(
+            r#"data: {"event_type":"session.agent.output","payload":{"text":"hello"}}"#,
+        )
+        .expect("event");
+
+        assert_eq!(event["event_type"], "session.agent.output");
+        assert_eq!(event["payload"]["text"], "hello");
+    }
+
+    #[test]
+    fn apply_prompt_stream_event_appends_output_once() {
+        let mut state = TuiState::default();
+        let event = json!({
+            "id": "evt_1",
+            "event_type": "session.agent.output",
+            "session_id": "task_1",
+            "provider_id": "codex",
+            "payload": { "text": "stream hello" }
+        });
+
+        apply_prompt_stream_event(&mut state, &event);
+        apply_prompt_stream_event(&mut state, &event);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("assistant:"));
+        assert_eq!(transcript.matches("stream hello").count(), 1);
+    }
+
+    #[test]
+    fn apply_prompt_stream_event_reveals_long_output_incrementally() {
+        let mut state = TuiState::default();
+        let event = json!({
+            "id": "evt_long",
+            "event_type": "session.agent.output",
+            "session_id": "task_1",
+            "provider_id": "codex",
+            "payload": {
+                "text": "abcdefghijklmnopqrstuvwxyz0123456789TAIL"
+            }
+        });
+
+        apply_prompt_stream_event(&mut state, &event);
+
+        let partial = state.transcript_text();
+        assert!(partial.contains("assistant:"));
+        assert!(partial.contains("abcdefghijklmnop"));
+        assert!(!partial.contains("TAIL"));
+        assert!(has_pending_assistant_stream(&state));
+
+        flush_pending_assistant_stream(&mut state);
+
+        assert!(state
+            .transcript_text()
+            .contains("abcdefghijklmnopqrstuvwxyz0123456789TAIL"));
+        assert!(!has_pending_assistant_stream(&state));
+    }
+
+    #[test]
+    fn apply_prompt_stream_event_shows_raw_progress_without_text() {
+        let mut state = TuiState::default();
+        let event = json!({
+            "id": "evt_raw",
+            "event_type": "session.agent.output",
+            "session_id": "task_1",
+            "provider_id": "opencode",
+            "payload": {
+                "text": null,
+                "raw": {
+                    "type": "step_start",
+                    "part": { "type": "step-start" }
+                }
+            }
+        });
+
+        apply_prompt_stream_event(&mut state, &event);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("status:"));
+        assert!(transcript.contains("stream: step-start"));
     }
 
     #[test]
@@ -3043,15 +4748,39 @@ mod tests {
 
         assert_eq!(submission.provider_id, "antigravity");
         assert_eq!(submission.prompt, "你能做什么");
+        assert!(submission.image_paths.is_empty());
         assert!(state.input.is_empty());
         assert_eq!(state.activity_status, "running antigravity");
-        assert!(state.transcript_text().contains("╭─ task"));
+        assert!(!state.transcript_text().contains("╭─ task"));
         assert!(state.transcript_text().contains("> 你能做什么"));
-        assert!(state.transcript_text().contains("target: antigravity"));
-        assert!(state
-            .transcript_text()
-            .contains("policy: read-only (read-only)"));
-        assert!(state.transcript_text().contains("status: thinking..."));
+        assert!(state.transcript_text().contains("antigravity thinking..."));
+    }
+
+    #[test]
+    fn begin_prompt_submission_includes_attached_images() {
+        let image_path = PathBuf::from("/tmp/screen.png");
+        let mut state = TuiState {
+            input: "describe this".to_string(),
+            image_paths: vec![image_path.clone()],
+            ..TuiState::default()
+        };
+
+        let submission = begin_prompt_submission(&mut state).expect("submission");
+
+        assert_eq!(submission.image_paths, vec![image_path]);
+        assert!(state.image_paths.is_empty());
+        assert!(state.transcript_text().contains("attached 1 image(s)"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_clipboard_image_osascript_args_write_png_to_path() {
+        let args = macos_clipboard_image_osascript_args(Path::new("/tmp/baize clip.png"));
+        let script = args.join("\n");
+
+        assert!(script.contains("set imageData to the clipboard as «class PNGf»"));
+        assert!(script.contains("POSIX file \"/tmp/baize clip.png\""));
+        assert!(script.contains("write imageData to outFile"));
     }
 
     #[test]
@@ -3172,6 +4901,47 @@ mod tests {
         let rendered = format!("{buffer:?}");
 
         assert!(rendered.contains("codex"));
+        assert!(!rendered.contains("antigr..."));
+        assert!(!rendered.contains("Control Plane"));
+    }
+
+    #[test]
+    fn renders_provider_mesh_as_individual_rows_in_detail_mode() {
+        let backend = TestBackend::new(100, 22);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = TuiState {
+            detail_mode: true,
+            provider_health: vec![
+                ProviderHealthView {
+                    provider_id: "codex".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "antigravity".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "copilot".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: None,
+                },
+                ProviderHealthView {
+                    provider_id: "opencode".to_string(),
+                    status: "Unavailable".to_string(),
+                    last_error: None,
+                },
+            ],
+            ..TuiState::default()
+        };
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("Control Plane"));
+        assert!(rendered.contains("codex"));
         assert!(rendered.contains("antigr..."));
         assert!(rendered.contains("copilot"));
         assert!(rendered.contains("opencode"));
@@ -3183,6 +4953,7 @@ mod tests {
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let state = TuiState {
+            detail_mode: true,
             runtime_policy: Some(RuntimePolicyView {
                 command_policy: "allow_project".to_string(),
                 execution_mode: "project_write_allowed".to_string(),
@@ -3198,7 +4969,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = format!("{buffer:?}");
 
-        assert!(rendered.contains("[exec:project-write-allowed]"));
+        assert!(rendered.contains("project-write-allowed"));
         assert!(rendered.contains("project writes allowed"));
         assert!(rendered.contains("45m quota<15% fail>2"));
     }
@@ -3573,7 +5344,10 @@ mod tests {
 
     #[test]
     fn appends_recent_route_history() {
-        let mut state = TuiState::default();
+        let mut state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
         let response = json!({
             "routes": [
                 {
@@ -3617,7 +5391,10 @@ mod tests {
 
     #[test]
     fn appends_dirty_session_diff_with_file_limit() {
-        let mut state = TuiState::default();
+        let mut state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
         let response = json!({
             "diff": {
                 "dirty": true,
@@ -3640,8 +5417,29 @@ mod tests {
     }
 
     #[test]
-    fn append_prompt_response_shows_rate_limit_hint() {
+    fn compact_session_diff_shows_count_not_file_list() {
         let mut state = TuiState::default();
+        let response = json!({
+            "diff": {
+                "dirty": true,
+                "changed_files": ["a.rs", "b.rs", "c.rs"]
+            }
+        });
+
+        append_session_diff(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("changed files: 3"));
+        assert!(transcript.contains("F8 details"));
+        assert!(!transcript.contains("a.rs, b.rs"));
+    }
+
+    #[test]
+    fn append_prompt_response_shows_rate_limit_hint() {
+        let mut state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
         let response = json!({
             "status": "failed",
             "turn_status": "failed",
@@ -3667,7 +5465,10 @@ mod tests {
 
     #[test]
     fn append_prompt_response_shows_completed_turn_status() {
-        let mut state = TuiState::default();
+        let mut state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
         let response = json!({
             "status": "running",
             "turn_status": "completed",
@@ -3683,6 +5484,31 @@ mod tests {
     }
 
     #[test]
+    fn append_prompt_response_shows_context_status() {
+        let mut state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
+        let response = json!({
+            "status": "running",
+            "turn_status": "completed",
+            "session_status": "Running",
+            "provider_id": "opencode",
+            "context": {
+                "strategy": "CrossProviderDelta",
+                "estimated_tokens": 3210,
+                "truncated_sections": ["diff_hunks"]
+            }
+        });
+
+        append_prompt_response(&mut state, &response);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("context: cross-provider delta 3210 est tokens"));
+        assert!(transcript.contains("truncated diff_hunks"));
+    }
+
+    #[test]
     fn session_events_path_filters_to_prompt_provider() {
         assert_eq!(
             session_events_path("task_1", "opencode"),
@@ -3692,7 +5518,10 @@ mod tests {
 
     #[test]
     fn append_prompt_response_hides_success_stderr_noise() {
-        let mut state = TuiState::default();
+        let mut state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
         let response = json!({
             "status": "running",
             "turn_status": "completed",
@@ -3710,7 +5539,10 @@ mod tests {
 
     #[test]
     fn append_prompt_response_keeps_legacy_status_display() {
-        let mut state = TuiState::default();
+        let mut state = TuiState {
+            detail_mode: true,
+            ..TuiState::default()
+        };
         let response = json!({
             "status": "failed",
             "provider_id": "codex"
@@ -4359,6 +6191,7 @@ mod tests {
     #[test]
     fn append_provider_health_errors_shows_down_provider_setup_details() {
         let mut state = TuiState {
+            detail_mode: true,
             provider_health: vec![
                 ProviderHealthView {
                     provider_id: "codex".to_string(),
@@ -4384,6 +6217,7 @@ mod tests {
     #[test]
     fn append_provider_diagnostic_issues_shows_suggestions() {
         let mut state = TuiState {
+            detail_mode: true,
             provider_diagnostics: vec![ProviderDiagnosticView {
                 provider_id: "copilot".to_string(),
                 readiness: "UnsupportedRuntime".to_string(),
@@ -4408,6 +6242,36 @@ mod tests {
         assert!(transcript.contains("provider diagnostics:"));
         assert!(transcript.contains("copilot: Baize prompt runtime"));
         assert!(transcript.contains("next: use the ACP proof-of-life"));
+    }
+
+    #[test]
+    fn compact_provider_diagnostics_show_summary_only() {
+        let mut state = TuiState {
+            provider_diagnostics: vec![ProviderDiagnosticView {
+                provider_id: "copilot".to_string(),
+                readiness: "UnsupportedRuntime".to_string(),
+                health: ProviderHealthView {
+                    provider_id: "copilot".to_string(),
+                    status: "Healthy".to_string(),
+                    last_error: None,
+                },
+                issues: vec![
+                    "Baize prompt runtime is not implemented for this provider yet".to_string(),
+                ],
+                suggested_actions: vec![
+                    "use the ACP proof-of-life data to continue adapter implementation".to_string(),
+                ],
+            }],
+            ..TuiState::default()
+        };
+
+        append_provider_diagnostic_issues(&mut state);
+
+        let transcript = state.transcript_text();
+        assert!(transcript.contains("provider diagnostics: 1 issue(s): copilot unsupported"));
+        assert!(transcript.contains("F8 details"));
+        assert!(!transcript.contains("Baize prompt runtime is not implemented"));
+        assert!(!transcript.contains("next:"));
     }
 
     #[test]
@@ -4517,11 +6381,11 @@ mod tests {
     }
 
     #[test]
-    fn scroll_offset_clamped_to_transcript_length() {
+    fn scroll_offset_is_clamped_by_render_not_state() {
         let mut state = TuiState::default();
         state.push_message("only one line");
         state.scroll_up(100);
-        assert_eq!(state.scroll_offset, 4);
+        assert_eq!(state.scroll_offset, 100);
     }
 
     #[test]
@@ -4542,7 +6406,7 @@ mod tests {
             state.push_message(format!("line {i}"));
         }
         state.scroll_to_top();
-        assert_eq!(state.scroll_offset, 53);
+        assert_eq!(state.scroll_offset, u16::MAX);
     }
 
     #[test]
@@ -4581,6 +6445,25 @@ mod tests {
     }
 
     #[test]
+    fn render_transcript_bottom_uses_wrapped_visual_lines() {
+        let backend = TestBackend::new(60, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let long_line = format!("{} TAIL_MARKER", "wrapped-output ".repeat(80));
+        let state = TuiState {
+            session_id: Some("task_wrapped".to_string()),
+            transcript: vec![long_line],
+            ..TuiState::default()
+        };
+
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+
+        assert!(rendered.contains("TAIL_MARKER"));
+        assert!(!rendered.contains(&"wrapped-output ".repeat(10)));
+    }
+
+    #[test]
     fn render_transcript_scroll_offset_shows_history() {
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -4595,7 +6478,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = format!("{buffer:?}");
 
-        assert!(rendered.contains("boot sequence complete"));
+        assert!(rendered.contains("What are we working on?"));
         assert!(!rendered.contains("latest assistant line"));
     }
 

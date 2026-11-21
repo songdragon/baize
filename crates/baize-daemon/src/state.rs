@@ -1,5 +1,5 @@
 use anyhow::Result;
-use baize_adapters::{AgentPromptRequest, AgentRunResult};
+use baize_adapters::{AgentEventSink, AgentPromptRequest, AgentRunResult};
 use baize_config::BaizeConfig;
 use baize_core::{BaizeEvent, TaskSessionStatus};
 use baize_storage::EventStore;
@@ -19,15 +19,23 @@ pub struct AppState {
 }
 
 pub trait AgentExecutor: Send + Sync {
-    fn run_prompt(&self, request: AgentPromptRequest) -> Result<AgentRunResult>;
+    fn run_prompt(
+        &self,
+        request: AgentPromptRequest,
+        event_sink: Option<&mut AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult>;
 }
 
 #[derive(Clone)]
 struct RealAgentExecutor;
 
 impl AgentExecutor for RealAgentExecutor {
-    fn run_prompt(&self, request: AgentPromptRequest) -> Result<AgentRunResult> {
-        baize_adapters::run_agent_prompt(request)
+    fn run_prompt(
+        &self,
+        request: AgentPromptRequest,
+        event_sink: Option<&mut AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
+        baize_adapters::run_agent_prompt_streaming(request, event_sink)
     }
 }
 
@@ -66,7 +74,15 @@ pub struct CreateSessionRequest {
 pub struct PromptRequest {
     pub prompt: String,
     pub provider_id: Option<String>,
+    #[serde(default)]
+    pub image_paths: Vec<PathBuf>,
     pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContextPreviewQuery {
+    pub provider_id: Option<String>,
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,16 +1,20 @@
 # Baize Technical Selection
 
+更新：2026-11-21。本轮保留 Rust/daemon/薄客户端技术选择，调整产品边界和接入原则；具体目标见 [产品愿景](vision.md)，当前实现见 [MVP 计划](mvp-implementation-plan.md)。
+
 ## 1. 目标
 
-Baize 第一版是 TUI，但未来需要支持 desktop app，并且尽量不迁移内核。
+Baize 的核心是跨 coding agent 持续的同一个 session。TUI 是当前验证入口，CLI 是初期执行路径；两者都不限制未来 provider Desktop 等原生执行环境的接入。Baize 自身的 Desktop UI 与执行者的 Desktop 能力分别设计。
 
 技术选型要满足：
 
 - 一套核心内核，多种 UI；
 - 支持 macOS、Linux、Windows；
 - Windows 优先支持 WSL 工作流，也保留原生 Windows 可能性；
-- 优先使用 ACP 连接 coding agent；
-- 便于集成 Codex、Gemini CLI、GitHub Copilot CLI、OpenCode；
+- 按原生能力完整性与接口可控性选择官方接口、ACP 或 CLI；
+- 保留目标执行环境的内置 prompt、MCP、skills、computer use、browser use 等实际可用能力；
+- 结合当前 workspace 与近期相关对话，在 agent 切换时保持同一 Baize session；
+- 便于集成当前 Codex、Antigravity、OpenCode 等 CLI 基线，并验证其他原生入口；
 - 适合本地 daemon、agent subprocess、pty、文件系统、git diff、SQLite、事件流；
 - 未来可扩展到 desktop app、web UI、IDE integration。
 
@@ -23,7 +27,7 @@ Rust kernel
 + local daemon
 + JSON-RPC/HTTP API
 + SQLite storage
-+ ACP-first adapter layer
++ capability-based native/ACP/CLI adapter layer
 + ratatui TUI client
 + future Tauri desktop app as thin client
 ```
@@ -33,15 +37,16 @@ UI 与内核分离：
 ```text
 baize daemon
   本地 headless kernel
-  workspace/session/routing/quota/handoff/adapters
+  session/dialogue/workspace/context/adapters
+  routing/quota/handoff 作为支撑能力
 
 baize tui
-  第一版主 UI
+  当前验证持续会话的薄 UI
   通过本地 API/事件流连接 daemon
 
 baize desktop
-  未来 desktop app
-  复用同一个 daemon
+  未来 Baize 自身的 Desktop UI
+  复用同一个 daemon，与 provider Desktop 执行接入分开
 ```
 
 ## 3. 语言与生态对比
@@ -273,7 +278,7 @@ Primary recommendation
 适合原因：
 
 ```text
-Baize 的 TUI 是主产品入口，不只是 demo。ratatui 更适合长期打磨。
+ratatui 支持打磨当前 TUI，但产品验收是 session 连续性与原生执行能力，不能仅以终端展示效果判断是否满足需求。
 ```
 
 ### 5.2 Go Bubble Tea
@@ -352,7 +357,8 @@ UI 不能持有核心业务状态。
 - task session manager；
 - route decision engine；
 - provider registry；
-- ACP/native/CLI adapter lifecycle；
+- native/ACP/CLI adapter lifecycle；
+- 近期对话选择、有效约束与切回旧原生会话的增量接续；
 - quota/health observer；
 - workspace state tracker；
 - handoff generator；
@@ -377,7 +383,7 @@ TUI 不直接调用 agent。
 
 ### 6.3 Desktop App
 
-未来 desktop app 是 daemon 的另一个 client。
+未来 Baize 自身的 desktop app 是 daemon 的另一个 client。它不会自动带来厂商 Desktop 的原生 prompt 或工具。Provider Desktop 执行应通过其支持的接口单独验证，会话与执行结果仍关联原 Baize session。
 
 推荐形态：
 
@@ -407,7 +413,8 @@ SQLite
 用途：
 
 - workspace；
-- task session；
+- Baize session、主对话及 provider 原生会话引用；
+- 切换上下文的来源、近期对话范围与已知执行结果；
 - route decision；
 - provider health；
 - quota samples；
@@ -439,14 +446,15 @@ MVP 可以先用 HTTP + SSE。
 
 未来 desktop、web、IDE bridge 都可复用。
 
-内部 adapter 与 agent 之间：
+内部 adapter 按所需能力选择：
 
-```text
-ACP over stdio
-ACP over TCP/HTTP if provider supports it
-native SDK
-CLI fallback
-```
+| 接入路径 | 适用条件 |
+|---|---|
+| 官方原生服务、RPC、SDK 或受支持的 Desktop 会话接口 | 能保留更多所需原生能力，且可控制会话或回流执行结果 |
+| ACP | 标准能力已经满足工作区、会话、消息和权限需求 |
+| CLI | 当前兼容执行基线，明确其与其他入口的能力差异 |
+
+接口名称不证明能力等效。仅启动 Desktop、深链接或调用相关 CLI 不算完成原生环境接入；降级必须明确。
 
 ## 9. Config 选型
 
@@ -470,7 +478,9 @@ TOML
 <workspace>/.baize/config.toml
 ```
 
-workspace 配置覆盖 global 配置。
+workspace 配置覆盖 global 配置是目标设计；当前 loader 支持范围以实现和 quickstart 为准。
+
+一份逻辑配置应复用项目 `AGENTS.md`、MCP、skills 与 provider 已有设置；映射时标明作用域、显式覆盖、支持项和未支持项。保留目标产品内置 prompt 和专属工具，不通过统一提示词替换原生执行机制。当前 TOML 配置不代表已实现跨产品配置同步。
 
 ## 10. 跨平台策略
 
@@ -496,6 +506,8 @@ WSL 优先原因：
 - coding agent、shell、git、包管理器和 dev tools 在 Linux 环境更一致；
 - OpenCode 官方也建议 Windows 用户使用 WSL 获得更好的文件系统性能、终端支持和开发工具兼容性；
 - Baize 的 workspace、agent subprocess、pty、shell policy 更容易统一。
+
+上述 WSL 优先针对 CLI 工作流，不能用它推定 Windows provider Desktop 的能力。原生 Desktop 接入需按产品支持的操作系统和接口独立验证。
 
 Windows native 需要额外处理：
 
@@ -569,7 +581,7 @@ Desktop future：
 
 - 先实现最小 daemon、workspace、ACP client 和 TUI shell；
 - adapter 做 capability-first，不追求一次性完美；
-- 对不确定 agent 能力用 CLI fallback；
+- 对不确定能力先记录缺口；CLI fallback 只在能力范围明确并符合用户选择时使用，不静默降级；
 - 用 schema 和事件模型控制复杂度。
 
 ### 13.2 ACP TypeScript SDK 不能直接复用
@@ -585,9 +597,9 @@ Desktop future：
 
 应对：
 
-- 首选 `opencode acp`；
-- native fallback 优先走 OpenCode server HTTP API；
-- 最后再走 CLI fallback。
+- 按所需 session、工具与配置能力比较原生 server API 与 ACP；
+- 能保留所需原生能力时使用对应接口，满足标准能力时复用 ACP；
+- CLI 提供兼容执行，并明确能力差异。
 
 ### 13.4 ACP 协议和 provider 支持仍在变化
 
@@ -625,19 +637,14 @@ crates/
   baize-cli/
 ```
 
-实现顺序：
+现有内核与 CLI 路径已经作为基础实现。后续优先顺序：
 
-```text
-1. daemon skeleton + config + event log
-2. workspace detection + git state
-3. ACP client abstraction
-4. provider registry
-5. one provider adapter
-6. TUI shell
-7. route decision records
-8. handoff summary pipeline
-9. quota/health observer
-```
+1. 同一 Baize session 的主对话、workspace 与原生会话引用；
+2. workspace + 近期相关对话的 A → B → A 接续；
+3. 有效约束、源不可用、目标失败与中断恢复的验证；
+4. 已有配置复用与通用配置映射的支持范围；
+5. provider Desktop 等原生环境的能力和回流接口验证；
+6. 再按实际需要演进 UI、额度观察和自动路由。
 
 ## 15. 已确认决策
 
@@ -646,7 +653,7 @@ crates/
 ```text
 Use Rust as Baize core language.
 Use ratatui for first TUI.
-Use Tauri for future desktop shell.
+Use Tauri for Baize's future desktop UI, independently of provider Desktop execution integration.
 Use TOML for configuration.
 Keep TypeScript only for optional frontend/prototype tooling.
 ```

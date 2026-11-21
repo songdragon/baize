@@ -28,7 +28,11 @@ struct FakeAgentExecutor {
 }
 
 impl AgentExecutor for FakeAgentExecutor {
-    fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+    fn run_prompt(
+        &self,
+        _request: AgentPromptRequest,
+        _event_sink: Option<&mut baize_adapters::AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
         Ok(self.result.clone())
     }
 }
@@ -40,7 +44,11 @@ struct RecordingAgentExecutor {
 }
 
 impl AgentExecutor for RecordingAgentExecutor {
-    fn run_prompt(&self, request: AgentPromptRequest) -> Result<AgentRunResult> {
+    fn run_prompt(
+        &self,
+        request: AgentPromptRequest,
+        _event_sink: Option<&mut baize_adapters::AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
         self.requests.lock().expect("requests").push(request);
         Ok(self.result.clone())
     }
@@ -50,7 +58,11 @@ impl AgentExecutor for RecordingAgentExecutor {
 struct FailingAgentExecutor;
 
 impl AgentExecutor for FailingAgentExecutor {
-    fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+    fn run_prompt(
+        &self,
+        _request: AgentPromptRequest,
+        _event_sink: Option<&mut baize_adapters::AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
         Err(anyhow::anyhow!("inner failure").context("outer failure"))
     }
 }
@@ -59,10 +71,80 @@ impl AgentExecutor for FailingAgentExecutor {
 struct RateLimitedAgentExecutor;
 
 impl AgentExecutor for RateLimitedAgentExecutor {
-    fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+    fn run_prompt(
+        &self,
+        _request: AgentPromptRequest,
+        _event_sink: Option<&mut baize_adapters::AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
         Err(anyhow::anyhow!(
             "429 Too Many Requests: rate limit exceeded for provider"
         ))
+    }
+}
+
+#[derive(Clone)]
+struct StreamingAgentExecutor;
+
+impl AgentExecutor for StreamingAgentExecutor {
+    fn run_prompt(
+        &self,
+        _request: AgentPromptRequest,
+        event_sink: Option<&mut baize_adapters::AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
+        let event = AgentExecutionEvent {
+            kind: AgentExecutionEventKind::Output,
+            text: Some("streamed output".to_string()),
+            raw: None,
+        };
+        if let Some(sink) = event_sink {
+            sink(event.clone());
+        }
+        Ok(AgentRunResult {
+            provider_id: ProviderId("codex".to_string()),
+            success: true,
+            exit_code: Some(0),
+            native_session_id: None,
+            events: vec![event],
+            stderr: String::new(),
+            error: None,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct SlowStreamingAgentExecutor {
+    emitted: Arc<std::sync::atomic::AtomicBool>,
+    completed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl AgentExecutor for SlowStreamingAgentExecutor {
+    fn run_prompt(
+        &self,
+        _request: AgentPromptRequest,
+        event_sink: Option<&mut baize_adapters::AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
+        let event = AgentExecutionEvent {
+            kind: AgentExecutionEventKind::Output,
+            text: Some("slow streamed output".to_string()),
+            raw: None,
+        };
+        if let Some(sink) = event_sink {
+            sink(event.clone());
+        }
+        self.emitted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        self.completed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(AgentRunResult {
+            provider_id: ProviderId("codex".to_string()),
+            success: true,
+            exit_code: Some(0),
+            native_session_id: None,
+            events: vec![event],
+            stderr: String::new(),
+            error: None,
+        })
     }
 }
 
@@ -281,6 +363,143 @@ async fn creates_workspace_session_prompt_and_events() {
 }
 
 #[tokio::test]
+async fn prompt_streaming_event_is_recorded_without_final_duplicate() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(StreamingAgentExecutor),
+    );
+    let app = router(state);
+    let workspace = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "path": project_dir.path(), "name": "stream-workspace" }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let workspace_id = workspace["workspace"]["id"].as_str().expect("workspace id");
+    let session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "workspace_id": workspace_id,
+                    "objective": "stream"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let session_id = session["session"]["id"].as_str().expect("session id");
+
+    let prompt = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "hello" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(prompt["turn_status"], "completed");
+
+    let events = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/sessions/{session_id}/events"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    let output_events = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .filter(|event| {
+            event["event_type"] == "session.agent.output"
+                && event["payload"]["text"] == "streamed output"
+        })
+        .count();
+    assert_eq!(output_events, 1);
+}
+
+#[tokio::test]
+async fn prompt_streaming_event_is_queryable_before_prompt_finishes() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let emitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(SlowStreamingAgentExecutor {
+            emitted: emitted.clone(),
+            completed: completed.clone(),
+        }),
+    );
+    let app = router(state);
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let prompt_app = app.clone();
+    let prompt_session_id = session_id.clone();
+    let prompt_task = tokio::spawn(async move {
+        json_response(
+            prompt_app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{prompt_session_id}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "prompt": "hello" }).to_string()))
+                .expect("request"),
+        )
+        .await
+    });
+
+    for _ in 0..50 {
+        if emitted.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(emitted.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!completed.load(std::sync::atomic::Ordering::SeqCst));
+
+    let history = json_response(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/events/history?session_id={session_id}&event_type=session.agent.output"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert!(history["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["payload"]["text"] == "slow streamed output"));
+
+    let prompt = prompt_task.await.expect("prompt task");
+    assert_eq!(prompt["turn_status"], "completed");
+    assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn runtime_status_reports_execution_policy_snapshot() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
@@ -469,6 +688,8 @@ async fn prompt_request_uses_workspace_command_policy() {
     );
     let app = router(state);
     let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+    let image_path = project_dir.path().join("screen.png");
+    fs::write(&image_path, b"fake image").expect("image");
 
     let prompt = json_response(
         app,
@@ -476,7 +697,13 @@ async fn prompt_request_uses_workspace_command_policy() {
             .method(Method::POST)
             .uri(format!("/sessions/{session_id}/prompt"))
             .header("content-type", "application/json")
-            .body(Body::from(json!({ "prompt": "edit files" }).to_string()))
+            .body(Body::from(
+                json!({
+                    "prompt": "edit files",
+                    "image_paths": [image_path.clone()]
+                })
+                .to_string(),
+            ))
             .expect("request"),
     )
     .await;
@@ -488,6 +715,7 @@ async fn prompt_request_uses_workspace_command_policy() {
         captured[0].execution_policy,
         AgentExecutionPolicy::AllowProject
     );
+    assert_eq!(captured[0].image_paths, vec![image_path]);
 }
 
 #[tokio::test]
@@ -834,15 +1062,168 @@ async fn prompt_includes_prior_session_messages_without_native_resume() {
 
     let captured = requests.lock().expect("requests");
     assert_eq!(captured.len(), 2);
-    assert_eq!(captured[0].prompt, "hello");
+    assert!(captured[0].prompt.contains("<current_user_request>\nhello"));
     assert_eq!(captured[1].provider_id.0, "antigravity");
     assert!(captured[1].session_id.is_none());
     assert!(captured[1]
         .prompt
-        .contains("<baize_session_context>\nuser: hello\nassistant: ready to help"));
+        .contains("<recent_conversation>\nuser: hello\nassistant: ready to help"));
     assert!(captured[1]
         .prompt
-        .contains("Current user request:\nwhat did I just say?"));
+        .contains("<current_user_request>\nwhat did I just say?"));
+    assert_eq!(second["context"]["strategy"], "FullContextPack");
+    assert!(second["context"]["included_sections"]
+        .as_array()
+        .expect("sections")
+        .iter()
+        .any(|section| section == "recent_conversation"));
+}
+
+#[tokio::test]
+async fn prompt_records_context_event() {
+    let (app, _data_dir, project_dir) = test_app();
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let response = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "hello" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+
+    assert!(
+        response["context"]["estimated_tokens"]
+            .as_u64()
+            .expect("tokens")
+            > 0
+    );
+    let events = json_response(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}/events"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert!(events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["event_type"] == "session.context.built"
+            && event["payload"]["context"]["provider_id"] == "codex"));
+}
+
+#[tokio::test]
+async fn prompt_switching_back_to_native_provider_sends_delta_context() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let project_dir = tempfile::tempdir().expect("project dir");
+    let store = EventStore::open(data_dir.path().join("baize.db")).expect("store");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let app = router(AppState::with_executor(
+        BaizeConfig::default(),
+        store,
+        Arc::new(RecordingAgentExecutor {
+            result: AgentRunResult {
+                provider_id: ProviderId("codex".to_string()),
+                success: true,
+                exit_code: Some(0),
+                native_session_id: Some("native_session_1".to_string()),
+                events: vec![AgentExecutionEvent {
+                    kind: AgentExecutionEventKind::Output,
+                    text: Some("provider output".to_string()),
+                    raw: None,
+                }],
+                stderr: String::new(),
+                error: None,
+            },
+            requests: requests.clone(),
+        }),
+    ));
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "prompt": "codex first" }).to_string()))
+            .expect("request"),
+    )
+    .await;
+    json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "prompt": "opencode turn",
+                    "provider_id": "opencode"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    let response = json_response(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "prompt": "back to codex",
+                    "provider_id": "codex"
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(response["context"]["strategy"], "CrossProviderDelta");
+    let captured = requests.lock().expect("requests");
+    assert_eq!(captured.len(), 3);
+    assert_eq!(captured[2].provider_id.0, "codex");
+    assert_eq!(captured[2].session_id.as_deref(), Some("native_session_1"));
+    assert!(captured[2].prompt.contains("<baize_context>"));
+    assert!(captured[2].prompt.contains("opencode turn"));
+    assert!(captured[2]
+        .prompt
+        .contains("<current_user_request>\nback to codex"));
+}
+
+#[tokio::test]
+async fn context_preview_returns_strategy_and_safe_prompt_preview() {
+    let (app, _data_dir, project_dir) = test_app();
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+
+    let preview = json_response(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/sessions/{session_id}/context-preview?provider_id=antigravity&prompt=continue"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(preview["context"]["provider_id"], "antigravity");
+    assert_eq!(preview["context"]["strategy"], "FullContextPack");
+    assert!(preview["prompt_preview"]
+        .as_str()
+        .expect("preview")
+        .contains("<current_user_request> continue"));
 }
 
 #[tokio::test]
@@ -1843,7 +2224,11 @@ struct RecoverableAgentExecutor {
 }
 
 impl AgentExecutor for RecoverableAgentExecutor {
-    fn run_prompt(&self, _request: AgentPromptRequest) -> Result<AgentRunResult> {
+    fn run_prompt(
+        &self,
+        _request: AgentPromptRequest,
+        _event_sink: Option<&mut baize_adapters::AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
         if self.fail_count.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             self.fail_count
                 .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -2081,6 +2466,60 @@ async fn prompt_rejects_provider_without_runtime_support() {
     let route_items = routes["routes"].as_array().expect("routes");
     assert_eq!(route_items.len(), 1);
     assert_eq!(route_items[0]["selected_provider_id"], "codex");
+}
+
+#[tokio::test]
+async fn prompt_rejects_image_attachment_for_provider_without_file_support() {
+    let (app, _data_dir, project_dir) = test_app();
+    let (_, session_id) = setup_workspace_and_session(&app, &project_dir).await;
+    let image_path = project_dir.path().join("screen.png");
+    fs::write(&image_path, b"fake image").expect("image");
+
+    let (status, prompt) = json_response_with_status(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "prompt": "describe image",
+                    "provider_id": "antigravity",
+                    "image_paths": [image_path]
+                })
+                .to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        prompt["error"],
+        "provider antigravity does not support image attachments"
+    );
+
+    let session = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(session["session"]["active_provider_id"], "codex");
+
+    let routes = json_response(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}/routes"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(routes["routes"].as_array().expect("routes").len(), 1);
 }
 
 #[tokio::test]

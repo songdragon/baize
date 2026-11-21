@@ -1,241 +1,115 @@
 # Baize Vision
 
+更新：2026-11-21。本文描述产品方向；当前实现与待验证能力见 [MVP 计划](mvp-implementation-plan.md)。
+
 ## 一句话愿景
 
-Baize 是一个本地 workspace shell，用统一界面调度多个已安装的 coding agent，让用户在同一个代码工作区里持续完成任务，而不再被模型配额、rate limit、上下文丢失和手动切换打断。
+Baize 提供一段持续的开发会话，让用户在同一个 Baize session 中切换实际执行的 coding agent，结合当前 workspace 与近期相关对话继续工作，并尽可能保留目标 agent 的原生执行能力。
 
-## 背景
+## 背景与用户问题
 
-越来越多开发者同时使用 Claude Code、Codex、Gemini CLI、Cline、Aider 等 coding agent。它们各有长处，也各有配额、延迟、上下文窗口和交互习惯。
+用户已经安装、配置并使用多个 coding agent。不同产品的模型、内置 prompt、工具和执行机制各有特点，用户可能因为能力、效果、额度或可用性切换执行者。
 
-当前问题不是“没有足够强的模型”，而是：
+切换时的主要负担是：
 
-- agent 之间缺少统一工作区状态；
-- 用户需要手动判断哪个 agent 还能用；
-- quota 或 rate limit 到来时，任务容易中断；
-- 切换 agent 时，需要复制 prompt、解释上下文、搬运 diff；
-- 多个 agent 修改同一个 repo 时，缺少统一追踪与交接。
+- 在不同会话之间重新描述正在做的事；
+- 整理代码、文档、diff、验证结果与近期讨论；
+- 再次解释已经纠正过的理解和仍然有效的约束；
+- 切回原 agent 时，补充它离开期间发生的变化；
+- 为统一入口重复配置 agent，或损失原生产品已有的工具能力。
 
-Baize 的目标是把这些 agent 编织成一个稳定的本地工作层。
+Baize 最初基于 CLI，是当时接入 coding agent 的现实起点。随着 Desktop 产品提供更完整的执行能力，CLI 不应成为产品边界。
 
-## 命名：为什么是白泽
+## 核心价值：Baize session 持续
 
-“白泽”是中国古代传说中通晓万物、能识别各种异类并向人说明其特性的神兽。这个名字适合 Baize，因为这个项目的核心并不是制造又一个更强的 agent，而是帮助用户理解、辨认、调度和驯服已经存在的多个 coding agent。
+用户面对的是同一段开发会话，执行者可以改变：
 
-在产品语义上，白泽对应几层含义：
+- Baize session 的身份、主对话、工作目标和 workspace 关联保持连续；
+- 各 provider 的原生 session 作为下层执行引用管理；
+- 切换 agent 不要求用户另开工作会话或手工复制背景；
+- 同 provider 可原生续接；切换或切回时，补充目标 agent 尚不知道的相关信息；
+- 讨论可以先于明确任务或正式文档，不要求先创建 issue、角色或流程。
 
-- 识别：识别不同 agent 的能力边界、健康状态、quota 状态和适用任务；
-- 指引：在复杂任务中给出可解释的 route decision，而不是让用户盲选模型；
-- 守护：在 quota、rate limit、上下文漂移和多 agent 修改冲突出现前提醒用户；
-- 交接：在一个 agent 无法继续时，把任务状态清楚交给下一个 agent；
-- 知万物而不替万物：Baize 不取代 Claude Code、Codex、Gemini CLI、Cline 等工具，而是在它们之上提供统一的认知层和调度层。
+统一配置、路由、健康检查、额度观察和交接摘要都服务于这一连续体验，不分别成为使用前提。
 
-因此，“白泽”既是项目名，也是应用名。英文写作 `Baize`，保留中文意象，同时便于作为 CLI、包名、进程名和产品标识使用。
+## 原生执行能力是接入目标
 
-## 产品定位
+这里的 agent 指实际执行环境，而不只是模型名称或可执行文件。
 
-Baize 不是通用 LLM API router，也不是又一个独立 coding agent。
+| 能力 | Baize 的目标 |
+|---|---|
+| 内置 prompt 与执行机制 | 保留目标产品的原生行为，不用统一提示词抹平各家的差异 |
+| MCP、skills 与项目指令 | 复用已配置能力，支持用户通用要求在不同 agent 中生效 |
+| Computer use、browser use 等工具 | 根据实际执行入口验证可用性，不把同品牌 CLI 与 Desktop 默认视为等价 |
+| 原生 session 与权限交互 | 通过支持的接口续接、观察和交互，明确仍需在哪个入口处理 |
+| 不同执行入口 | 支持 CLI、原生服务，以及具备可用接口的 provider Desktop 环境；ACP 等协议用于连接相应入口 |
 
-它更像：
+接入优先级由能力完整性与接口可控性共同决定。官方原生接口能保留更多目标能力时优先使用；ACP 能满足需求时复用标准协议；CLI 提供兼容执行路径。实际能力取决于 provider、版本、配置、授权与具体入口。
 
-```text
-Workspace-native agent supervisor
-```
+启动 Desktop 窗口、打开深链接或调用同品牌 CLI，不足以证明工作已经在 Desktop 的能力环境中执行。Baize 自身的 Desktop UI 与 provider Desktop 执行接入是两个独立问题。
 
-也可以理解为：
+## 切换上下文：workspace 与近期对话共同承接
 
-```text
-Agent runtime load balancer for local coding workspaces
-```
+| 来源 | 承担的作用 |
+|---|---|
+| Workspace、代码、文档、Git、命令与验证结果 | 反映当前可检查的工作成果和执行事实 |
+| 近期相关原始对话 | 保留正在讨论的问题、用户修正和下一步请求 |
+| 仍然有效的较早约束 | 避免只取近期消息而遗漏重要要求 |
+| 按需生成的摘要 | 在上下文预算不足或历史较长时补充信息，不替代原始依据 |
 
-它负责：
+历史用于保留讨论，不要求全量塞进每次 prompt，也不要求导入各家私有 session 文件。摘要是辅助机制，不要求原 agent 在额度耗尽或失联后仍能先生成交接材料。
 
-- 观察每个 agent 的健康状态、配额状态和近期表现；
-- 根据任务类型、当前上下文、quota 和用户偏好选择合适 agent；
-- 在一个任务内尽量保持 sticky routing；
-- 当必须切换时，生成可靠的 handoff summary；
-- 维护独立于任何单一 agent 的 workspace memory；
-- 给用户一个统一、可解释、可恢复的工作体验。
+Baize 应区分用户要求、agent 建议、已确认结论和已失效内容。切回旧 agent 时，应同时检查新的对话增量和当前 workspace，不能因为它有原生 session 就假定已经知道最新状态。
 
-## 核心原则
+“无缝切换”是减少重述、重复尝试和工作中断的体验目标，不承诺跨产品转移内部工具状态、进程、缓存或全部原生能力。存在缺口时应说明实际边界。
 
-### 1. Workspace first
+## 统一配置：基础体验
 
-Baize 的中心不是模型，也不是聊天窗口，而是本地 workspace。
+用户可以维护一份通用要求，由 Baize 自动在已支持的 agent 中应用，不需要逐家手工复制。应先复用项目已有的 `AGENTS.md`、MCP、skills 与 provider 配置，避免要求用户重复创建同义的角色和技能。
 
-所有状态都围绕工作区组织：
+配置支持需要明确：
 
-- repo path；
-- branch；
-- file changes；
-- command history；
-- test results；
-- task objective；
-- agent sessions；
-- handoff notes。
+- 哪些通用项目已生效，哪些需要映射或当前不支持；
+- 项目要求与用户显式覆盖的作用范围；
+- 目标 agent 原生 prompt、专属工具和配置仍由它自己的执行环境提供；
+- 配置更新不会被描述成可以自动让所有入口拥有相同能力。
 
-### 2. Sticky before clever
+统一配置有用，但其价值可被现有项目配置机制部分覆盖。Baize 的主要验收对象仍是 session 中的连续工作。
 
-路由策略优先保证上下文稳定，而不是每轮都寻找理论最优 agent。
+## 默认使用流程
 
-默认策略：
+1. 用户选择 workspace，开始或恢复一个 Baize session。
+2. 用户在主对话中讨论、澄清、编码和反馈；当前 agent 与实际执行入口可见。
+3. 用户按能力、效果或可用性选择更换 agent；额度告警只是其中一种触发原因。
+4. Baize 在可确认的回合边界准备切换，读取当前 workspace，选择近期相关对话与有效约束。
+5. 目标 agent 在自己的执行环境中接续；Baize 记录来源、接续状态和能力差异。
+6. 用户仍在原 Baize session 中继续，切回原 agent 时补足新增状态。
+7. 用户检查 diff、文档和验证结果，再决定继续、完成或另开工作会话。
 
-```text
-同一任务优先继续使用同一个 agent。
-只有 quota、rate limit、health failure 或用户明确要求时才迁移。
-```
+不同目标可以有不同 Baize session。同一 session 的持续不意味着一个项目永远使用无限增长的上下文，也不要求多个 agent 并发修改工作区。
 
-### 3. Handoff is a first-class artifact
+## 产品形态与实现边界
 
-agent 切换不是简单把聊天历史转发给下一个 agent。
+产品前台以 Baize session、当前 workspace 和正在执行的 agent 为中心。默认保留一条主对话，执行详情和原生工具交互按需要展开。无需先引入复杂任务管理、Agent 名册或决策卡片。
 
-Baize 应该生成结构化交接材料：
+当前工程使用 Rust daemon、HTTP/SSE 和薄 TUI。TUI 是第一阶段验证入口，不证明 CLI 与 Desktop 能力等价。未来 Baize 的界面形态可以演进，核心会话状态与 agent 接入应继续独立于 UI。
 
-- 当前目标；
-- 已完成工作；
-- 未完成计划；
-- 修改文件；
-- 当前 diff 摘要；
-- 已运行命令；
-- 测试结果；
-- 失败原因；
-- 下一步建议；
-- 用户偏好与约束。
+首要用户是已经使用多个 coding agent 的个人开发者。团队协作、云同步和自治编排不作为第一阶段连续会话成立的前提。
 
-### 4. Explain every important route
+## 命名
 
-用户需要知道为什么系统选择、继续或切换某个 agent。
-
-例如：
-
-```text
-继续使用 Claude，因为当前任务仍在同一 refactor session 内，quota 充足。
-```
-
-或：
-
-```text
-建议切换到 Codex，因为 Claude quota 已低于阈值，当前任务进入测试修复阶段。
-```
-
-### 5. Prefer supervision over replacement
-
-Baize 不试图替代 Claude Code、Codex、Gemini CLI、Cline 等工具。
-
-它应该复用用户已经安装、配置和信任的 agent，并在它们之上提供：
-
-- 调度；
-- 状态；
-- 记忆；
-- 恢复；
-- 交接；
-- 风险控制。
-
-## 目标用户
-
-### 个人开发者
-
-已经在日常开发中使用多个 coding agent，希望减少切换成本和上下文损耗。
-
-### 高频 agent 用户
-
-经常遇到 quota、rate limit、token exhaustion，希望任务不中断。
-
-### 小型工程团队
-
-希望在统一工作区内观察 agent 修改、记录决策、降低多人或多 agent 协作风险。
-
-### AI tooling power users
-
-愿意配置 provider、policy 和 routing profile，追求更高的开发吞吐。
-
-## 最终用户视角的理想效果
-
-用户打开 Baize，选择一个本地 repo，然后直接描述任务：
-
-```text
-帮我把这个认证模块重构成 provider-based 架构，并补测试。
-```
-
-Baize 自动判断：
-
-- 当前 repo 类型；
-- 最近修改文件；
-- 可用 agent；
-- agent quota；
-- 任务类型；
-- 是否存在未完成 session。
-
-然后选择一个 agent 开始工作，并在 UI 中显示：
-
-```text
-Using Claude Code
-Reason: large refactor, current quota healthy, no active conflicting session.
-```
-
-一段时间后，如果 Claude quota 接近阈值，Baize 不会突然静默切换，而是提示：
-
-```text
-Claude quota is low. This task is now mostly test/debug work.
-Recommended: continue in Codex.
-
-[Continue Claude] [Switch to Codex] [Autopilot this task]
-```
-
-用户选择切换后，Baize 自动生成 handoff：
-
-```text
-Codex 接手时已经知道：
-- 哪些文件改过；
-- 为什么这样改；
-- 哪些测试失败；
-- 下一步应该修哪里；
-- 用户要求不要改公共 API。
-```
-
-用户感受到的是：
-
-```text
-我一直在同一个 workspace 里推进任务。
-背后换过 agent，但任务没有断。
-```
-
-## 长期形态
-
-成熟后的 Baize 可以包含：
-
-- 本地 daemon；
-- desktop 或 web workspace UI；
-- CLI；
-- agent adapter SDK；
-- policy/routing engine；
-- quota observer；
-- workspace memory store；
-- diff/checkpoint manager；
-- handoff generator；
-- provider health dashboard；
-- team audit log；
-- plugin marketplace for adapters；
-- IDE integrations。
-
-## 非目标
-
-短期内 Baize 不追求：
-
-- 替代现有 coding agent；
-- 直接训练或托管模型；
-- 做成纯 API gateway；
-- 完美抽象所有 agent 能力；
-- 对 provider quota 做不可靠的精确承诺；
-- 在用户不知情的情况下执行高风险自动切换。
+“白泽”对应识别不同 agent 的能力、说明可用性与边界，并帮助用户保持工作的连续。Baize 复用用户已经配置和信任的执行工具。
 
 ## 成功标准
 
-Baize 成功的标志不是“支持多少模型”，而是：
+| 场景 | 验收重点 |
+|---|---|
+| A → B 接力 | 同一个 Baize session，近期讨论与当前代码状态都能承接 |
+| A → B → A | A 收到离开期间的新约束、新对话与工作区变化 |
+| 原 agent 不可用 | 不依赖它再生成摘要即可准备交接 |
+| 配置复用 | 支持项可确认生效，不需要重复配置同义角色 |
+| 原生能力 | 声明的 prompt、MCP、skills、computer/browser use 等在所选入口实际可用 |
+| 中断恢复 | 会话和已知执行结果可追踪；结果不确定时先核对，不盲目重跑 |
+| 开发效果 | 对比用户现有流程，减少重述和纠偏，关键工具能力和产物质量不下降 |
 
-- 用户能在一个 UI 里稳定完成跨 agent 的 coding task；
-- quota/rate limit 不再导致任务突然中断；
-- agent 切换后的上下文恢复质量足够好；
-- 用户能理解每次 route decision；
-- workspace diff、命令和测试结果可追踪；
-- 多 agent 修改同一 repo 时风险可控。
+支持 provider 的数量、收集历史的规模和路由规则的复杂度，不作为上述体验已经成立的证据。

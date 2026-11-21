@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
 use baize_core::{
-    HealthStatus, ProviderCapabilities, ProviderHealth, ProviderId, ProviderKind, ProviderProfile,
-    ProviderTransport,
+    HealthStatus, PreferredContextFormat, ProviderCapabilities, ProviderContextProfile,
+    ProviderHealth, ProviderId, ProviderKind, ProviderProfile, ProviderTransport,
+    TokenBudgetConfidence, TokenBudgetSource,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
-use wait_timeout::ChildExt;
 
 const ANTIGRAVITY_COMMAND: &str = "/Users/songdragon/.local/bin/agy";
 
@@ -88,6 +91,7 @@ pub struct AgentPromptRequest {
     pub prompt: String,
     pub cwd: PathBuf,
     pub session_id: Option<String>,
+    pub image_paths: Vec<PathBuf>,
     pub timeout_seconds: Option<u64>,
     pub execution_policy: AgentExecutionPolicy,
 }
@@ -127,6 +131,8 @@ pub struct AgentExecutionEvent {
     pub raw: Option<Value>,
 }
 
+pub type AgentEventSink<'a> = dyn FnMut(AgentExecutionEvent) + Send + 'a;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentExecutionEventKind {
     Output,
@@ -161,6 +167,7 @@ struct CommandRunOutput {
     output: Output,
     timed_out: bool,
     timeout: Duration,
+    events: Vec<AgentExecutionEvent>,
 }
 
 pub fn default_provider_profiles() -> Vec<ProviderProfile> {
@@ -269,6 +276,215 @@ pub fn default_provider_profiles() -> Vec<ProviderProfile> {
     ]
 }
 
+pub fn default_provider_context_profiles() -> Vec<ProviderContextProfile> {
+    vec![
+        ProviderContextProfile {
+            provider_id: ProviderId("codex".to_string()),
+            command: "codex".to_string(),
+            transport: "cli".to_string(),
+            prompt_entrypoint: "codex exec [PROMPT]".to_string(),
+            supports_native_resume: true,
+            native_resume_arg: Some("codex exec resume <SESSION_ID> [PROMPT]".to_string()),
+            native_session_id_capture: Some("JSONL thread.started.thread_id".to_string()),
+            supports_structured_output: true,
+            structured_output_format: Some(
+                "codex exec --json JSONL events; --output-schema for final JSON".to_string(),
+            ),
+            supports_acp: false,
+            supports_mcp: true,
+            supports_workspace_arg: true,
+            workspace_arg: Some("--cd <DIR>; --add-dir <DIR>".to_string()),
+            supports_file_attachment: true,
+            file_arg: Some("--image <FILE>".to_string()),
+            supports_conversation_export: false,
+            supports_conversation_import: false,
+            context_window_tokens: None,
+            default_context_budget_tokens: 24_000,
+            reserved_output_tokens: 4_000,
+            token_budget_source: TokenBudgetSource::ConfigDefault,
+            token_budget_confidence: TokenBudgetConfidence::Low,
+            preferred_context_format: PreferredContextFormat::XmlTaggedMarkdown,
+            same_provider_resume_strategy: "native resume; avoid duplicate Baize history"
+                .to_string(),
+            cross_provider_handoff_strategy: "Baize delta context plus current request".to_string(),
+            risk_level: "medium".to_string(),
+            workspace_exposure_notes:
+                "Codex can inspect/edit the selected workspace according to sandbox settings."
+                    .to_string(),
+            last_verified_at: "2026-07-09".to_string(),
+            source_refs: vec![
+                "codex --help".to_string(),
+                "codex exec --help".to_string(),
+                "codex exec resume --help".to_string(),
+                "https://developers.openai.com/codex/cli/reference".to_string(),
+                "https://developers.openai.com/codex/noninteractive".to_string(),
+                "https://developers.openai.com/codex/mcp".to_string(),
+            ],
+        },
+        ProviderContextProfile {
+            provider_id: ProviderId("antigravity".to_string()),
+            command: ANTIGRAVITY_COMMAND.to_string(),
+            transport: "cli".to_string(),
+            prompt_entrypoint: "agy --print <PROMPT>".to_string(),
+            supports_native_resume: true,
+            native_resume_arg: Some("--conversation <ID>; --continue".to_string()),
+            native_session_id_capture: None,
+            supports_structured_output: false,
+            structured_output_format: None,
+            supports_acp: false,
+            supports_mcp: false,
+            supports_workspace_arg: true,
+            workspace_arg: Some("--add-dir <DIR>; --project <ID>; --new-project".to_string()),
+            supports_file_attachment: false,
+            file_arg: None,
+            supports_conversation_export: false,
+            supports_conversation_import: false,
+            context_window_tokens: None,
+            default_context_budget_tokens: 16_000,
+            reserved_output_tokens: 4_000,
+            token_budget_source: TokenBudgetSource::ConfigDefault,
+            token_budget_confidence: TokenBudgetConfidence::Low,
+            preferred_context_format: PreferredContextFormat::XmlTaggedMarkdown,
+            same_provider_resume_strategy:
+                "native conversation resume when a conversation id is captured; otherwise Baize pack"
+                    .to_string(),
+            cross_provider_handoff_strategy: "Baize delta context plus current request".to_string(),
+            risk_level: "medium".to_string(),
+            workspace_exposure_notes:
+                "Print mode can run agent tools; use sandbox/permission settings for protection."
+                    .to_string(),
+            last_verified_at: "2026-07-09".to_string(),
+            source_refs: vec![
+                "/Users/songdragon/.local/bin/agy --help".to_string(),
+                "/Users/songdragon/.gemini/antigravity-cli/builtin/skills/antigravity_guide/references/cli.md".to_string(),
+                "https://antigravity.google/docs/cli/reference".to_string(),
+                "https://antigravity.google/docs/cli/features".to_string(),
+            ],
+        },
+        ProviderContextProfile {
+            provider_id: ProviderId("opencode".to_string()),
+            command: "opencode".to_string(),
+            transport: "cli/acp".to_string(),
+            prompt_entrypoint: "opencode run [message..]".to_string(),
+            supports_native_resume: true,
+            native_resume_arg: Some("opencode run --session <ID>; --continue".to_string()),
+            native_session_id_capture: Some("JSON events/session output; exact field parser-owned".to_string()),
+            supports_structured_output: true,
+            structured_output_format: Some("opencode run --format json raw JSON events".to_string()),
+            supports_acp: true,
+            supports_mcp: true,
+            supports_workspace_arg: true,
+            workspace_arg: Some("--dir <DIR>; opencode acp --cwd <DIR>".to_string()),
+            supports_file_attachment: true,
+            file_arg: Some("--file <FILE>".to_string()),
+            supports_conversation_export: true,
+            supports_conversation_import: true,
+            context_window_tokens: None,
+            default_context_budget_tokens: 16_000,
+            reserved_output_tokens: 4_000,
+            token_budget_source: TokenBudgetSource::ConfigDefault,
+            token_budget_confidence: TokenBudgetConfidence::Low,
+            preferred_context_format: PreferredContextFormat::XmlTaggedMarkdown,
+            same_provider_resume_strategy: "native --session/--continue; avoid duplicate Baize history"
+                .to_string(),
+            cross_provider_handoff_strategy: "Baize delta context plus current request".to_string(),
+            risk_level: "medium".to_string(),
+            workspace_exposure_notes:
+                "OpenCode can run with auto approvals; ACP mode communicates over nd-JSON."
+                    .to_string(),
+            last_verified_at: "2026-07-09".to_string(),
+            source_refs: vec![
+                "opencode --help".to_string(),
+                "opencode run --help".to_string(),
+                "opencode acp --help".to_string(),
+                "https://opencode.ai/docs/cli/".to_string(),
+                "https://opencode.ai/docs/acp/".to_string(),
+            ],
+        },
+        ProviderContextProfile {
+            provider_id: ProviderId("copilot".to_string()),
+            command: "copilot".to_string(),
+            transport: "cli/acp".to_string(),
+            prompt_entrypoint: "copilot -p <PROMPT>".to_string(),
+            supports_native_resume: true,
+            native_resume_arg: Some("interactive/session resume; exact CLI flag unknown locally".to_string()),
+            native_session_id_capture: None,
+            supports_structured_output: false,
+            structured_output_format: None,
+            supports_acp: true,
+            supports_mcp: true,
+            supports_workspace_arg: false,
+            workspace_arg: None,
+            supports_file_attachment: false,
+            file_arg: None,
+            supports_conversation_export: true,
+            supports_conversation_import: false,
+            context_window_tokens: None,
+            default_context_budget_tokens: 16_000,
+            reserved_output_tokens: 4_000,
+            token_budget_source: TokenBudgetSource::ConfigDefault,
+            token_budget_confidence: TokenBudgetConfidence::Low,
+            preferred_context_format: PreferredContextFormat::XmlTaggedMarkdown,
+            same_provider_resume_strategy:
+                "native session/compaction if available; Baize pack when local CLI support is unknown"
+                    .to_string(),
+            cross_provider_handoff_strategy: "Baize delta context plus current request".to_string(),
+            risk_level: "medium".to_string(),
+            workspace_exposure_notes:
+                "Copilot CLI supports local tools, ACP, MCP, session data, and transcript export."
+                    .to_string(),
+            last_verified_at: "2026-07-09".to_string(),
+            source_refs: vec![
+                "copilot --help: command not found locally".to_string(),
+                "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference".to_string(),
+                "https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server".to_string(),
+                "https://docs.github.com/en/copilot/concepts/agents/copilot-cli/context-management".to_string(),
+                "https://docs.github.com/en/copilot/concepts/context/mcp".to_string(),
+            ],
+        },
+        ProviderContextProfile {
+            provider_id: ProviderId("gemini".to_string()),
+            command: "gemini".to_string(),
+            transport: "legacy diagnostic".to_string(),
+            prompt_entrypoint: "disabled".to_string(),
+            supports_native_resume: false,
+            native_resume_arg: None,
+            native_session_id_capture: None,
+            supports_structured_output: false,
+            structured_output_format: None,
+            supports_acp: false,
+            supports_mcp: false,
+            supports_workspace_arg: false,
+            workspace_arg: None,
+            supports_file_attachment: false,
+            file_arg: None,
+            supports_conversation_export: false,
+            supports_conversation_import: false,
+            context_window_tokens: None,
+            default_context_budget_tokens: 8_000,
+            reserved_output_tokens: 2_000,
+            token_budget_source: TokenBudgetSource::ConfigDefault,
+            token_budget_confidence: TokenBudgetConfidence::Low,
+            preferred_context_format: PreferredContextFormat::XmlTaggedMarkdown,
+            same_provider_resume_strategy: "disabled; migrate to antigravity".to_string(),
+            cross_provider_handoff_strategy: "disabled; migrate to antigravity".to_string(),
+            risk_level: "high".to_string(),
+            workspace_exposure_notes: "Gemini prompt execution is disabled in Baize.".to_string(),
+            last_verified_at: "2026-07-09".to_string(),
+            source_refs: vec![
+                "Gemini CLI runtime disabled in Baize; individual accounts migrate to Antigravity"
+                    .to_string(),
+            ],
+        },
+    ]
+}
+
+pub fn provider_context_profile(provider_id: &ProviderId) -> Option<ProviderContextProfile> {
+    default_provider_context_profiles()
+        .into_iter()
+        .find(|profile| profile.provider_id.0 == provider_id.0)
+}
+
 pub fn check_provider(profile: &ProviderProfile) -> ProviderHealth {
     let command = profile.transports.first().map(command_for_transport);
     let Some(command) = command else {
@@ -368,14 +584,25 @@ pub fn is_prompt_runtime_supported(provider_id: &ProviderId) -> bool {
     prompt_runtime_supported(provider_id)
 }
 
+pub fn supports_file_attachment(provider_id: &ProviderId) -> bool {
+    provider_context_profile(provider_id).is_some_and(|profile| profile.supports_file_attachment)
+}
+
 pub fn run_agent_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
+    run_agent_prompt_streaming(request, None)
+}
+
+pub fn run_agent_prompt_streaming(
+    request: AgentPromptRequest,
+    event_sink: Option<&mut AgentEventSink<'_>>,
+) -> Result<AgentRunResult> {
     match request.provider_id.0.as_str() {
-        "antigravity" => run_antigravity_prompt(request),
-        "codex" => run_codex_prompt(request),
+        "antigravity" => run_antigravity_prompt(request, event_sink),
+        "codex" => run_codex_prompt(request, event_sink),
         "gemini" => anyhow::bail!(
             "gemini prompt execution is disabled because Gemini CLI is no longer supported for individual Code Assist accounts; use antigravity instead"
         ),
-        "opencode" => run_opencode_prompt(request),
+        "opencode" => run_opencode_prompt(request, event_sink),
         other => anyhow::bail!("provider execution is not implemented for {other}"),
     }
 }
@@ -398,6 +625,7 @@ pub fn smoke_provider(
         prompt: options.prompt,
         cwd: options.cwd,
         session_id: None,
+        image_paths: Vec::new(),
         timeout_seconds: options.timeout_seconds,
         execution_policy: AgentExecutionPolicy::Deny,
     };
@@ -508,6 +736,10 @@ pub fn build_codex_args(request: &AgentPromptRequest) -> Vec<String> {
         args.push("resume".to_string());
         args.push(session_id.clone());
     }
+    for image_path in &request.image_paths {
+        args.push("--image".to_string());
+        args.push(image_path.to_string_lossy().to_string());
+    }
     args.push(request.prompt.clone());
     args
 }
@@ -527,33 +759,37 @@ pub fn build_opencode_args(request: &AgentPromptRequest) -> Vec<String> {
     if matches!(request.execution_policy, AgentExecutionPolicy::AllowProject) {
         args.push("--auto".to_string());
     }
+    for image_path in &request.image_paths {
+        args.push("--file".to_string());
+        args.push(image_path.to_string_lossy().to_string());
+    }
     args.push(request.prompt.clone());
     args
 }
 
+pub fn parse_stream_json_line(line: &str) -> Option<AgentExecutionEvent> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let text = find_event_text(&value);
+    let kind = if looks_like_tool_call(&value) {
+        AgentExecutionEventKind::ToolCall
+    } else if text.is_some() {
+        AgentExecutionEventKind::Output
+    } else {
+        AgentExecutionEventKind::Raw
+    };
+    Some(AgentExecutionEvent {
+        text,
+        kind,
+        raw: Some(value),
+    })
+}
+
 pub fn parse_stream_json_lines(raw: &str) -> Vec<AgentExecutionEvent> {
-    raw.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let value = serde_json::from_str::<Value>(line).ok()?;
-            let text = find_event_text(&value);
-            let kind = if looks_like_tool_call(&value) {
-                AgentExecutionEventKind::ToolCall
-            } else if text.is_some() {
-                AgentExecutionEventKind::Output
-            } else {
-                AgentExecutionEventKind::Raw
-            };
-            Some(AgentExecutionEvent {
-                text,
-                kind,
-                raw: Some(value),
-            })
-        })
-        .collect()
+    raw.lines().filter_map(parse_stream_json_line).collect()
 }
 
 pub fn extract_native_session_id(raw: &str) -> Option<String> {
@@ -604,12 +840,16 @@ pub fn classify_agent_error(text: &str, source: AgentErrorSource) -> Option<Agen
     })
 }
 
-fn run_antigravity_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
-    let run = run_command_with_timeout(
+fn run_antigravity_prompt(
+    request: AgentPromptRequest,
+    event_sink: Option<&mut AgentEventSink<'_>>,
+) -> Result<AgentRunResult> {
+    let run = run_command_with_timeout_streaming(
         ANTIGRAVITY_COMMAND,
         &build_antigravity_args(&request),
         &request.cwd,
         timeout_for(&request),
+        event_sink,
     )
     .with_context(|| "failed to run agy prompt")?;
     Ok(agent_result_from_command_run(
@@ -619,12 +859,16 @@ fn run_antigravity_prompt(request: AgentPromptRequest) -> Result<AgentRunResult>
     ))
 }
 
-fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
-    let run = run_command_with_timeout(
+fn run_codex_prompt(
+    request: AgentPromptRequest,
+    event_sink: Option<&mut AgentEventSink<'_>>,
+) -> Result<AgentRunResult> {
+    let run = run_command_with_timeout_streaming(
         "codex",
         &build_codex_args(&request),
         &request.cwd,
         timeout_for(&request),
+        event_sink,
     )
     .with_context(|| "failed to run codex prompt")?;
     Ok(agent_result_from_command_run(
@@ -634,12 +878,16 @@ fn run_codex_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
     ))
 }
 
-fn run_opencode_prompt(request: AgentPromptRequest) -> Result<AgentRunResult> {
-    let run = run_command_with_timeout(
+fn run_opencode_prompt(
+    request: AgentPromptRequest,
+    event_sink: Option<&mut AgentEventSink<'_>>,
+) -> Result<AgentRunResult> {
+    let run = run_command_with_timeout_streaming(
         "opencode",
         &build_opencode_args(&request),
         &request.cwd,
         timeout_for(&request),
+        event_sink,
     )
     .with_context(|| "failed to run opencode prompt")?;
     Ok(agent_result_from_command_run(
@@ -671,7 +919,11 @@ fn agent_result_from_command_run(
         classify_agent_error(&stderr, AgentErrorSource::Stderr)
     };
     let native_session_id = extract_native_session_id(&stdout);
-    let events = parse_agent_events(&provider_id, &stdout);
+    let events = if run.events.is_empty() {
+        parse_agent_events(&provider_id, &stdout)
+    } else {
+        run.events
+    };
     AgentRunResult {
         provider_id,
         success,
@@ -726,11 +978,22 @@ fn timeout_for(request: &AgentPromptRequest) -> Duration {
     Duration::from_secs(request.timeout_seconds.unwrap_or(120))
 }
 
+#[cfg(test)]
 fn run_command_with_timeout(
     command: &str,
     args: &[String],
     cwd: &PathBuf,
     timeout: Duration,
+) -> Result<CommandRunOutput> {
+    run_command_with_timeout_streaming(command, args, cwd, timeout, None)
+}
+
+fn run_command_with_timeout_streaming(
+    command: &str,
+    args: &[String],
+    cwd: &PathBuf,
+    timeout: Duration,
+    mut event_sink: Option<&mut AgentEventSink<'_>>,
 ) -> Result<CommandRunOutput> {
     let mut child = Command::new(command)
         .args(args)
@@ -740,24 +1003,86 @@ fn run_command_with_timeout(
         .spawn()
         .with_context(|| format!("failed to spawn {command}"))?;
 
-    if child.wait_timeout(timeout)?.is_none() {
-        let _ = child.kill();
-        let output = child.wait_with_output()?;
-        return Ok(CommandRunOutput {
-            output,
-            timed_out: true,
-            timeout,
-        });
-    }
+    let stdout = child
+        .stdout
+        .take()
+        .context("spawned command did not expose stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("spawned command did not expose stderr")?;
+    let (stdout_sender, stdout_receiver) = mpsc::channel::<String>();
+    let stdout_thread = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if stdout_sender.send(line.clone()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let stderr_thread = thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut stderr = Vec::new();
+        let _ = reader.read_to_end(&mut stderr);
+        stderr
+    });
 
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("failed to collect {command} output"))?;
+    let started = Instant::now();
+    let mut stdout = Vec::new();
+    let mut events = Vec::new();
+    let mut timed_out = false;
+    let status = loop {
+        drain_stdout_lines(&stdout_receiver, &mut stdout, &mut events, &mut event_sink);
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    let _ = stdout_thread.join();
+    drain_stdout_lines(&stdout_receiver, &mut stdout, &mut events, &mut event_sink);
+    let stderr = stderr_thread.join().unwrap_or_default();
+
     Ok(CommandRunOutput {
-        output,
-        timed_out: false,
+        output: Output {
+            status,
+            stdout,
+            stderr,
+        },
+        timed_out,
         timeout,
+        events,
     })
+}
+
+fn drain_stdout_lines(
+    receiver: &mpsc::Receiver<String>,
+    stdout: &mut Vec<u8>,
+    events: &mut Vec<AgentExecutionEvent>,
+    event_sink: &mut Option<&mut AgentEventSink<'_>>,
+) {
+    while let Ok(line) = receiver.try_recv() {
+        stdout.extend_from_slice(line.as_bytes());
+        if let Some(event) = parse_stream_json_line(&line) {
+            events.push(event.clone());
+            if let Some(sink) = event_sink.as_deref_mut() {
+                sink(event);
+            }
+        }
+    }
 }
 
 fn timeout_stderr(command: &str, timeout: Duration, stderr: &str) -> String {
@@ -860,47 +1185,60 @@ fn build_acp_proof(profile: &ProviderProfile) -> Option<AcpProof> {
 }
 
 fn looks_like_tool_call(value: &Value) -> bool {
-    value
-        .get("type")
-        .and_then(Value::as_str)
-        .map(|ty| ty.contains("tool") || ty.contains("call"))
-        .unwrap_or(false)
+    let type_is_tool = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(|ty| ty.contains("tool") || ty.contains("call"))
+            .unwrap_or(false)
+    };
+    type_is_tool(value.get("type"))
+        || type_is_tool(value.pointer("/item/type"))
+        || type_is_tool(value.pointer("/part/type"))
         || value.get("tool").is_some()
         || value.get("tool_call").is_some()
 }
 
 fn find_text(value: &Value) -> Option<String> {
+    let mut segments = Vec::new();
+    collect_preferred_text(value, &mut segments);
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments.join("\n"))
+    }
+}
+
+fn collect_preferred_text(value: &Value, segments: &mut Vec<String>) {
     match value {
-        Value::String(text) => {
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text.clone())
+        Value::String(text) if !text.trim().is_empty() => {
+            segments.push(text.clone());
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_preferred_text(value, segments);
             }
         }
-        Value::Array(values) => values.iter().find_map(find_text),
         Value::Object(map) => {
-            for key in ["text", "content", "message", "delta"] {
-                if let Some(text) = map.get(key).and_then(find_text) {
-                    return Some(text);
+            for key in ["text", "content", "message", "delta", "summary"] {
+                if let Some(value) = map.get(key) {
+                    collect_preferred_text(value, segments);
                 }
             }
-            None
         }
-        _ => None,
+        _ => {}
     }
 }
 
 fn find_event_text(value: &Value) -> Option<String> {
-    find_codex_agent_message_text(value)
+    find_codex_item_text(value)
         .or_else(|| find_opencode_part_text(value))
         .or_else(|| find_text(value))
 }
 
-fn find_codex_agent_message_text(value: &Value) -> Option<String> {
+fn find_codex_item_text(value: &Value) -> Option<String> {
     let item = value.get("item")?;
     let item_type = item.get("type").and_then(Value::as_str)?;
-    if item_type != "agent_message" {
+    if item_type.contains("tool") || item_type.contains("call") {
         return None;
     }
     find_text(item)
@@ -1108,6 +1446,57 @@ mod tests {
         assert_eq!(profiles[3].id.0, "copilot");
         assert_eq!(profiles[4].id.0, "gemini");
         assert!(!profiles[4].enabled);
+    }
+
+    #[test]
+    fn default_context_profiles_model_provider_capabilities() {
+        let profiles = default_provider_context_profiles();
+        let codex = profiles
+            .iter()
+            .find(|profile| profile.provider_id.0 == "codex")
+            .expect("codex profile");
+        let antigravity = profiles
+            .iter()
+            .find(|profile| profile.provider_id.0 == "antigravity")
+            .expect("antigravity profile");
+        let opencode = profiles
+            .iter()
+            .find(|profile| profile.provider_id.0 == "opencode")
+            .expect("opencode profile");
+        let copilot = profiles
+            .iter()
+            .find(|profile| profile.provider_id.0 == "copilot")
+            .expect("copilot profile");
+
+        assert_eq!(codex.prompt_entrypoint, "codex exec [PROMPT]");
+        assert!(codex.supports_structured_output);
+        assert!(codex.supports_mcp);
+        assert_eq!(codex.context_window_tokens, None);
+        assert_eq!(codex.token_budget_confidence, TokenBudgetConfidence::Low);
+        assert_eq!(antigravity.prompt_entrypoint, "agy --print <PROMPT>");
+        assert!(antigravity.supports_native_resume);
+        assert!(!antigravity.supports_structured_output);
+        assert!(opencode.supports_acp);
+        assert!(opencode.supports_file_attachment);
+        assert!(opencode.supports_conversation_export);
+        assert!(copilot.supports_acp);
+        assert!(copilot.supports_mcp);
+        assert_eq!(copilot.context_window_tokens, None);
+    }
+
+    #[test]
+    fn provider_context_profile_lookup_returns_default_profile() {
+        let profile = provider_context_profile(&ProviderId("opencode".to_string()))
+            .expect("opencode context profile");
+
+        assert_eq!(
+            profile.workspace_arg.as_deref(),
+            Some("--dir <DIR>; opencode acp --cwd <DIR>")
+        );
+        assert_eq!(
+            profile.preferred_context_format,
+            PreferredContextFormat::XmlTaggedMarkdown
+        );
     }
 
     #[test]
@@ -1421,6 +1810,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("session-1".to_string()),
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::Deny,
         };
@@ -1447,6 +1837,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: None,
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::Ask,
         };
@@ -1470,6 +1861,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("session-1".to_string()),
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::Deny,
         };
@@ -1498,6 +1890,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: None,
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::Ask,
         };
@@ -1529,6 +1922,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: None,
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::Deny,
         };
@@ -1551,6 +1945,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: None,
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::Ask,
         };
@@ -1574,6 +1969,7 @@ mod tests {
             prompt: "continue".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("codex-native-1".to_string()),
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::Ask,
         };
@@ -1592,12 +1988,37 @@ mod tests {
     }
 
     #[test]
+    fn codex_command_includes_image_attachments() {
+        let request = AgentPromptRequest {
+            provider_id: ProviderId("codex".to_string()),
+            prompt: "inspect".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: None,
+            image_paths: vec![PathBuf::from("/tmp/screen.png")],
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Ask,
+        };
+
+        let args = build_codex_args(&request);
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--image", "/tmp/screen.png"]));
+        assert_eq!(args.last().expect("prompt"), "inspect");
+        assert!(supports_file_attachment(&ProviderId("codex".to_string())));
+        assert!(!supports_file_attachment(&ProviderId(
+            "antigravity".to_string()
+        )));
+    }
+
+    #[test]
     fn builds_opencode_json_command_with_safe_default_permissions() {
         let request = AgentPromptRequest {
             provider_id: ProviderId("opencode".to_string()),
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("session-1".to_string()),
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::Ask,
         };
@@ -1624,6 +2045,7 @@ mod tests {
             prompt: "hello".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             session_id: None,
+            image_paths: Vec::new(),
             timeout_seconds: None,
             execution_policy: AgentExecutionPolicy::AllowProject,
         };
@@ -1631,6 +2053,29 @@ mod tests {
         let args = build_opencode_args(&request);
 
         assert!(args.contains(&"--auto".to_string()));
+    }
+
+    #[test]
+    fn opencode_command_includes_file_attachments() {
+        let request = AgentPromptRequest {
+            provider_id: ProviderId("opencode".to_string()),
+            prompt: "inspect".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            session_id: None,
+            image_paths: vec![PathBuf::from("/tmp/screen.png")],
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Ask,
+        };
+
+        let args = build_opencode_args(&request);
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--file", "/tmp/screen.png"]));
+        assert_eq!(args.last().expect("prompt"), "inspect");
+        assert!(supports_file_attachment(&ProviderId(
+            "opencode".to_string()
+        )));
     }
 
     #[test]
@@ -1772,6 +2217,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_single_stream_json_line() {
+        let event = parse_stream_json_line(
+            r#"{"type":"message","message":{"content":[{"text":"hello"}]}}"#,
+        )
+        .expect("event");
+
+        assert!(matches!(event.kind, AgentExecutionEventKind::Output));
+        assert_eq!(event.text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn streaming_command_emits_events_before_process_exits() {
+        let script = r#"printf '%s\n' '{"type":"message","content":"early"}'; sleep 1; printf '%s\n' '{"type":"result","status":"success"}'"#;
+        let started = Instant::now();
+        let mut emitted_at = None;
+        let run = {
+            let mut sink = |event: AgentExecutionEvent| {
+                if event.text.as_deref() == Some("early") && emitted_at.is_none() {
+                    emitted_at = Some(started.elapsed());
+                }
+            };
+            run_command_with_timeout_streaming(
+                "sh",
+                &["-c".to_string(), script.to_string()],
+                &PathBuf::from("."),
+                Duration::from_secs(3),
+                Some(&mut sink),
+            )
+            .expect("streaming run")
+        };
+
+        assert!(run.output.status.success());
+        assert!(run
+            .events
+            .iter()
+            .any(|event| event.text.as_deref() == Some("early")));
+        assert!(
+            emitted_at.expect("event should emit") < Duration::from_millis(800),
+            "event should be emitted while the process is still running"
+        );
+        let result = agent_result_from_command_run(ProviderId("codex".to_string()), "codex", run);
+        assert!(result.success);
+        assert!(result
+            .events
+            .iter()
+            .any(|event| event.text.as_deref() == Some("early")));
+    }
+
+    #[test]
     fn parses_codex_agent_message_item_as_output() {
         let raw = r#"
         {"type":"thread.started","thread_id":"thread_1"}
@@ -1784,6 +2278,32 @@ mod tests {
         assert!(matches!(events[0].kind, AgentExecutionEventKind::Raw));
         assert!(matches!(events[1].kind, AgentExecutionEventKind::Output));
         assert_eq!(events[1].text.as_deref(), Some("baize-smoke"));
+    }
+
+    #[test]
+    fn parses_codex_reasoning_summary_item_as_output() {
+        let raw = r#"
+        {"type":"item.completed","item":{"id":"item_0","type":"reasoning","summary":[{"type":"summary_text","text":"checked local stream path"}]}}
+        "#;
+
+        let events = parse_stream_json_lines(raw);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, AgentExecutionEventKind::Output));
+        assert_eq!(events[0].text.as_deref(), Some("checked local stream path"));
+    }
+
+    #[test]
+    fn parses_codex_function_call_item_as_tool_call() {
+        let raw = r#"
+        {"type":"item.completed","item":{"id":"item_0","type":"function_call","name":"shell","arguments":"cargo test"}}
+        "#;
+
+        let events = parse_stream_json_lines(raw);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, AgentExecutionEventKind::ToolCall));
+        assert!(events[0].text.is_none());
     }
 
     #[test]
