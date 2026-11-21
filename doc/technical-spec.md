@@ -111,22 +111,13 @@ doc/
 
 ### 3.3 `baize-tui`
 
-当前版本的薄 UI，用于验证 Baize session 连续性。主对话跨 provider 切换保持，agent 和执行入口需要可辨认；TUI 不代表 CLI 与 provider Desktop 能力等效。
+以 Baize conversation 为中心的终端工作台，通过 HTTP/SSE 与 daemon 通信。当前 workspace 来自启动目录；多 workspace 切换仍独立排期。当前与目标 provider、执行入口和已知边界必须可辨认。
 
-包含：
+当前包含 workspace 会话搜索、事件顺序恢复、中文/emoji 多行编辑、主对话、命令面板，以及 Session、Changes、Context、Handoff、Permissions、Providers 检查视图。宽屏分栏，窄屏按焦点展示。详情与写操作在后台工作线程完成，结果按 session 关联；未知结果先核对，不自动重放。
 
-- workspace selector；
-- task session list；
-- prompt input；
-- agent stream viewer；
-- route decision panel；
-- provider health/quota panel；
-- changed files panel；
-- command/test result panel；
-- permission prompt modal；
-- handoff preview。
+领域状态归 daemon；客户端只保存交互状态、进程内会话草稿与显示快照。不直接启动 agent。daemon 可自动启动并独立于终端生命周期继续运行。实现、快捷键、测试及取消边界见 [tui-design.md](tui-design.md)。
 
-TUI 只调用 daemon API，不直接读写 workspace，也不直接启动 agent。
+TUI 的完成不代表 CLI 与 provider Desktop 能力等效。Baize Desktop 的框架候选见 [ui-research.md](ui-research.md)。
 
 ### 3.4 `baize-acp`
 

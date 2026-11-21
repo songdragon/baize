@@ -8,9 +8,9 @@ Shared configuration reduces repeated setup and should reuse project instruction
 
 See [the product vision](doc/vision.md), [requirements](doc/spec.md), and [technical design](doc/technical-spec.md). These describe target behavior; the current implementation is scoped below.
 
-## Current MVP
+## Current implementation
 
-This repository currently contains the first Rust MVP skeleton:
+The repository includes the persistent-session core and a terminal workbench for daily conversation, review and handoff:
 
 - Rust workspace crates;
 - core domain types;
@@ -21,10 +21,10 @@ This repository currently contains the first Rust MVP skeleton:
 - provider registry and health probing stubs;
 - local daemon with HTTP + SSE workspace/session/handoff/permission APIs;
 - Codex `exec --json <prompt>`, OpenCode `run --format json <prompt>`, and Antigravity `/Users/songdragon/.local/bin/agy --print <prompt>` execution paths;
-- ratatui TUI shell;
+- Ratatui workbench with workspace-scoped session search, chronological conversation recovery, a Unicode multiline editor, command palette and changes/context/handoff/permission/provider inspectors;
 - `baize` CLI entrypoint.
 
-The current MVP executes through CLI adapters and preserves Baize session identity and provider-native resume references. Provider Desktop execution, shared agent-configuration mapping, and end-to-end seamless switching are not yet implemented or verified. Baize's own future Desktop UI is separate from integrating a provider's Desktop execution environment.
+The current implementation executes through CLI adapters and preserves Baize session identity and provider-native resume references. Provider Desktop execution, shared agent-configuration mapping, and end-to-end seamless switching are not yet implemented or verified. Baize's own future Desktop UI is separate from integrating a provider's Desktop execution environment.
 
 ## Commands
 
@@ -47,7 +47,9 @@ For local sandboxed development, keep Baize data inside the repository:
 BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- daemon
 ```
 
-For TUI usage, provider setup, keyboard shortcuts, local API examples and test commands, see [doc/quickstart.md](doc/quickstart.md).
+For TUI usage, provider setup, keyboard shortcuts, local API examples and test commands, see [doc/quickstart.md](doc/quickstart.md). The [workbench design](doc/tui-design.md) documents interaction and recovery behavior; [Rust UI research](doc/ui-research.md) records current framework choices and Desktop candidates.
+
+The client reads the configured daemon address and leaves the daemon running when it exits. `Ctrl-X` cancels the Baize session but does not guarantee that the provider process stops. Unconfirmed runs must be reconciled with `F5` before continuing. Drafts are kept per session in client memory; exiting with unsent content requires confirmation.
 
 Useful daemon endpoints:
 

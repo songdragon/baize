@@ -6,7 +6,7 @@ Guide for AI agents working on the Baize codebase.
 
 Baize provides a persistent development session with interchangeable coding agents. Its core goal is to preserve one user conversation and workspace across agent switches by combining current workspace facts, relevant recent dialogue, and still-active constraints. Shared configuration should reuse project instructions, MCP, and skills; routing, quota observation, and summaries support continuity.
 
-The execution target is the agent's native environment, including built-in prompts, MCP, skills, computer use, and browser use where available. Provider Desktop execution is a product direction, distinct from Baize's own future Desktop UI. The current implementation remains a headless daemon with HTTP+SSE APIs, CLI adapters (Codex, Antigravity, OpenCode; Copilot metadata/validation; Gemini legacy diagnostics), and a thin TUI. Do not describe target Desktop integration or seamless cross-agent continuity as already implemented. See `doc/vision.md`, `doc/spec.md`, and `doc/mvp-implementation-plan.md`.
+The execution target is the agent's native environment, including built-in prompts, MCP, skills, computer use, and browser use where available. Provider Desktop execution is a product direction, distinct from Baize's own future Desktop UI. The current implementation remains a headless daemon with HTTP+SSE APIs, CLI adapters (Codex, Antigravity, OpenCode; Copilot metadata/validation; Gemini legacy diagnostics), and a Ratatui terminal workbench. Do not describe target Desktop integration or seamless cross-agent continuity as already implemented. See `doc/vision.md`, `doc/spec.md`, and `doc/mvp-implementation-plan.md`.
 
 - **Language**: Rust (stable, edition 2021)
 - **Workspace**: 9 crates under `crates/`, resolver = "2"
@@ -24,7 +24,7 @@ BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- daemon  # local sandbox dae
 ## Test Commands
 
 ```sh
-cargo test --workspace                           # run all 72 tests
+cargo test --workspace                           # run all workspace tests
 cargo test -p <crate>                            # test single crate
 cargo llvm-cov --workspace --summary-only        # coverage report
 ```
@@ -49,7 +49,7 @@ cargo clippy --workspace --all-targets           # lint
 | `baize-storage` | SQLite append-only event log, query tables | baize-core |
 | `baize-adapters` | Provider profiles, health probing, prompt execution, stream parsing | baize-core |
 | `baize-daemon` | HTTP+SSE API, session orchestration, routing, handoff, permissions | baize-core, baize-config, baize-storage, baize-adapters, baize-workspace |
-| `baize-tui` | ratatui terminal UI, daemon client | (none at lib level) |
+| `baize-tui` | Ratatui workbench, daemon HTTP/SSE client | baize-config |
 | `baize-cli` | CLI entrypoint (`baize` binary), command dispatch | baize-config, baize-daemon, baize-tui, baize-adapters, baize-workspace |
 
 ## Architecture
@@ -116,12 +116,13 @@ All domain types derive `Serialize` and `Deserialize`. Storage uses JSON-in-SQLi
 - HTTP handlers return `Json<serde_json::Value>`.
 - Use the `with_store()` helper for Mutex-guarded storage access.
 - Use `json_result()` helper to wrap `Result<T>` into JSON responses.
-- Current MVP returns errors as HTTP 200 with `{"error": "..."}` — this is a known TODO to use proper status codes.
+- The daemon uses HTTP status codes and JSON error bodies. Prompt failures/cancellation may include structured outcome fields; preserve them in client error handling.
 
 ### TUI Conventions
 
 - Built on ratatui + crossterm.
-- Key bindings: `Ctrl-R` (refresh providers), `Ctrl-L` (load latest session), `Ctrl-N` (new session), `Ctrl-X` (cancel session), `Ctrl-H` (handoff preview), `Ctrl-Y` (accept handoff), `Ctrl-P` (refresh permissions), `Ctrl-A` (approve), `Ctrl-D` (deny), `Tab` (switch provider).
+- Workbench design and shortcuts: `doc/tui-design.md`; `Ctrl-K` commands, `Ctrl-O` session search, `F1` help, `F5` reconcile/refresh, `F6` focus, `F7` inspector tab, `F8` inspector visibility. `Esc` dismisses; `Ctrl-Q`/`Ctrl-C` quits with draft/in-flight confirmation.
+- Additional key bindings: `Ctrl-R` (refresh providers), `Ctrl-L` (load latest session), `Ctrl-N` (new session), `Ctrl-X` (cancel session), `Ctrl-H` (handoff preview), `Ctrl-Y` (accept handoff), `Ctrl-P` (refresh permissions), `Ctrl-A` (approve), `Ctrl-D` (deny), `Tab` (switch provider).
 
 ### CLI Conventions
 
@@ -154,15 +155,14 @@ All dependency versions are pinned in `[workspace.dependencies]`. Add new deps t
 - Override data directory: `BAIZE_DATA_DIR` env var
 - SQLite database: `{data_dir}/baize.db`
 
-## Known MVP Gaps (from doc/mvp-implementation-plan.md)
+## Current Product Boundaries
 
-These items are in scope for the current MVP but not yet implemented:
+See `doc/tui-design.md` and `doc/mvp-implementation-plan.md` for implementation status. Do not reintroduce obsolete MVP TODOs for features already shipped.
 
-- TUI: scrollback, session list view, handoff detail view, better error display
-- Daemon: proper HTTP status codes, pagination, session status transitions, structured handoff/permission list endpoints
-- Routing: sticky routing, health-aware selection, quota inference, configurable thresholds
-- Adapters: end-to-end Codex/Antigravity/OpenCode CLI validation, structured stderr, Copilot/OpenCode ACP proof-of-life
-- Persistence: SQLite migration versioning, crash recovery, checkpoint references
+- TUI drafts are currently held in client memory, with exit confirmation; they are not durable across client restarts.
+- Canceling a Baize session does not guarantee provider process termination. Unconfirmed results require reconciliation before continuing.
+- Provider Desktop execution, shared configuration mapping and full native capability equivalence remain unverified/unimplemented as documented.
+- Provider validation must use evidence from the actual entry point; unit tests must not require local provider availability or spend model quota.
 
 Post-MVP items (do not implement without a separate task): ACP lifecycle, multi-workspace TUI, Baize's own Desktop UI, cloud sync, concurrent multi-agent. Provider Desktop execution is a separate product direction requiring interface and capability validation; documentation of that direction does not authorize its implementation.
 

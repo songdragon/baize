@@ -3361,7 +3361,10 @@ fn unsupported_prompt_runtime_is_not_routable() {
         }),
     );
 
-    assert!(crate::helpers::is_provider_routable(&state, "opencode"));
+    // Runtime support is deterministic; health depends on locally installed tools.
+    assert!(baize_adapters::is_prompt_runtime_supported(&ProviderId(
+        "opencode".to_string()
+    )));
     assert!(!crate::helpers::is_provider_routable(&state, "copilot"));
 }
 

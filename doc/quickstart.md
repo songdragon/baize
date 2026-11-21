@@ -1,6 +1,6 @@
-# Baize MVP Quickstart
+# Baize Quickstart
 
-This guide covers the current local MVP: a headless daemon, HTTP/SSE APIs and a thin TUI client.
+This guide covers the local daemon, HTTP/SSE APIs and terminal workbench. UI behavior and reliability checks are documented in [tui-design.md](tui-design.md).
 
 Baize's product goal is one persistent development session across execution-agent switches, using workspace state plus relevant recent dialogue. The commands below exercise the current CLI implementation. Provider Desktop execution and shared agent-configuration mapping are not implemented; Baize's own future Desktop UI is a separate concern. See [the vision](vision.md), [requirements](spec.md), and [MVP validation priorities](mvp-implementation-plan.md).
 
@@ -20,7 +20,7 @@ For local development, keep Baize state inside the repository:
 BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- tui
 ```
 
-The TUI starts the daemon automatically when needed. To run the daemon directly:
+The TUI reads `daemon.host` and `daemon.port` from Baize configuration, starts the daemon automatically when needed, and leaves it running after the client exits. To run the daemon directly:
 
 ```sh
 BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- daemon
@@ -81,22 +81,45 @@ The default is `ask`. Use `deny` when you want Baize to inspect or plan without 
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit the prompt |
-| `Tab` | Switch selected provider |
-| `Ctrl-R` | Refresh provider health |
-| `Ctrl-L` | Load latest session |
-| `Ctrl-N` | Start a new session draft |
-| `Ctrl-X` | Cancel current session |
-| `Ctrl-E` | Mark current session complete |
-| `Ctrl-H` | Create handoff preview |
-| `Ctrl-Y` | Accept pending handoff |
-| `Ctrl-P` | Refresh pending permissions |
-| `Ctrl-A` | Approve selected permission |
-| `Ctrl-D` | Deny selected permission |
-| `F2` / `F3` | Select previous/next recent session |
-| `F4` | Load selected recent session |
-| `Up` / `Down` | Select pending permission |
-| `Esc` or `Ctrl-C` | Exit |
+| `Enter` | Send to the selected provider in the current Baize conversation |
+| `Alt-Enter`, `Shift-Enter` or `Ctrl-J` | Insert newline (terminal support varies) |
+| `Left` / `Right`, `Up` / `Down`, `Home` / `End`, `Delete` / `Backspace` | Edit Unicode text and multiline input |
+| `Tab` | Choose next executor; active and target providers remain distinct |
+| `Ctrl-K` / `F1` | Search commands / keyboard help |
+| `Ctrl-O` | Search saved workspace sessions and open with Enter |
+| `Ctrl-R` | Refresh connection and provider diagnostics |
+| `Ctrl-L` | Restore latest session in the loaded workspace list |
+| `Ctrl-N` | New conversation, keeping the old draft in memory |
+| `Ctrl-X` | Cancel Baize session; provider process may continue |
+| `Ctrl-E` | Mark session complete |
+| `Ctrl-H` / `Ctrl-Y` | Prepare / accept a reviewed handoff |
+| `Ctrl-P` | Refresh permissions and open their inspector |
+| `Ctrl-A` / `Ctrl-D` | Review then approve / deny selected permission |
+| `F2` / `F3` / `F4` | Previous / next / open selected session |
+| `F5` | Refresh changes, target context and recorded execution results |
+| `F6` or `Shift-Tab` | Move focus: composer, sessions, inspector |
+| `F7` / `F8` | Next inspector tab / toggle inspector |
+| `PgUp` / `PgDn` / mouse wheel | Scroll conversation or focused inspector |
+| `Ctrl-V`, `/image path`, `/unimage` | Clipboard image, image path, clear attachments |
+| `Esc` | Close overlay or return focus to composer |
+| `Ctrl-Q` or `Ctrl-C` | Exit; confirm when unsent drafts or operations exist |
+
+Wide terminals can show conversations, the main dialogue and an inspector. Below 100 columns, use F6 to focus the inspector. F5 reconciles recorded results after a disconnect; it never automatically resubmits work. Recover the last submission for editing through Ctrl-K, and inspect uncertain results before sending again. Session drafts survive switching within the running client, but are not saved across client exits. Baize permission records are separate from provider-native approval dialogs.
+
+An offline UI fixture is available without any daemon or provider calls:
+
+```sh
+cargo run -p baize-tui --example workbench-preview -- 150 32
+```
+
+For a POSIX PTY smoke test with a local fixture daemon (requires the configured daemon port to be free):
+
+```sh
+cargo build -p baize-cli
+python3 scripts/tui_smoke.py
+```
+
+The smoke test reads configuration without changing it, checks terminal restoration and sends zero provider prompts.
 
 ## Local API Examples
 

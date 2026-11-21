@@ -456,7 +456,7 @@ baize/
 
 目录职责：
 
-- `apps/desktop/`: 未来 Tauri desktop app；
+- `apps/desktop/`: 未来 Baize desktop app（框架待原型验证）；
 - `crates/baize-core/`: 核心领域模型、task session、routing、handoff、quota 抽象；
 - `crates/baize-daemon/`: headless daemon，本地 API、事件流和生命周期管理；
 - `crates/baize-tui/`: ratatui TUI 客户端；
@@ -492,7 +492,7 @@ Provider Desktop 执行属于产品目标，当前 CLI MVP 不宣称已实现；
 
 ### 10.1 第一版 UI
 
-当前版本使用薄 TUI 验证持续会话，未来可通过相同 daemon 支持其他 UI。
+当前版本提供基于 Ratatui 的持续会话工作台，包含对话恢复、编辑、查找和检查视图；设计与验收见 [tui-design.md](tui-design.md)。未来 UI 复用相同 daemon，Desktop 框架候选见 [ui-research.md](ui-research.md)。
 
 这源于最初 CLI 为主的接入条件，不代表用户只需要终端界面，也不证明 CLI 拥有 Desktop 的原生 prompt、MCP、skills、computer/browser use。Provider Desktop 执行接入不要求先开发 Baize 自身的 Desktop UI。
 
