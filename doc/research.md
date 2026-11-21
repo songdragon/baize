@@ -355,3 +355,7 @@ line 级别 attribution 不建议作为第一目标，因为重构、格式化�
 - OpenCode CLI: https://dev.opencode.ai/docs/cli/
 - OpenCode SDK: https://opencode.ai/docs/sdk/
 - OpenCode Windows WSL: https://open-code.ai/en/docs/windows-wsl
+
+## Rust UI 研究更新（2026-11-21）
+
+已读取引用讨论并访问官方来源：TUI 延续 Ratatui + Crossterm，借鉴 Yazi、GitUI、Television、Presenterm 的分栏、查找与阅读交互；TachyonFX 保留为可选动效。Baize Desktop 改为 GPUI + GPUI Kit、Iced、Slint、egui、Tauri 候选评估。详见 [来源与选型判断](ui-research.md) 和 [终端工作台设计](tui-design.md)。本次不重新宣称 provider Desktop 或所有原生工具能力已通过验证。

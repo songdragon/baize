@@ -1,6 +1,6 @@
 # Baize Technical Selection
 
-更新：2026-11-21。本轮保留 Rust/daemon/薄客户端技术选择，调整产品边界和接入原则；具体目标见 [产品愿景](vision.md)，当前实现见 [MVP 计划](mvp-implementation-plan.md)。
+更新：2026-11-21。本轮保留 Rust/daemon/薄客户端技术选择，重做终端工作台，并根据 Rust UI 调研更新 Desktop 候选；具体目标见 [产品愿景](vision.md)，当前实现见 [MVP 计划](mvp-implementation-plan.md)。
 
 ## 1. 目标
 
@@ -29,7 +29,7 @@ Rust kernel
 + SQLite storage
 + capability-based native/ACP/CLI adapter layer
 + ratatui TUI client
-+ future Tauri desktop app as thin client
++ future Desktop thin client (GPUI Kit / Iced / Slint / egui / Tauri candidates)
 ```
 
 UI 与内核分离：
@@ -41,7 +41,7 @@ baize daemon
   routing/quota/handoff 作为支撑能力
 
 baize tui
-  当前验证持续会话的薄 UI
+  面向日常使用的持续会话工作台
   通过本地 API/事件流连接 daemon
 
 baize desktop
@@ -202,7 +202,7 @@ Adapter prototype / desktop renderer only
 
 ## 4. 推荐方案
 
-### 4.1 首选：Rust core + ratatui TUI + Tauri desktop
+### 4.1 首选：Rust core + ratatui TUI + 独立评估 Desktop
 
 推荐架构：
 
@@ -213,14 +213,14 @@ Rust daemon/core
 + SQLite
 + ratatui TUI
 + HTTP/SSE or JSON-RPC local API
-+ future Tauri desktop shell
++ future desktop shell selected after prototype validation
 ```
 
 这是性能、平台移植性、安全性综合最平衡的方案。
 
 关键理由：
 
-- core 和 future desktop shell 都可以围绕 Rust/Tauri 展开；
+- core 保持 Rust，Desktop UI 通过同一 daemon API 独立评估；
 - TUI 使用 `ratatui`，长期可以做复杂 panes、diff、logs、status dashboard；
 - daemon 是单 binary，适合本地工具分发；
 - 对本地文件和命令执行这类高权限能力，Rust 比 Node 更合适；
@@ -251,6 +251,8 @@ tools/
 ```
 
 ## 5. TUI 选型
+
+2026-11-21 核对：继续 Ratatui + Crossterm，参考 Yazi、Television、GitUI、Presenterm。TachyonFX 暂不引入。Desktop 从单一 Tauri 预设调整为候选评估，详细来源、权衡与未知项见 [Rust UI 调研](ui-research.md)，终端交互与验收见 [TUI 设计](tui-design.md)。
 
 ### 5.1 Rust ratatui
 
@@ -385,22 +387,15 @@ TUI 不直接调用 agent。
 
 未来 Baize 自身的 desktop app 是 daemon 的另一个 client。它不会自动带来厂商 Desktop 的原生 prompt 或工具。Provider Desktop 执行应通过其支持的接口单独验证，会话与执行结果仍关联原 Baize session。
 
-推荐形态：
+候选形态：
 
 ```text
-Tauri desktop shell
-+ web frontend
-+ Baize daemon sidecar
+GPUI + GPUI Kit / Iced / Slint / egui
+或 Tauri + Web frontend
++ same Baize daemon API
 ```
 
-原因：
-
-- Tauri 跨平台体积较轻；
-- 适合把 Baize daemon 作为 sidecar；
-- desktop UI 可以复用 daemon API；
-- 不需要迁移核心业务逻辑。
-
-如果未来需要更快实现复杂 UI，也可考虑 Electron，但仍应保持 daemon 独立，避免核心逻辑进入 renderer。
+优先原型验证 GPUI + GPUI Kit 的开发工具交互；Iced、Slint、egui 和 Tauri 保留为不同工程约束下的候选。Tauri 路线可使用 daemon sidecar，但不再作为已确认的唯一 Desktop 方案。各候选均需实测文本输入、长会话、辅助功能、目标平台、打包和许可条件，参见 [UI 调研](ui-research.md)。不迁移核心会话与执行逻辑到 renderer。
 
 ## 7. Storage 选型
 
@@ -568,8 +563,8 @@ TUI：
 
 Desktop future：
 
-- Tauri；
-- web frontend;
+- GPUI + GPUI Kit / Iced / Slint / egui / Tauri 原型候选；
+- 如选择 WebView 路线，再引入 Web frontend；
 - same daemon API；
 - bundled sidecar。
 
@@ -653,7 +648,7 @@ crates/
 ```text
 Use Rust as Baize core language.
 Use ratatui for first TUI.
-Use Tauri for Baize's future desktop UI, independently of provider Desktop execution integration.
+Evaluate GPUI + GPUI Kit first for Baize Desktop; retain Iced, Slint, egui and Tauri as candidates. No Desktop framework is committed before prototype validation.
 Use TOML for configuration.
 Keep TypeScript only for optional frontend/prototype tooling.
 ```
