@@ -20,11 +20,13 @@ The repository includes the persistent-session core and a terminal workbench for
 - ACP JSON-RPC message primitives;
 - provider registry and health probing stubs;
 - local daemon with HTTP + SSE workspace/session/handoff/permission APIs;
-- Codex `exec --json <prompt>`, OpenCode `run --format json <prompt>`, and Antigravity `/Users/songdragon/.local/bin/agy --print <prompt>` execution paths;
+- Codex `exec --json <prompt>`, OpenCode `run --format json <prompt>`, and Antigravity `/Users/songdragon/.local/bin/agy --print <prompt> --output-format stream-json` execution paths;
 - Ratatui workbench with workspace-scoped session search, chronological conversation recovery, a Unicode multiline editor, command palette and changes/context/handoff/permission/provider inspectors;
 - `baize` CLI entrypoint.
 
 The current implementation executes through CLI adapters and preserves Baize session identity and provider-native resume references. Provider Desktop execution, shared agent-configuration mapping, and end-to-end seamless switching are not yet implemented or verified. Baize's own future Desktop UI is separate from integrating a provider's Desktop execution environment.
+
+CLI stdout/stderr and provider tool progress now stream through the daemon into the conversation. The client waits for its SSE subscription before submitting a prompt, reconnects without resubmitting work, and merges final snapshots without a local typing animation. See [streaming behavior and verification](doc/cli-streaming-output.md).
 
 ## Commands
 
@@ -83,4 +85,4 @@ GET  /events
 
 ## Notes
 
-The day-to-day adapter execution paths are Codex `exec --json <prompt>`, OpenCode `run --format json <prompt>`, and Antigravity `/Users/songdragon/.local/bin/agy --print <prompt>`. Gemini CLI is retained only as a legacy diagnostic profile because individual Code Assist accounts are now directed to Antigravity. Tests use fake executors and parser fixtures so they do not spend model quota.
+The day-to-day adapter execution paths are Codex `exec --json <prompt>`, OpenCode `run --format json <prompt>`, and Antigravity `/Users/songdragon/.local/bin/agy --print <prompt> --output-format stream-json`. Gemini CLI is retained only as a legacy diagnostic profile because individual Code Assist accounts are now directed to Antigravity. Tests use fake executors and parser fixtures so they do not spend model quota.

@@ -68,7 +68,6 @@ fn run_app(
             state.background_status = Some("Loading workspace sessions".into());
             ui_task = Some(start_workspace_load_task());
         }
-        advance_pending_assistant_stream(&mut state);
         terminal.draw(|frame| render(frame, &state))?;
         if !event::poll(Duration::from_millis(UI_EVENT_POLL_MS))? {
             continue;

@@ -50,7 +50,7 @@ pub(super) fn workspace_display_for(session: &Value) -> Result<String> {
 pub(super) fn start_new_session(state: &mut TuiState) {
     state.transcript.clear();
     state.seen_event_ids.clear();
-    clear_pending_assistant_stream(state);
+    reset_stream_output(state);
     state.streaming_assistant_open = false;
     state.ui.diff = Value::Null;
     state.ui.context = Value::Null;

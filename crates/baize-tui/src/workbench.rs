@@ -53,6 +53,8 @@ pub(crate) enum Overlay {
 
 #[derive(Debug, Clone)]
 pub(crate) struct UiState {
+    pub stream_items: HashMap<String, StreamItem>,
+    pub stderr_seen: bool,
     pub wrap_width: u16,
     pub execution_uncertain: bool,
     pub focus: Focus,
@@ -74,6 +76,8 @@ pub(crate) struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            stream_items: HashMap::new(),
+            stderr_seen: false,
             wrap_width: 75,
             execution_uncertain: false,
             focus: Focus::Composer,
@@ -149,7 +153,7 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
         .context("missing session events")?;
     state.transcript.clear();
     state.seen_event_ids.clear();
-    clear_pending_assistant_stream(state);
+    reset_stream_output(state);
     state.streaming_assistant_open = false;
     state.ui.execution_uncertain = false;
     for event in events {
@@ -160,6 +164,7 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
         let provider = event["provider_id"].as_str().unwrap_or("agent");
         match event["event_type"].as_str().unwrap_or("") {
             "session.agent.started" => {
+                reset_stream_output(state);
                 state.ui.execution_uncertain = true;
                 if let Some(prompt) = payload["prompt"].as_str() {
                     push_transcript_gap(state);
@@ -180,12 +185,10 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
                     payload,
                 ));
             }
-            "session.agent.output" => {
-                for line in assistant_event_lines(payload) {
-                    state.push_message(format!("  {line}"));
-                }
-            }
-            "session.agent.tool_call" => append_stream_tool_event(state, payload),
+            "session.agent.output"
+            | "session.agent.tool_call"
+            | "session.agent.diagnostic"
+            | "session.agent.status" => render_agent_event(state, event),
             "session.canceled" => {
                 state.push_message(status_event_line(
                     event["event_type"].as_str().unwrap_or("status"),

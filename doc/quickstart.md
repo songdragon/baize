@@ -32,7 +32,7 @@ Baize currently wires prompt execution through:
 
 - Codex: `codex exec --json <prompt>`
 - OpenCode: `opencode run --format json <prompt>`
-- Antigravity: `/Users/songdragon/.local/bin/agy --print <prompt>`
+- Antigravity: `/Users/songdragon/.local/bin/agy --print <prompt> --output-format stream-json`
 
 Gemini CLI is no longer a default prompt provider for Baize because individual Gemini Code Assist accounts are directed to Antigravity. Baize keeps Gemini only as a legacy diagnostic profile, so old sessions remain readable but new default routing avoids it.
 
@@ -76,6 +76,12 @@ Prompt execution follows `workspace.command_policy` in `~/.config/baize/config.t
 | `deny` | `--sandbox read-only` | `--mode plan --sandbox` | no extra approval flag |
 
 The default is `ask`. Use `deny` when you want Baize to inspect or plan without modifying files.
+
+## Live process output
+
+Agent text, stderr diagnostics and available tool progress appear as they arrive. JSON messages are merged using their original identity; there is no local typing animation. A failed SSE subscription means the prompt was not submitted and its draft is retained. A later disconnect reconnects and replays recorded events without rerunning the prompt. See [streaming implementation and tests](cli-streaming-output.md).
+
+Restart an existing daemon before testing a newly built streaming version: closing the TUI alone leaves the daemon running. Wait for any active provider turn to finish before restarting it.
 
 ## TUI Keys
 

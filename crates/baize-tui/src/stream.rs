@@ -1,24 +1,100 @@
 use super::*;
 
+pub(super) struct PromptEventStream {
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Drop for PromptEventStream {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub(super) fn start_prompt_sse_reader(
     sender: Sender<PromptTaskMessage>,
     session_id: String,
     provider_id: String,
     stop: Arc<AtomicBool>,
-) {
-    thread::spawn(move || {
-        if let Err(error) = read_prompt_sse_events(sender.clone(), &session_id, &provider_id, stop)
-        {
-            let _ = sender.send(PromptTaskMessage::StreamUnavailable(format!("{error:#}")));
+) -> Result<PromptEventStream> {
+    let (ready_sender, ready_receiver) = mpsc::channel();
+    let worker_stop = stop.clone();
+    let worker = thread::spawn(move || {
+        let mut initialized = false;
+        while !worker_stop.load(Ordering::SeqCst) {
+            let result =
+                read_prompt_sse_events(&sender, &session_id, &provider_id, &worker_stop, || {
+                    send_recorded_events(&sender, &session_id, &provider_id)?;
+                    if !initialized {
+                        let _ = ready_sender.send(Ok(()));
+                        initialized = true;
+                    } else {
+                        let _ = sender.send(PromptTaskMessage::StreamRecovered);
+                    }
+                    Ok(())
+                });
+            if worker_stop.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Err(error) = result {
+                if !initialized {
+                    let _ = ready_sender.send(Err(format!("{error:#}")));
+                    break;
+                }
+                let _ = sender.send(PromptTaskMessage::StreamUnavailable(format!("{error:#}")));
+            }
+            thread::sleep(Duration::from_millis(200));
         }
     });
+    let stream = PromptEventStream {
+        stop,
+        worker: Some(worker),
+    };
+    wait_for_subscription(&ready_receiver, Duration::from_secs(10))?;
+    Ok(stream)
+}
+
+fn wait_for_subscription(receiver: &Receiver<Result<(), String>>, timeout: Duration) -> Result<()> {
+    receiver
+        .recv_timeout(timeout)
+        .context("wait for daemon event subscription")?
+        .map_err(|error| anyhow!(error))
+}
+
+pub(super) fn send_recorded_events(
+    sender: &Sender<PromptTaskMessage>,
+    session_id: &str,
+    provider_id: &str,
+) -> Result<()> {
+    let history = load_session_events(session_id)?;
+    publish_recorded_events(sender, &history, session_id, provider_id);
+    Ok(())
+}
+
+fn publish_recorded_events(
+    sender: &Sender<PromptTaskMessage>,
+    history: &Value,
+    session_id: &str,
+    provider_id: &str,
+) {
+    if let Some(events) = history["events"].as_array() {
+        for event in events
+            .iter()
+            .filter(|event| event_matches_session_provider(event, session_id, provider_id))
+        {
+            let _ = sender.send(PromptTaskMessage::StreamEvent(event.clone()));
+        }
+    }
 }
 
 fn read_prompt_sse_events(
-    sender: Sender<PromptTaskMessage>,
+    sender: &Sender<PromptTaskMessage>,
     session_id: &str,
     provider_id: &str,
-    stop: Arc<AtomicBool>,
+    stop: &AtomicBool,
+    on_ready: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let address = daemon_address();
     let mut stream =
@@ -26,32 +102,45 @@ fn read_prompt_sse_events(
             .with_context(|| format!("connect to daemon at {address}"))?;
     stream.set_read_timeout(Some(Duration::from_millis(250)))?;
     stream.set_write_timeout(Some(Duration::from_secs(DAEMON_REQUEST_TIMEOUT_SECONDS)))?;
-    // HTTP/1.0 uses a close-delimited stream, avoiding chunk framing inside SSE data lines.
+    // HTTP/1.0 keeps SSE close-delimited rather than interleaving chunk framing.
     write!(
         stream,
         "GET /events HTTP/1.0\r\nHost: {address}\r\nAccept: text/event-stream\r\n\r\n"
     )?;
-    read_sse_lines(&mut BufReader::new(stream), &stop, |event| {
+    read_sse_lines(&mut BufReader::new(stream), stop, on_ready, |event| {
+        if event["event_type"] == "daemon.resync_required" {
+            anyhow::bail!("event subscriber lagged; recovering recorded history");
+        }
         if event_matches_session_provider(&event, session_id, provider_id) {
             let _ = sender.send(PromptTaskMessage::StreamEvent(event));
         }
+        Ok(())
     })
 }
 
 fn read_sse_lines(
     reader: &mut impl BufRead,
     stop: &AtomicBool,
-    mut emit: impl FnMut(Value),
+    mut ready: impl FnMut() -> Result<()>,
+    mut emit: impl FnMut(Value) -> Result<()>,
 ) -> Result<()> {
     let mut bytes = Vec::new();
-    let mut headers = true;
-    let mut first = true;
+    let mut data = String::new();
+    let (mut headers, mut first) = (true, true);
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
         }
         match reader.read_until(b'\n', &mut bytes) {
-            Ok(0) => return Err(anyhow!("event stream closed")),
+            Ok(0) => {
+                if !data.is_empty() {
+                    emit(
+                        serde_json::from_str(data.trim_end())
+                            .context("parse trailing SSE event")?,
+                    )?;
+                }
+                anyhow::bail!("event stream closed");
+            }
             Ok(_) => {
                 let line = std::str::from_utf8(&bytes).context("event stream is not UTF-8")?;
                 if first {
@@ -62,9 +151,21 @@ fn read_sse_lines(
                 } else if headers {
                     if line.trim().is_empty() {
                         headers = false;
+                        ready()?;
                     }
-                } else if let Some(event) = parse_sse_data_line(line) {
-                    emit(event);
+                } else if line.trim().is_empty() {
+                    if !data.is_empty() {
+                        emit(serde_json::from_str(data.trim_end()).context("parse SSE event")?)?;
+                        data.clear();
+                    }
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    data.push_str(
+                        value
+                            .strip_prefix(' ')
+                            .unwrap_or(value)
+                            .trim_end_matches(['\r', '\n']),
+                    );
+                    data.push('\n');
                 }
                 bytes.clear();
             }
@@ -72,15 +173,13 @@ fn read_sse_lines(
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                // read_until may have appended a partial UTF-8 line. Preserve it across timeouts.
-            }
+                ) => {}
             Err(error) => return Err(error).context("read daemon event stream"),
         }
     }
 }
 
+#[cfg(test)]
 pub(super) fn parse_sse_data_line(line: &str) -> Option<Value> {
     serde_json::from_str(line.trim_start().strip_prefix("data:")?.trim()).ok()
 }
@@ -130,26 +229,133 @@ mod tests {
         }
     }
     #[test]
+    fn reconnect_recovers_missing_events_and_deduplicates_overlapping_live_frames() {
+        let event = |id: &str, text: &str| json!({"id":id,"session_id":"task_1","provider_id":"codex","event_type":"session.agent.output","payload":{"text":text,"stream":{"item_id":"m","channel":"stdout","mode":"delta"}}});
+        let first = event("1", "A");
+        let missed = event("2", "B");
+        let tail = event("3", "C");
+        let (sender, receiver) = mpsc::channel();
+        let raw = format!("HTTP/1.0 200 OK\r\n\r\ndata: {first}\n\n");
+        let _ = read_sse_lines(
+            &mut std::io::Cursor::new(raw),
+            &AtomicBool::new(false),
+            || Ok(()),
+            |event| {
+                sender.send(PromptTaskMessage::StreamEvent(event)).unwrap();
+                Ok(())
+            },
+        );
+        let history = json!({"events":[first,missed.clone(),{"session_id":"other","provider_id":"codex","id":"ignore"}]});
+        let raw = format!("HTTP/1.0 200 OK\r\n\r\ndata: {missed}\n\ndata: {tail}\n\n");
+        let _ = read_sse_lines(
+            &mut std::io::Cursor::new(raw),
+            &AtomicBool::new(false),
+            || {
+                publish_recorded_events(&sender, &history, "task_1", "codex");
+                Ok(())
+            },
+            |event| {
+                sender.send(PromptTaskMessage::StreamEvent(event)).unwrap();
+                Ok(())
+            },
+        );
+        let mut state = TuiState::default();
+        for message in receiver.try_iter() {
+            if let PromptTaskMessage::StreamEvent(event) = message {
+                apply_prompt_stream_event(&mut state, &event);
+            }
+        }
+        assert!(state.transcript_text().contains("ABC"));
+        assert_eq!(state.transcript_text().matches("ABC").count(), 1);
+        assert_eq!(state.seen_event_ids.len(), 3);
+    }
+
+    #[test]
     fn preserves_partial_unicode_event_across_read_timeouts() {
         let mut events = vec![];
         let result = read_sse_lines(
             &mut InterruptedReader { part: 0 },
             &AtomicBool::new(false),
-            |event| events.push(event),
+            || Ok(()),
+            |event| {
+                events.push(event);
+                Ok(())
+            },
         );
         assert!(result.is_err());
         assert_eq!(events, vec![json!({"text":"中"})]);
     }
     #[test]
-    fn rejects_http_failure_and_stops_without_reading_after_cancel() {
+    fn subscription_is_ready_before_first_event_and_rejects_failures() {
+        let log = std::cell::RefCell::new(Vec::new());
+        let mut reader =
+            std::io::Cursor::new(b"HTTP/1.0 200 OK\r\n\r\ndata: {\"text\":\"first\"}\n\n");
+        assert!(read_sse_lines(
+            &mut reader,
+            &AtomicBool::new(false),
+            || {
+                log.borrow_mut().push("ready");
+                Ok(())
+            },
+            |_| {
+                log.borrow_mut().push("event");
+                Ok(())
+            }
+        )
+        .is_err());
+        assert_eq!(*log.borrow(), vec!["ready", "event"]);
         let mut reader = std::io::Cursor::new(b"HTTP/1.0 503 Unavailable\r\n\r\n");
-        assert!(read_sse_lines(&mut reader, &AtomicBool::new(false), |_| {}).is_err());
+        assert!(read_sse_lines(
+            &mut reader,
+            &AtomicBool::new(false),
+            || panic!("failed subscription must not be ready"),
+            |_| Ok(())
+        )
+        .is_err());
         let mut reader = std::io::Cursor::new(b"invalid");
+        assert!(read_sse_lines(
+            &mut reader,
+            &AtomicBool::new(true),
+            || panic!("canceled"),
+            |_| Ok(())
+        )
+        .is_ok());
+    }
+    #[test]
+    fn ready_channel_reports_success_error_timeout_and_disconnect() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(())).unwrap();
+        assert!(wait_for_subscription(&rx, Duration::from_millis(10)).is_ok());
+        tx.send(Err("offline".into())).unwrap();
+        assert!(wait_for_subscription(&rx, Duration::from_millis(10))
+            .unwrap_err()
+            .to_string()
+            .contains("offline"));
+        assert!(wait_for_subscription(&rx, Duration::from_millis(1)).is_err());
+        drop(tx);
+        assert!(wait_for_subscription(&rx, Duration::from_millis(10)).is_err());
+    }
+    #[test]
+    fn multiline_sse_and_trailing_events_are_drained_but_malformed_data_fails() {
+        let mut events = vec![];
+        let mut reader =
+            std::io::Cursor::new(b"HTTP/1.0 200 OK\r\n\r\ndata: {\"text\":\ndata: \"last\"}\n\n");
+        let _ = read_sse_lines(
+            &mut reader,
+            &AtomicBool::new(false),
+            || Ok(()),
+            |event| {
+                events.push(event);
+                Ok(())
+            },
+        );
+        assert_eq!(events, vec![json!({"text":"last"})]);
+        let mut reader = std::io::Cursor::new(b"HTTP/1.0 200 OK\r\n\r\ndata: broken\n\n");
         assert!(
-            read_sse_lines(&mut reader, &AtomicBool::new(true), |_| panic!(
-                "unexpected event"
-            ))
-            .is_ok()
+            read_sse_lines(&mut reader, &AtomicBool::new(false), || Ok(()), |_| Ok(()))
+                .unwrap_err()
+                .to_string()
+                .contains("parse SSE")
         );
     }
 }

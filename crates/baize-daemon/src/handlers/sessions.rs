@@ -715,8 +715,9 @@ fn record_adapter_event(
     adapter_event: &baize_adapters::AgentExecutionEvent,
 ) {
     let event_type = match adapter_event.kind {
-        baize_adapters::AgentExecutionEventKind::Output
-        | baize_adapters::AgentExecutionEventKind::Raw => "session.agent.output",
+        baize_adapters::AgentExecutionEventKind::Output => "session.agent.output",
+        baize_adapters::AgentExecutionEventKind::Diagnostic => "session.agent.diagnostic",
+        baize_adapters::AgentExecutionEventKind::Raw => "session.agent.status",
         baize_adapters::AgentExecutionEventKind::ToolCall => "session.agent.tool_call",
     };
     let mut event = baize_core::BaizeEvent::new(
@@ -724,6 +725,7 @@ fn record_adapter_event(
         serde_json::json!({
             "text": adapter_event.text,
             "raw": adapter_event.raw,
+            "stream": adapter_event.stream,
         }),
     );
     event.workspace_id = Some(workspace_id.clone());
@@ -746,7 +748,7 @@ fn prepare_context_pack(
         let project = store
             .get_primary_project(&workspace)?
             .ok_or_else(|| anyhow::anyhow!("project not found"))?;
-        let events = store.list_events_for_session(&session.id, Some(500), None)?;
+        let events = store.list_events_for_session(&session.id, Some(i64::MAX as u64), None)?;
         let route_decisions = store.list_route_decisions_for_session(&session.id)?;
         let handoffs = store.list_handoffs_for_session(&session.id)?;
         Ok((workspace, project, events, route_decisions, handoffs))

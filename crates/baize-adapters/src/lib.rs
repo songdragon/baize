@@ -7,12 +7,17 @@ use baize_core::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+mod antigravity_stream;
+mod streaming;
+pub use streaming::parse_stream_json_line;
+mod process_stream;
+use process_stream::run_command_with_timeout_streaming;
 
 const ANTIGRAVITY_COMMAND: &str = "/Users/songdragon/.local/bin/agy";
 
@@ -129,6 +134,30 @@ pub struct AgentExecutionEvent {
     pub kind: AgentExecutionEventKind,
     pub text: Option<String>,
     pub raw: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<AgentStreamMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOutputChannel {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTextMode {
+    Message,
+    Delta,
+    Snapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStreamMetadata {
+    pub channel: AgentOutputChannel,
+    pub mode: AgentTextMode,
+    pub item_id: Option<String>,
 }
 
 pub type AgentEventSink<'a> = dyn FnMut(AgentExecutionEvent) + Send + 'a;
@@ -137,6 +166,7 @@ pub type AgentEventSink<'a> = dyn FnMut(AgentExecutionEvent) + Send + 'a;
 pub enum AgentExecutionEventKind {
     Output,
     ToolCall,
+    Diagnostic,
     Raw,
 }
 
@@ -205,6 +235,7 @@ pub fn default_provider_profiles() -> Vec<ProviderProfile> {
                 interactive_chat: true,
                 non_interactive_prompt: true,
                 shell_access: true,
+                structured_output: true,
                 session_resume: true,
                 ..ProviderCapabilities::default()
             },
@@ -329,8 +360,8 @@ pub fn default_provider_context_profiles() -> Vec<ProviderContextProfile> {
             supports_native_resume: true,
             native_resume_arg: Some("--conversation <ID>; --continue".to_string()),
             native_session_id_capture: None,
-            supports_structured_output: false,
-            structured_output_format: None,
+            supports_structured_output: true,
+            structured_output_format: Some("stream-json".to_string()),
             supports_acp: false,
             supports_mcp: false,
             supports_workspace_arg: true,
@@ -698,6 +729,8 @@ pub fn build_antigravity_args(request: &AgentPromptRequest) -> Vec<String> {
     let mut args = vec![
         "--print".to_string(),
         request.prompt.clone(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
         "--add-dir".to_string(),
         request.cwd.to_string_lossy().to_string(),
         "--mode".to_string(),
@@ -765,27 +798,6 @@ pub fn build_opencode_args(request: &AgentPromptRequest) -> Vec<String> {
     }
     args.push(request.prompt.clone());
     args
-}
-
-pub fn parse_stream_json_line(line: &str) -> Option<AgentExecutionEvent> {
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-    let value = serde_json::from_str::<Value>(line).ok()?;
-    let text = find_event_text(&value);
-    let kind = if looks_like_tool_call(&value) {
-        AgentExecutionEventKind::ToolCall
-    } else if text.is_some() {
-        AgentExecutionEventKind::Output
-    } else {
-        AgentExecutionEventKind::Raw
-    };
-    Some(AgentExecutionEvent {
-        text,
-        kind,
-        raw: Some(value),
-    })
 }
 
 pub fn parse_stream_json_lines(raw: &str) -> Vec<AgentExecutionEvent> {
@@ -945,6 +957,7 @@ fn parse_agent_events(provider_id: &ProviderId, raw: &str) -> Vec<AgentExecution
         kind: AgentExecutionEventKind::Output,
         text: Some(raw.trim().to_string()),
         raw: None,
+        stream: None,
     }]
 }
 
@@ -952,6 +965,11 @@ fn stream_reports_success(raw: &str) -> bool {
     raw.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .any(|value| {
+            if value["event"] == "result" {
+                return value["result"]["status"]
+                    .as_str()
+                    .is_some_and(|status| status.eq_ignore_ascii_case("success"));
+            }
             let Some(object) = value.as_object() else {
                 return false;
             };
@@ -986,103 +1004,6 @@ fn run_command_with_timeout(
     timeout: Duration,
 ) -> Result<CommandRunOutput> {
     run_command_with_timeout_streaming(command, args, cwd, timeout, None)
-}
-
-fn run_command_with_timeout_streaming(
-    command: &str,
-    args: &[String],
-    cwd: &PathBuf,
-    timeout: Duration,
-    mut event_sink: Option<&mut AgentEventSink<'_>>,
-) -> Result<CommandRunOutput> {
-    let mut child = Command::new(command)
-        .args(args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("failed to spawn {command}"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .context("spawned command did not expose stdout")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("spawned command did not expose stderr")?;
-    let (stdout_sender, stdout_receiver) = mpsc::channel::<String>();
-    let stdout_thread = thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if stdout_sender.send(line.clone()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut stderr = Vec::new();
-        let _ = reader.read_to_end(&mut stderr);
-        stderr
-    });
-
-    let started = Instant::now();
-    let mut stdout = Vec::new();
-    let mut events = Vec::new();
-    let mut timed_out = false;
-    let status = loop {
-        drain_stdout_lines(&stdout_receiver, &mut stdout, &mut events, &mut event_sink);
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if started.elapsed() >= timeout {
-            timed_out = true;
-            let _ = child.kill();
-            break child.wait()?;
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-
-    let _ = stdout_thread.join();
-    drain_stdout_lines(&stdout_receiver, &mut stdout, &mut events, &mut event_sink);
-    let stderr = stderr_thread.join().unwrap_or_default();
-
-    Ok(CommandRunOutput {
-        output: Output {
-            status,
-            stdout,
-            stderr,
-        },
-        timed_out,
-        timeout,
-        events,
-    })
-}
-
-fn drain_stdout_lines(
-    receiver: &mpsc::Receiver<String>,
-    stdout: &mut Vec<u8>,
-    events: &mut Vec<AgentExecutionEvent>,
-    event_sink: &mut Option<&mut AgentEventSink<'_>>,
-) {
-    while let Ok(line) = receiver.try_recv() {
-        stdout.extend_from_slice(line.as_bytes());
-        if let Some(event) = parse_stream_json_line(&line) {
-            events.push(event.clone());
-            if let Some(sink) = event_sink.as_deref_mut() {
-                sink(event);
-            }
-        }
-    }
 }
 
 fn timeout_stderr(command: &str, timeout: Duration, stderr: &str) -> String {
@@ -1129,7 +1050,7 @@ fn detect_capabilities(
         },
         ProviderKind::Antigravity => DetectedCapabilities {
             non_interactive_prompt: help.contains("--print") || help.contains("--prompt"),
-            structured_output: false,
+            structured_output: help.contains("--output-format") && help.contains("stream-json"),
             session_resume: help.contains("--conversation") || help.contains("--continue"),
             ..DetectedCapabilities::default()
         },
@@ -1475,7 +1396,11 @@ mod tests {
         assert_eq!(codex.token_budget_confidence, TokenBudgetConfidence::Low);
         assert_eq!(antigravity.prompt_entrypoint, "agy --print <PROMPT>");
         assert!(antigravity.supports_native_resume);
-        assert!(!antigravity.supports_structured_output);
+        assert!(antigravity.supports_structured_output);
+        assert_eq!(
+            antigravity.structured_output_format.as_deref(),
+            Some("stream-json")
+        );
         assert!(opencode.supports_acp);
         assert!(opencode.supports_file_attachment);
         assert!(opencode.supports_conversation_export);
@@ -1626,6 +1551,40 @@ mod tests {
         let chat_detected = detect_capabilities(&profile, Some(chat_only_help), None, None);
         assert!(!chat_detected.non_interactive_prompt);
         assert!(!chat_detected.session_resume);
+    }
+
+    #[test]
+    fn antigravity_stream_json_capability_and_command_are_explicit() {
+        let profile = default_provider_profiles()
+            .into_iter()
+            .find(|profile| profile.id.0 == "antigravity")
+            .unwrap();
+        let detected = detect_capabilities(
+            &profile,
+            Some("--print --output-format text json stream-json"),
+            None,
+            None,
+        );
+        assert!(detected.structured_output);
+        assert!(!detect_capabilities(&profile, Some("--print"), None, None).structured_output);
+        let args = build_antigravity_args(&AgentPromptRequest {
+            provider_id: ProviderId("antigravity".into()),
+            prompt: "test".into(),
+            cwd: PathBuf::from("."),
+            session_id: None,
+            image_paths: vec![],
+            timeout_seconds: None,
+            execution_policy: AgentExecutionPolicy::Ask,
+        });
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "stream-json"]));
+        assert!(stream_reports_success(
+            r#"{"event":"result","result":{"status":"SUCCESS"}}"#
+        ));
+        assert!(!stream_reports_success(
+            r#"{"event":"result","result":{"status":"ERROR"}}"#
+        ));
     }
 
     #[test]
@@ -2303,7 +2262,10 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].kind, AgentExecutionEventKind::ToolCall));
-        assert!(events[0].text.is_none());
+        assert!(events[0]
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("cargo test")));
     }
 
     #[test]

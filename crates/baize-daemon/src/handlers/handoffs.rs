@@ -115,7 +115,7 @@ fn build_handoff_facts(
 ) -> anyhow::Result<HandoffFacts> {
     let (events, routes) = with_store(state, |store| {
         Ok((
-            store.list_events_for_session(&session.id, Some(200), None)?,
+            store.list_events_for_session(&session.id, Some(i64::MAX as u64), None)?,
             store.list_route_decisions_for_session(&session.id)?,
         ))
     })?;

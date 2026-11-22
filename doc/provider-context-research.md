@@ -4,6 +4,10 @@ Verified on 2026-07-09. This note records the provider capabilities Baize needs
 for provider-aware context packing. Token window values are marked `unknown`
 unless confirmed by official docs or local help.
 
+## Streaming update — 2026-11-22
+
+The local `agy --help` and [official headless documentation](https://antigravity.google/docs/cli/headless.md) now establish `--output-format stream-json`, `init/step_update/result` NDJSON, step text deltas, tool information and `conversation_id`. Baize enables that output mode and models structured output as supported. This supersedes the historical Antigravity structured-output/native-ID unknown entries below, without re-verifying its other native or Desktop capabilities. See [streaming implementation and tests](cli-streaming-output.md).
+
 ## Product Alignment — 2026-11-21
 
 This note models the initial CLI execution profiles, not complete provider or Desktop capabilities. Its original verification date and unknown values remain unchanged. Do not infer Desktop built-in prompts, MCP, skills, computer use, browser use, or equivalent behavior from a CLI capability flag.

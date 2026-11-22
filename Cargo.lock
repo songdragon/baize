@@ -190,6 +190,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "tempfile",
  "wait-timeout",
 ]
 

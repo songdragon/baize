@@ -36,7 +36,8 @@
 - 当前目录定位 workspace，复用已注册的项目，不在 UI 线程执行 HTTP。
 - 会话列表限定该 workspace；恢复时读取事件记录，按顺序显示用户和各执行者输出，并用 event ID 去重。
 - 同 session 后续回合保留已经见过的 event ID，避免请求完结后再取历史导致重复回答。
-- 会话切换或新建时清理显示状态、流式缓冲、旧交接和上下文；草稿按 session ID 关联。
+- 会话切换或新建时清理消息合并状态、旧交接和上下文；草稿按 session ID 关联。
+- 正文、stderr、工具和状态到达即显示，不做本地逐字播放；订阅就绪后提交，断流补齐和最终去重见 [流式输出设计](cli-streaming-output.md)。
 - 提交、会话加载、检查、权限和交接通过工作线程执行。界面继续响应编辑、帮助、滚动和退出。
 - 请求响应必须与原 session 对应，迟到响应不得绑定到新会话。
 - Git 变更和上下文是最近一次读取的快照，明确刷新入口。上下文预览使用占位请求，不声称包含未发送草稿。
@@ -59,7 +60,7 @@
 
 2026-11-22 本地验证通过：
 
-- `cargo test --workspace`：314 个测试通过，其中 TUI 130 个，0 失败。
+- `cargo test --workspace`：340 个测试通过，其中 TUI 138 个，0 失败。
 - `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
 - `cargo build -p baize-cli` 构建成功。
 - POSIX PTY + 本地假 daemon 验证启动、命令面板、多行中文粘贴、草稿退出确认、新会话草稿保留及终端模式恢复。7 次 fixture 请求，0 次 provider prompt。可在 daemon 端口空闲时运行 `python3 scripts/tui_smoke.py` 重现。

@@ -387,28 +387,57 @@ fn provider_path_section(
 }
 
 fn recent_conversation_section(events: &[BaizeEvent]) -> Option<String> {
-    let lines = events
-        .iter()
-        .filter_map(|event| match event.event_type.as_str() {
-            "session.agent.started" => event
-                .payload
-                .get("prompt")
-                .and_then(serde_json::Value::as_str)
-                .map(|prompt| format!("user: {}", context_text(prompt))),
-            "session.agent.output" => event
-                .payload
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .map(|text| format!("assistant: {}", context_text(text))),
-            _ => None,
-        })
+    let mut messages: Vec<(&str, String)> = Vec::new();
+    let mut items = std::collections::HashMap::<(String, String), usize>::new();
+    for event in events {
+        match event.event_type.as_str() {
+            "session.agent.started" => {
+                items.clear();
+                if let Some(prompt) = event.payload["prompt"].as_str() {
+                    messages.push(("user", prompt.to_string()));
+                }
+            }
+            "session.agent.output" => {
+                let Some(text) = event.payload["text"].as_str() else {
+                    continue;
+                };
+                let stream = &event.payload["stream"];
+                if let Some(id) = stream["item_id"].as_str() {
+                    let key = (
+                        event
+                            .provider_id
+                            .as_ref()
+                            .map(|id| id.0.clone())
+                            .unwrap_or_default(),
+                        id.to_string(),
+                    );
+                    if let Some(index) = items.get(&key) {
+                        if stream["mode"] == "delta" {
+                            messages[*index].1.push_str(text);
+                        } else {
+                            messages[*index].1 = text.to_string();
+                        }
+                    } else {
+                        items.insert(key, messages.len());
+                        messages.push(("assistant", text.to_string()));
+                    }
+                } else {
+                    messages.push(("assistant", text.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    let lines = messages
+        .into_iter()
         .rev()
         .take(MAX_LIST_ITEMS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|(role, text)| format!("{role}: {}", context_text(&text)))
         .collect::<Vec<_>>();
-    if lines.is_empty() {
-        return None;
-    }
-    Some(lines.into_iter().rev().collect::<Vec<_>>().join("\n"))
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn recent_commands_section(events: &[BaizeEvent]) -> Option<String> {
@@ -571,6 +600,8 @@ fn is_agent_work_event(event: &BaizeEvent) -> bool {
         "session.agent.started"
             | "session.agent.output"
             | "session.agent.tool_call"
+            | "session.agent.diagnostic"
+            | "session.agent.status"
             | "session.agent.completed"
             | "session.agent.failed"
             | "session.completed"
@@ -660,6 +691,52 @@ mod tests {
     use chrono::Utc;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn context_joins_stream_fragments_replaces_snapshots_and_excludes_diagnostics() {
+        let events = vec![
+            event(
+                "session.agent.started",
+                "codex",
+                serde_json::json!({"prompt":"keep API"}),
+            ),
+            event(
+                "session.agent.output",
+                "codex",
+                serde_json::json!({"text":"hello ","stream":{"item_id":"m","mode":"delta"}}),
+            ),
+            event(
+                "session.agent.diagnostic",
+                "codex",
+                serde_json::json!({"text":"private diagnostic"}),
+            ),
+            event(
+                "session.agent.output",
+                "codex",
+                serde_json::json!({"text":"world","stream":{"item_id":"m","mode":"delta"}}),
+            ),
+            event(
+                "session.agent.output",
+                "codex",
+                serde_json::json!({"text":"hello world","stream":{"item_id":"m","mode":"snapshot"}}),
+            ),
+            event(
+                "session.agent.started",
+                "opencode",
+                serde_json::json!({"prompt":"continue"}),
+            ),
+            event(
+                "session.agent.output",
+                "opencode",
+                serde_json::json!({"text":"second turn","stream":{"item_id":"m","mode":"snapshot"}}),
+            ),
+        ];
+        let text = recent_conversation_section(&events).unwrap();
+        assert_eq!(text.matches("hello world").count(), 1);
+        assert!(text.contains("user: keep API") && text.contains("assistant: second turn"));
+        assert!(!text.contains("private diagnostic"));
+        assert!(recent_conversation_section(&[]).is_none());
+    }
 
     #[test]
     fn no_native_resume_includes_prior_history() {

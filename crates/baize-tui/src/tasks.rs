@@ -8,6 +8,32 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
         match task.receiver.try_recv() {
             Ok(PromptTaskMessage::Started(started)) => apply_prompt_started(state, started),
             Ok(PromptTaskMessage::StreamEvent(event)) => apply_prompt_stream_event(state, &event),
+            Ok(PromptTaskMessage::StreamRecovered) => {
+                if state
+                    .ui
+                    .notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.starts_with("Live stream"))
+                {
+                    state.ui.notice = None;
+                }
+            }
+            Ok(PromptTaskMessage::NotSubmitted(error)) => {
+                state.activity_status = "blocked".into();
+                state.ui.execution_uncertain = false;
+                if state.input.is_empty() {
+                    if let Some(last) = &state.ui.last_submission {
+                        state.input = last.prompt.clone();
+                        state.image_paths = last.image_paths.clone();
+                        state.ui.cursor = usize::MAX;
+                    }
+                }
+                state.ui.notice = Some(format!(
+                    "Prompt not submitted: {error}. Your draft can be reviewed and sent again."
+                ));
+                *prompt_task = None;
+                break;
+            }
             Ok(PromptTaskMessage::StreamUnavailable(error)) => {
                 state.ui.notice = Some(format!(
                 "Live stream unavailable: {error}. Waiting for the recorded result; do not resend."
@@ -19,7 +45,6 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
                 break;
             }
             Ok(PromptTaskMessage::Failed(error)) => {
-                flush_pending_assistant_stream(state);
                 state.ui.execution_uncertain = state.session_id.is_some();
                 state.activity_status = "failed".to_string();
                 state.streaming_assistant_open = false;
@@ -30,7 +55,6 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
-                flush_pending_assistant_stream(state);
                 state.ui.execution_uncertain = state.session_id.is_some();
                 state.activity_status = "failed".to_string();
                 state.streaming_assistant_open = false;
@@ -220,95 +244,13 @@ pub(super) fn detach_prompt_task_after_cancel(
     }
 }
 
-pub(super) fn start_prompt_task(submission: PendingPromptSubmission) -> Result<PromptTask> {
-    let (sender, receiver) = mpsc::channel();
-    let stop_stream = Arc::new(AtomicBool::new(false));
-    let worker_stop_stream = stop_stream.clone();
-    thread::spawn(move || {
-        if let Err(error) = run_prompt_submission(&submission, sender.clone(), worker_stop_stream) {
-            let _ = sender.send(PromptTaskMessage::Failed(format!("{error:#}")));
-        }
-    });
-    Ok(PromptTask {
-        receiver,
-        stop_stream,
-    })
-}
-
-pub(super) fn run_prompt_submission(
-    submission: &PendingPromptSubmission,
-    sender: Sender<PromptTaskMessage>,
-    stop_stream: Arc<AtomicBool>,
-) -> Result<()> {
-    let (workspace_id, workspace_display) = prepare_workspace_for_submission(submission)?;
-    let session = prepare_session_for_submission(submission, &workspace_id)?;
-    let started = PromptTaskStarted {
-        workspace_id: Some(workspace_id.clone()),
-        workspace_display: workspace_display.clone(),
-        session_id: session.session_id.clone(),
-        active_provider: Some(submission.provider_id.clone()),
-        route_reason: session.route_reason.clone(),
-        created_session: session.created,
-    };
-    let _ = sender.send(PromptTaskMessage::Started(started));
-
-    start_prompt_sse_reader(
-        sender.clone(),
-        session.session_id.clone(),
-        submission.provider_id.clone(),
-        stop_stream.clone(),
-    );
-    let prompt_response = match post_json_with_timeout(
-        &format!("/sessions/{}/prompt", session.session_id),
-        prompt_request_body(
-            &submission.provider_id,
-            &submission.prompt,
-            &submission.image_paths,
-        ),
-        Duration::from_secs(PROMPT_TIMEOUT_SECONDS + PROMPT_RESPONSE_GRACE_SECONDS),
-    ) {
-        Ok(response) => response,
-        Err(error) => {
-            stop_stream.store(true, Ordering::SeqCst);
-            return Err(error);
-        }
-    };
-    stop_stream.store(true, Ordering::SeqCst);
-    let events_response = load_session_events(&session.session_id)?;
-    let routes_response = get_json(&format!("/sessions/{}/routes", session.session_id))?;
-    let diff_response = get_json(&format!("/sessions/{}/diff", session.session_id))?;
-
-    let completion = PromptTaskCompletion {
-        workspace_id: Some(workspace_id),
-        workspace_display,
-        session_id: session.session_id,
-        active_provider: Some(submission.provider_id.clone()),
-        route_reason: session.route_reason,
-        prompt_response,
-        events_response,
-        routes_response,
-        diff_response,
-    };
-    let _ = sender.send(PromptTaskMessage::Completed(completion));
-    Ok(())
-}
-
-#[cfg(test)]
-pub(super) fn session_events_path(session_id: &str, provider_id: &str) -> String {
-    format!("/sessions/{session_id}/events?provider_id={provider_id}")
-}
-
 pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTaskCompletion) {
     apply_prompt_completion_context(state, &completion);
-    flush_pending_assistant_stream(state);
-    append_prompt_response(state, &completion.prompt_response);
     let events_response = unseen_events_response(state, &completion.events_response);
+    append_recent_events(state, &events_response);
+    append_prompt_response(state, &completion.prompt_response);
     if state.detail_mode {
-        append_recent_events_with_sections(state, &events_response);
         append_route_history(state, &completion.routes_response);
-    } else {
-        append_assistant_events(state, &events_response);
-        append_test_result_section(state, &events_response);
     }
     state.ui.execution_uncertain = false;
     state.ui.session_status = completion.prompt_response["session_status"]
@@ -370,7 +312,7 @@ pub(super) fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStar
         state.seen_event_ids.clear();
     }
     state.streaming_assistant_open = false;
-    clear_pending_assistant_stream(state);
+    reset_stream_output(state);
     if started.created_session {
         let provider = started.active_provider.as_deref().unwrap_or("unknown");
         if state.detail_mode {
@@ -405,24 +347,7 @@ pub(super) fn apply_prompt_stream_event(state: &mut TuiState, event: &Value) {
     if !mark_event_seen(state, event) {
         return;
     }
-    let event_type = event
-        .get("event_type")
-        .and_then(Value::as_str)
-        .unwrap_or("event");
-    let payload = event.get("payload").unwrap_or(&Value::Null);
-    match event_type {
-        "session.agent.output" if !append_stream_assistant_event(state, payload) => {
-            append_stream_status_event(state, payload);
-        }
-        "session.agent.output" => {}
-        "session.agent.tool_call" => append_stream_tool_event(state, payload),
-        "session.agent.failed" => {
-            state.activity_status = "failed".to_string();
-            push_transcript_section(state, "status:");
-            state.push_message(format!("  {}", status_event_line(event_type, payload)));
-        }
-        _ => {}
-    }
+    render_agent_event(state, event);
 }
 
 pub(super) fn append_stream_assistant_event(state: &mut TuiState, payload: &Value) -> bool {
@@ -434,28 +359,10 @@ pub(super) fn append_stream_assistant_event(state: &mut TuiState, payload: &Valu
         push_transcript_section(state, "assistant:");
         state.streaming_assistant_open = true;
     }
-    if should_progressively_render_assistant(state, &lines) {
-        state.pending_assistant_lines.extend(lines);
-        advance_pending_assistant_stream(state);
-    } else {
-        for line in lines {
-            state.push_message(format!("  {line}"));
-        }
+    for line in lines {
+        state.push_message(format!("  {line}"));
     }
     true
-}
-
-pub(super) fn append_stream_tool_event(state: &mut TuiState, payload: &Value) {
-    let detail = event_detail(payload)
-        .or_else(|| raw_stream_event_detail(payload))
-        .unwrap_or_else(|| "tool call".to_string());
-    if state.detail_mode {
-        push_transcript_section(state, "command/tool events:");
-        state.push_message(format!("  {detail}"));
-    } else {
-        push_transcript_section(state, "status:");
-        state.push_message(format!("  stream: {detail}"));
-    }
 }
 
 pub(super) fn append_stream_status_event(state: &mut TuiState, payload: &Value) {
@@ -499,6 +406,62 @@ pub(super) fn mark_event_seen(state: &mut TuiState, event: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_subscription_restores_unsent_prompt_without_marking_execution_uncertain() {
+        let mut state = TuiState {
+            session_id: Some("task_1".into()),
+            ..TuiState::default()
+        };
+        state.ui.last_submission = Some(PendingPromptSubmission {
+            prompt: "draft to restore".into(),
+            provider_id: "codex".into(),
+            image_paths: vec![],
+            workspace_id: Some("ws_1".into()),
+            session_id: Some("task_1".into()),
+        });
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(PromptTaskMessage::NotSubmitted("offline".into()))
+            .unwrap();
+        let mut task = Some(PromptTask {
+            receiver,
+            stop_stream: Arc::new(AtomicBool::new(false)),
+        });
+        poll_prompt_task(&mut state, &mut task);
+        assert!(task.is_none());
+        assert!(!state.ui.execution_uncertain);
+        assert_eq!(state.input, "draft to restore");
+        assert!(state
+            .ui
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("not submitted"));
+    }
+    #[test]
+    fn completion_merges_tail_history_before_final_stderr_summary_without_duplicates() {
+        let mut state = TuiState::default();
+        let early = json!({"id":"e1","provider_id":"codex","event_type":"session.agent.output","payload":{"text":"early ","stream":{"item_id":"m","mode":"delta","channel":"stdout"}}});
+        apply_prompt_stream_event(&mut state, &early);
+        apply_prompt_completion(
+            &mut state,
+            PromptTaskCompletion {
+                workspace_id: None,
+                workspace_display: None,
+                session_id: "task_1".into(),
+                active_provider: Some("codex".into()),
+                route_reason: None,
+                prompt_response: json!({"status":"failed","turn_status":"failed","session_status":"Failed","stderr":"already streamed"}),
+                events_response: json!({"events":[early,{"id":"e2","provider_id":"codex","event_type":"session.agent.output","payload":{"text":"tail","stream":{"item_id":"m","mode":"delta","channel":"stdout"}}},{"id":"e3","provider_id":"codex","event_type":"session.agent.diagnostic","payload":{"text":"already streamed","stream":{"item_id":"stderr","mode":"delta","channel":"stderr"}}}]}),
+                routes_response: json!({"routes":[]}),
+                diff_response: json!({"diff":{"dirty":false}}),
+            },
+        );
+        let text = state.transcript_text();
+        assert_eq!(text.matches("early tail").count(), 1);
+        assert_eq!(text.matches("already streamed").count(), 1);
+    }
+
     #[test]
     fn later_turn_keeps_event_ids_and_provider_source_in_same_conversation() {
         let mut state = TuiState {

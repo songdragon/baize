@@ -95,6 +95,7 @@ impl AgentExecutor for StreamingAgentExecutor {
             kind: AgentExecutionEventKind::Output,
             text: Some("streamed output".to_string()),
             raw: None,
+            stream: None,
         };
         if let Some(sink) = event_sink {
             sink(event.clone());
@@ -127,6 +128,7 @@ impl AgentExecutor for SlowStreamingAgentExecutor {
             kind: AgentExecutionEventKind::Output,
             text: Some("slow streamed output".to_string()),
             raw: None,
+            stream: None,
         };
         if let Some(sink) = event_sink {
             sink(event.clone());
@@ -165,6 +167,7 @@ fn test_app() -> (Router, tempfile::TempDir, tempfile::TempDir) {
                     kind: AgentExecutionEventKind::Output,
                     text: Some("fake output".to_string()),
                     raw: None,
+                    stream: None,
                 }],
                 stderr: String::new(),
                 error: None,
@@ -1021,6 +1024,7 @@ async fn prompt_includes_prior_session_messages_without_native_resume() {
                     kind: AgentExecutionEventKind::Output,
                     text: Some("ready to help".to_string()),
                     raw: None,
+                    stream: None,
                 }],
                 stderr: String::new(),
                 error: None,
@@ -1137,6 +1141,7 @@ async fn prompt_switching_back_to_native_provider_sends_delta_context() {
                     kind: AgentExecutionEventKind::Output,
                     text: Some("provider output".to_string()),
                     raw: None,
+                    stream: None,
                 }],
                 stderr: String::new(),
                 error: None,
@@ -1677,6 +1682,7 @@ async fn handoff_facts_include_session_events_and_routes() {
                     kind: AgentExecutionEventKind::ToolCall,
                     text: Some("cargo test --workspace".to_string()),
                     raw: None,
+                    stream: None,
                 }],
                 stderr: "429 rate limit while running tests".to_string(),
                 error: Some(AgentErrorDetail {
@@ -2243,6 +2249,7 @@ impl AgentExecutor for RecoverableAgentExecutor {
                 kind: AgentExecutionEventKind::Output,
                 text: Some("recovered output".to_string()),
                 raw: None,
+                stream: None,
             }],
             stderr: String::new(),
             error: None,
@@ -3847,4 +3854,205 @@ fn append_provider_event(
     let mut event = baize_core::BaizeEvent::new(event_type, payload);
     event.provider_id = Some(ProviderId(provider_id.to_string()));
     store.append_event(&event).expect("append event");
+}
+
+#[derive(Clone)]
+struct ProcessProgressExecutor {
+    release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+}
+impl AgentExecutor for ProcessProgressExecutor {
+    fn run_prompt(
+        &self,
+        _request: AgentPromptRequest,
+        mut sink: Option<&mut baize_adapters::AgentEventSink<'_>>,
+    ) -> Result<AgentRunResult> {
+        use baize_adapters::{AgentOutputChannel, AgentStreamMetadata, AgentTextMode};
+        let output = |text: &str, channel: AgentOutputChannel| AgentExecutionEvent {
+            kind: if channel == AgentOutputChannel::Stderr {
+                AgentExecutionEventKind::Diagnostic
+            } else {
+                AgentExecutionEventKind::Output
+            },
+            text: Some(text.into()),
+            raw: None,
+            stream: Some(AgentStreamMetadata {
+                item_id: Some(
+                    if channel == AgentOutputChannel::Stderr {
+                        "stderr"
+                    } else {
+                        "message"
+                    }
+                    .into(),
+                ),
+                channel,
+                mode: AgentTextMode::Delta,
+            }),
+        };
+        let early=vec![output("EARLY_NO_NEWLINE",AgentOutputChannel::Stdout),output("LIVE_STDERR",AgentOutputChannel::Stderr),baize_adapters::parse_stream_json_line(r#"{"type":"item.started","item":{"id":"tool","type":"command_execution","command":"cargo test","status":"in_progress"}}"#).unwrap()];
+        let mut events = Vec::new();
+        for event in early {
+            if let Some(sink) = sink.as_deref_mut() {
+                sink(event.clone());
+            }
+            events.push(event);
+        }
+        self.release
+            .lock()
+            .map_err(|_| anyhow::anyhow!("release mutex"))?
+            .recv_timeout(std::time::Duration::from_secs(3))?;
+        let tail = output(" FINAL_TAIL", AgentOutputChannel::Stdout);
+        if let Some(sink) = sink {
+            sink(tail.clone());
+        }
+        events.push(tail);
+        Ok(AgentRunResult {
+            provider_id: ProviderId("codex".into()),
+            success: true,
+            exit_code: Some(0),
+            native_session_id: None,
+            events,
+            stderr: "LIVE_STDERR".into(),
+            error: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn live_stdout_stderr_and_tool_events_reach_sse_and_storage_before_prompt_finishes() {
+    use futures::StreamExt;
+    let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (release, receiver) = std::sync::mpsc::channel();
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        EventStore::open(data.path().join("test.db")).unwrap(),
+        Arc::new(ProcessProgressExecutor {
+            release: Arc::new(Mutex::new(receiver)),
+        }),
+    );
+    let app = router(state);
+    let (_, session) = setup_workspace_and_session(&app, &project).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    let connected = stream.next().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&connected).contains("daemon.connected"));
+    let prompt_app = app.clone();
+    let prompt_session = session.clone();
+    let prompt = tokio::spawn(async move {
+        json_response(
+            prompt_app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/sessions/{prompt_session}/prompt"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"prompt":"test streaming"}).to_string()))
+                .unwrap(),
+        )
+        .await
+    });
+    let mut observed = String::new();
+    for _ in 0..12 {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        observed.push_str(&String::from_utf8_lossy(&frame));
+        if observed.contains("EARLY_NO_NEWLINE")
+            && observed.contains("LIVE_STDERR")
+            && observed.contains("cargo test")
+        {
+            break;
+        }
+    }
+    assert!(!prompt.is_finished());
+    assert!(
+        observed.contains("session.agent.diagnostic")
+            && observed.contains("session.agent.tool_call")
+    );
+    let history = json_response(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/sessions/{session}/events?limit=500"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(history["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["payload"]["text"] == "LIVE_STDERR"
+            && event["payload"]["stream"]["channel"] == "stderr"));
+    release.send(()).unwrap();
+    assert_eq!(prompt.await.unwrap()["turn_status"], "completed");
+    let history = json_response(
+        app,
+        Request::builder()
+            .uri(format!("/sessions/{session}/events?limit=500"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let events = history["events"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.agent.diagnostic")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["payload"]["text"] == " FINAL_TAIL")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn context_preview_includes_latest_snapshot_after_more_than_500_stream_events() {
+    let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = AppState::with_executor(
+        BaizeConfig::default(),
+        EventStore::open(data.path().join("test.db")).unwrap(),
+        Arc::new(StreamingAgentExecutor),
+    );
+    let app = router(state.clone());
+    let (_, session) = setup_workspace_and_session(&app, &project).await;
+    for index in 0..510 {
+        let mut event = baize_core::BaizeEvent::new(
+            "session.agent.output",
+            json!({"text":if index==509{"LATEST_STREAM_SNAPSHOT"}else{"chunk"},"stream":{"item_id":"m","mode":if index==509{"snapshot"}else{"delta"}}}),
+        );
+        event.session_id = Some(TaskSessionId(session.clone()));
+        event.provider_id = Some(ProviderId("codex".into()));
+        state.store.lock().unwrap().append_event(&event).unwrap();
+    }
+    let preview = json_response(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/sessions/{session}/context-preview?provider_id=opencode"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(preview["context"]["source_event_count"].as_u64().unwrap() > 500);
+    assert!(preview["prompt_preview"]
+        .as_str()
+        .unwrap()
+        .contains("LATEST_STREAM_SNAPSHOT"));
 }

@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::{stdout, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -27,11 +27,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 static DAEMON_ADDRESS: OnceLock<SocketAddr> = OnceLock::new();
 const PROMPT_TIMEOUT_SECONDS: u64 = 120;
 const TRANSCRIPT_DETAIL_MAX_CHARS: usize = 180;
-const TRANSCRIPT_RECENT_EVENT_LIMIT: usize = 12;
-const TRANSCRIPT_TOOL_LINE_LIMIT: usize = 4;
-const TRANSCRIPT_STATUS_LINE_LIMIT: usize = 4;
-const ASSISTANT_STREAM_MIN_CHARS: usize = 32;
-const ASSISTANT_STREAM_CHARS_PER_TICK: usize = 16;
 const DAEMON_START_ATTEMPTS: usize = 20;
 const DAEMON_START_POLL_MS: u64 = 100;
 const DAEMON_CONNECT_TIMEOUT_MS: u64 = 500;
@@ -68,9 +63,6 @@ pub struct TuiState {
     pub pending_handoff_session_id: Option<String>,
     pub seen_event_ids: HashSet<String>,
     pub streaming_assistant_open: bool,
-    pub pending_assistant_lines: VecDeque<String>,
-    pub pending_assistant_current_line: Option<String>,
-    pub pending_assistant_line_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +171,8 @@ enum PromptTaskMessage {
     Started(PromptTaskStarted),
     StreamEvent(Value),
     StreamUnavailable(String),
+    StreamRecovered,
+    NotSubmitted(String),
     Completed(PromptTaskCompletion),
     Failed(String),
 }
@@ -257,13 +251,14 @@ impl Default for TuiState {
             pending_handoff_session_id: None,
             seen_event_ids: HashSet::new(),
             streaming_assistant_open: false,
-            pending_assistant_lines: VecDeque::new(),
-            pending_assistant_current_line: None,
-            pending_assistant_line_index: None,
         }
     }
 }
 
+mod prompt;
+use prompt::*;
+mod output;
+use output::*;
 mod stream;
 use stream::*;
 mod commands;
@@ -824,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_prompt_stream_event_reveals_long_output_incrementally() {
+    fn apply_prompt_stream_event_shows_all_arrived_text_immediately() {
         let mut state = TuiState::default();
         let event = json!({
             "id": "evt_long",
@@ -841,15 +836,11 @@ mod tests {
         let partial = state.transcript_text();
         assert!(partial.contains("assistant:"));
         assert!(partial.contains("abcdefghijklmnop"));
-        assert!(!partial.contains("TAIL"));
-        assert!(has_pending_assistant_stream(&state));
-
-        flush_pending_assistant_stream(&mut state);
+        assert!(partial.contains("TAIL"));
 
         assert!(state
             .transcript_text()
             .contains("abcdefghijklmnopqrstuvwxyz0123456789TAIL"));
-        assert!(!has_pending_assistant_stream(&state));
     }
 
     #[test]
@@ -1772,13 +1763,12 @@ mod tests {
         append_recent_events(&mut state, &response);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("╭─ command/tool events:"));
-        assert!(transcript.contains("  cargo test"));
+        assert!(transcript.contains("tool │ cargo test"));
+        assert!(transcript.contains("cargo test"));
         assert!(transcript.contains("╭─ assistant:"));
         assert!(transcript.contains("  reading files"));
-        assert!(transcript.contains("╭─ status:"));
-        assert!(transcript.contains("  agent failed: tests failed"));
-        assert!(transcript.contains("  agent completed"));
+        assert!(transcript.contains("error │"));
+        assert!(transcript.contains("agent failed: tests failed"));
         assert!(!transcript.contains("Reading additional input"));
         assert!(!transcript.contains("session.agent.output: reading files"));
     }
@@ -1851,7 +1841,7 @@ mod tests {
     }
 
     #[test]
-    fn append_recent_events_with_sections_shows_test_results() {
+    fn append_recent_events_shows_tool_result_without_reclassifying_it_as_reply() {
         let mut state = TuiState::default();
         let response = json!({
             "events": [
@@ -1866,12 +1856,12 @@ mod tests {
             ]
         });
 
-        append_recent_events_with_sections(&mut state, &response);
+        append_recent_events(&mut state, &response);
 
         let transcript = state.transcript_text();
         assert!(transcript.contains("assistant:"));
-        assert!(transcript.contains("test results:"));
-        assert!(transcript.contains("  cargo test --all passed"));
+        assert!(transcript.contains("tool │ cargo test --all passed"));
+        assert!(transcript.contains("cargo test --all passed"));
     }
 
     #[test]
@@ -1888,7 +1878,7 @@ mod tests {
             ]
         });
 
-        append_recent_events_with_sections(&mut state, &response);
+        append_recent_events(&mut state, &response);
 
         let transcript = state.transcript_text();
         assert!(transcript.contains("assistant:"));
