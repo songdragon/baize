@@ -121,7 +121,7 @@ All domain types derive `Serialize` and `Deserialize`. Storage uses JSON-in-SQLi
 ### TUI Conventions
 
 - Built on ratatui + crossterm.
-- Workbench design and shortcuts: `doc/tui-design.md`; `Ctrl-K` commands, `Ctrl-O` session search, `F1` help, `F5` reconcile/refresh, `F6` focus, `F7` inspector tab, `F8` inspector visibility. `Esc` dismisses; `Ctrl-Q`/`Ctrl-C` quits with draft/in-flight confirmation.
+- Workbench design and shortcuts: `doc/tui-design.md`; `Ctrl-K` commands, `Ctrl-O` session search, `F1` help, `F5` reconcile/refresh, `F6` focus, `F7` inspector tab, `F8` inspector visibility. `Esc` dismisses; `Ctrl-Q`/`Ctrl-C` always opens exit confirmation, even when idle. Only Enter confirms; repeated exit shortcuts never bypass confirmation. Closing the client does not cancel provider execution.
 - Additional key bindings: `Ctrl-R` (refresh providers), `Ctrl-L` (load latest session), `Ctrl-N` (new session), `Ctrl-X` (cancel session), `Ctrl-H` (handoff preview), `Ctrl-Y` (accept handoff), `Ctrl-P` (refresh permissions), `Ctrl-A` (approve), `Ctrl-D` (deny), `Tab` (switch provider).
 
 ### CLI Conventions

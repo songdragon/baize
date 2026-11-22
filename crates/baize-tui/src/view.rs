@@ -287,9 +287,18 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, state: &TuiState, overlay: 
     let mut lines = vec![];
     match overlay {
         Overlay::Quit => {
-            lines.push(Line::raw(
-                "Your unsent draft will be lost when this client exits.",
-            ));
+            let has_draft = !state.input.is_empty()
+                || !state.image_paths.is_empty()
+                || state
+                    .ui
+                    .drafts
+                    .values()
+                    .any(|(input, _, images)| !input.is_empty() || !images.is_empty());
+            lines.push(Line::raw(if has_draft {
+                "Your unsent drafts and attachments will be lost."
+            } else {
+                "Close this terminal client?"
+            }));
             lines.push(Line::raw(
                 "The daemon and any provider execution remain active.",
             ));
@@ -415,6 +424,25 @@ pub(super) fn conversation_wrap_width(state: &TuiState, width: u16) -> u16 {
 mod tests {
     use super::*;
     use ratatui::backend::{Backend, TestBackend};
+    #[test]
+    fn quit_dialog_explains_client_exit_and_only_warns_about_existing_drafts() {
+        let mut state = TuiState::default();
+        open_overlay(&mut state, Overlay::Quit);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("Close this terminal client?"));
+        assert!(text.contains("provider execution remain active"));
+        assert!(text.contains("Enter quit") && text.contains("Esc stay"));
+        assert!(!text.contains("will be lost"));
+        state.ui.drafts.insert(
+            "other".into(),
+            ("".into(), 0, vec![PathBuf::from("/tmp/image.png")]),
+        );
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+        assert!(format!("{:?}", terminal.backend().buffer())
+            .contains("drafts and attachments will be lost"));
+    }
     #[test]
     fn renders_overlays_empty_results_and_small_terminals_without_changing_draft() {
         let mut state = TuiState {

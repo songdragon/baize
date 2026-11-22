@@ -27,7 +27,7 @@
 | 查找操作 | Ctrl-K / F1 | 搜索命令／显示帮助，避免只靠记忆快捷键 |
 | 完成 | Ctrl-E | 用户检查产物后标记完成 |
 | 取消 | Ctrl-X | 取消 Baize 会话；目前 daemon 不保证终止 provider 进程，必须明确提示并核对 workspace |
-| 退出 | Ctrl-Q / Ctrl-C | 有草稿或后台操作时确认；daemon 与执行继续存活 |
+| 退出 | Ctrl-Q / Ctrl-C / 菜单 Quit → Enter | 所有状态都先确认，连续按退出键也不会直接关闭；Esc 留在客户端；daemon 与执行继续存活 |
 | 图片 | Ctrl-V、/image path、/unimage | 使用已有附件能力，显示文件名，允许清除 |
 
 会话草稿目前只在客户端进程内暂存，退出前会提示未发送内容丢失。草稿恢复不会自动发送。网络超时后不能自动重试 prompt、审批或交接接受等操作，因为服务端可能已经执行。
@@ -63,12 +63,13 @@
 
 2026-11-22 本地验证通过：
 
-- `cargo test --workspace`：352 个测试通过，其中 TUI 150 个；`--all-targets` 额外包含 7 个离线预览测试，总计 359 个，0 失败。
+- `cargo test --workspace`：355 个测试通过，其中 TUI 153 个；`--all-targets` 额外包含 7 个离线预览测试，总计 362 个，0 失败。
 - `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
 - `cargo build -p baize-cli` 构建成功。
 - POSIX PTY + 本地假 daemon 验证启动、命令面板、多行中文粘贴、草稿退出确认、新会话草稿保留及终端模式恢复。7 次 fixture 请求，0 次 provider prompt。可在 daemon 端口空闲时运行 `python3 scripts/tui_smoke.py` 重现。
 - TestBackend 覆盖宽窄屏、极小屏、空搜索、六种检查视图、浮层、Unicode 光标，以及超过 65,535 行的会话。
 - 事件回放、分页、同会话跨回合去重、过期响应、未确认执行保护、HTTP 分块 Unicode 和 SSE 超时碎片有回归测试。
+- 退出保护额外覆盖空闲、有草稿／附件、有后台任务、已有浮层和重复 Ctrl-C：所有退出入口统一确认，Esc 保留客户端状态，仅 Enter 确认退出。
 - 正式 release TUI 在独立 PTY 中恢复已有真实 Antigravity 会话，验证 F9 定位过程、Enter 查看原始详情、草稿退出保护和终端模式恢复。另回放该会话的 381 条已记录事件，包含 4 次工具操作与最终正文；未提交新 provider 请求。
 
 以上验证不消耗真实 provider 配额，不构成真实供应商入口、Windows/Linux 全平台发布或所有跨产品原生工具能力的验收。取消不保证终止 provider 进程、草稿仅保存在当前客户端内存等边界按本文明确呈现。

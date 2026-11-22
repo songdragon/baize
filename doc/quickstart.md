@@ -20,6 +20,8 @@ For local development, keep Baize state inside the repository:
 BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- tui
 ```
 
+Ctrl-C, Ctrl-Q and the Quit command always open an exit confirmation, even when idle. Enter closes the terminal client; Esc keeps it open. Repeated Ctrl-C never bypasses confirmation. Closing the client does not cancel provider execution.
+
 The TUI reads `daemon.host` and `daemon.port` from Baize configuration, starts the daemon automatically when needed, and leaves it running after the client exits. To run the daemon directly:
 
 ```sh

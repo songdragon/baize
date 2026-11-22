@@ -93,6 +93,15 @@ def main():
 
     try:
         drain(1.2)
+        os.write(master, b"\x03")  # Ctrl-C must never quit directly, including idle.
+        drain(0.3)
+        assert process.poll() is None, "Ctrl-C exited without confirmation"
+        assert b"Leave Baize?" in output, "Idle exit confirmation did not render"
+        os.write(master, b"\x03\x03")
+        drain(0.2)
+        assert process.poll() is None, "Repeated Ctrl-C bypassed exit confirmation"
+        os.write(master, b"\x1b")
+        drain(0.2)
         os.write(master, b"\x0b")  # Ctrl-K: command palette.
         drain(0.3)
         assert b"Commands" in output, "Command palette did not render"
@@ -122,6 +131,7 @@ def main():
                     "result": "passed",
                     "checks": [
                         "startup",
+                        "idle and repeated Ctrl-C exit protection",
                         "command palette",
                         "multiline Unicode paste",
                         "draft exit confirmation",

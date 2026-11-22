@@ -119,6 +119,10 @@ pub(super) fn handle_key(
     if key.kind == KeyEventKind::Release {
         return Ok(false);
     }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'q'))
+    {
+        return run_command(state, CommandId::Quit, prompt, ui);
+    }
     if let Some(overlay) = state.ui.overlay {
         match key.code {
             KeyCode::Esc => state.ui.overlay = None,
@@ -185,7 +189,6 @@ pub(super) fn handle_key(
             KeyCode::Char('d') => Some(CommandId::Deny),
             KeyCode::Char('e') => Some(CommandId::Complete),
             KeyCode::Char('x') => Some(CommandId::Cancel),
-            KeyCode::Char('c' | 'q') => Some(CommandId::Quit),
             _ => None,
         };
         if let Some(command) = command {

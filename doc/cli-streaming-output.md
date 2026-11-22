@@ -44,7 +44,7 @@ Antigravity 的协议不是仅以 `type` 命名的通用 JSON。此次针对其 
 
 ## 验证
 
-全工作区 352 个测试通过，其中适配器 64、daemon 76、TUI 150；包含离线示例的 `--all-targets` 共 359 个。首次流式接入增加 26 个测试；折叠展示新增 12 个正式 TUI 测试及 7 个示例测试。自动测试使用假进程、协议样例或 Fake executor，不发送真实模型请求。
+全工作区 355 个测试通过，其中适配器 64、daemon 76、TUI 153；包含离线示例的 `--all-targets` 共 362 个。首次流式接入增加 26 个测试；折叠展示新增 12 个正式 TUI 测试及 7 个示例测试，退出保护另外新增 3 个回归测试。自动测试使用假进程、协议样例或 Fake executor，不发送真实模型请求。
 
 - 假 CLI 退出前的无换行 stdout、stderr，以及拆分中文、emoji、大量诊断和尾部 JSON；
 - 官方 Antigravity step_update/tool/result 格式、Codex/OpenCode 消息和工具状态；

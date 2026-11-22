@@ -60,7 +60,7 @@ pub(super) const COMMANDS: &[(CommandId, &str, &str)] = &[
         "",
     ),
     (CommandId::Help, "Keyboard help", "F1"),
-    (CommandId::Quit, "Quit terminal client", "Ctrl-Q"),
+    (CommandId::Quit, "Quit terminal client", "Ctrl-Q / Ctrl-C"),
 ];
 
 pub(super) fn command_matches(state: &TuiState) -> Vec<usize> {
@@ -161,21 +161,7 @@ pub(super) fn run_command(
             }
         }
         CommandId::Help => open_overlay(state, Overlay::Help),
-        CommandId::Quit => {
-            if busy
-                || !state.input.is_empty()
-                || !state.image_paths.is_empty()
-                || state
-                    .ui
-                    .drafts
-                    .values()
-                    .any(|(input, _, images)| !input.is_empty() || !images.is_empty())
-            {
-                open_overlay(state, Overlay::Quit);
-            } else {
-                return Ok(true);
-            }
-        }
+        CommandId::Quit => open_overlay(state, Overlay::Quit),
     }
     Ok(false)
 }
@@ -183,6 +169,113 @@ pub(super) fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_quit_shortcuts_and_menu_always_require_explicit_confirmation() {
+        for shortcut in ['c', 'q'] {
+            for overlay in [
+                None,
+                Some(Overlay::Help),
+                Some(Overlay::Commands),
+                Some(Overlay::Sessions),
+                Some(Overlay::Quit),
+            ] {
+                let mut state = TuiState::default();
+                state.ui.overlay = overlay;
+                let (mut prompt, mut task) = (None, None);
+                for _ in 0..3 {
+                    assert!(!handle_key(
+                        &mut state,
+                        KeyEvent::new(KeyCode::Char(shortcut), KeyModifiers::CONTROL),
+                        &mut prompt,
+                        &mut task
+                    )
+                    .unwrap());
+                    assert_eq!(state.ui.overlay, Some(Overlay::Quit));
+                }
+                assert!(!handle_key(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                    &mut prompt,
+                    &mut task
+                )
+                .unwrap());
+                assert!(state.ui.overlay.is_none());
+            }
+        }
+        let mut state = TuiState::default();
+        let (mut prompt, mut task) = (None, None);
+        assert!(!run_command(&mut state, CommandId::Quit, &mut prompt, &mut task).unwrap());
+        assert!(handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut prompt,
+            &mut task
+        )
+        .unwrap());
+        state.ui.query = "ctrl-c".into();
+        assert!(command_matches(&state)
+            .iter()
+            .any(|index| COMMANDS[*index].0 == CommandId::Quit));
+    }
+
+    #[test]
+    fn quit_confirmation_preserves_running_tasks_and_all_drafts_until_enter() {
+        let mut state = TuiState {
+            input: "未发送的草稿".into(),
+            image_paths: vec![PathBuf::from("/tmp/attachment.png")],
+            session_id: Some("task_1".into()),
+            ..TuiState::default()
+        };
+        state.ui.execution_uncertain = true;
+        state
+            .ui
+            .drafts
+            .insert("other".into(), ("saved draft".into(), 0, vec![]));
+        let (_sender, receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut prompt = Some(PromptTask {
+            receiver,
+            stop_stream: stop.clone(),
+        });
+        let (_ui_sender, receiver) = mpsc::channel();
+        let mut task = Some(UiTask { receiver });
+        assert!(!handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut prompt,
+            &mut task
+        )
+        .unwrap());
+        assert!(!handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut prompt,
+            &mut task
+        )
+        .unwrap());
+        assert!(state.ui.overlay.is_none());
+        assert_eq!(state.input, "未发送的草稿");
+        assert_eq!(state.image_paths, [PathBuf::from("/tmp/attachment.png")]);
+        assert_eq!(state.ui.drafts["other"].0, "saved draft");
+        assert_eq!(state.session_id.as_deref(), Some("task_1"));
+        assert!(state.ui.execution_uncertain && prompt.is_some() && task.is_some());
+        assert!(!stop.load(Ordering::SeqCst));
+        assert!(!handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            &mut prompt,
+            &mut task
+        )
+        .unwrap());
+        assert!(handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut prompt,
+            &mut task
+        )
+        .unwrap());
+        assert!(!stop.load(Ordering::SeqCst));
+    }
     #[test]
     fn approval_first_opens_review_and_hidden_drafts_require_exit_confirmation() {
         let mut state = TuiState::default();
