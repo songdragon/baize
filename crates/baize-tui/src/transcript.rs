@@ -173,23 +173,6 @@ pub(super) fn append_recent_events(state: &mut TuiState, response: &Value) {
     }
 }
 
-pub(super) fn assistant_event_lines(payload: &Value) -> Vec<String> {
-    payload
-        .get("text")
-        .and_then(Value::as_str)
-        .map(split_display_lines)
-        .unwrap_or_default()
-}
-
-pub(super) fn split_display_lines(text: &str) -> Vec<String> {
-    let lines = text.lines().map(str::to_string).collect::<Vec<_>>();
-    if lines.is_empty() {
-        vec![text.to_string()]
-    } else {
-        lines
-    }
-}
-
 pub(super) fn status_event_line(event_type: &str, payload: &Value) -> String {
     let label = match event_type {
         "session.created" => "session created",

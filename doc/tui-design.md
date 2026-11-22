@@ -20,7 +20,8 @@
 | 目标 provider | Tab | 下一次输入由目标执行者在原 Baize session 继续；头部区分 active 与 target |
 | 显式交接 | Ctrl-H → 检查 Handoff → Ctrl-Y | 先准备事实与摘要，再接受；保持 Baize session ID |
 | 检查详情 | F5 / F7 / F8 | 刷新、轮换、显示详情：Session、Changes、Context、Handoff、Permissions、Providers |
-| 焦点 | F6 / Shift-Tab / Esc | 会话、输入、检查面板间切换；Esc 关闭浮层或回到输入 |
+| 执行过程 | F9；过程聚焦后 Space / ↑↓ / Enter / ←→ | 定位并展开最新回合；折叠、选择操作、查看完整参数与输出、切换历史回合；Esc 回到输入 |
+| 焦点 | F6 / Shift-Tab / Esc | 输入、过程、会话、检查面板间切换；Esc 关闭浮层或回到输入 |
 | 权限 | Ctrl-P / ↑↓ / Ctrl-A / Ctrl-D | 查看完整命令、风险、理由、所属会话后决定；与 provider 自身权限机制区分 |
 | 阅读历史 | PgUp / PgDn / 鼠标滚轮 | 对话回看不应被新输出强制拉到底部；检查面板可独立滚动 |
 | 查找操作 | Ctrl-K / F1 | 搜索命令／显示帮助，避免只靠记忆快捷键 |
@@ -37,7 +38,9 @@
 - 会话列表限定该 workspace；恢复时读取事件记录，按顺序显示用户和各执行者输出，并用 event ID 去重。
 - 同 session 后续回合保留已经见过的 event ID，避免请求完结后再取历史导致重复回答。
 - 会话切换或新建时清理消息合并状态、旧交接和上下文；草稿按 session ID 关联。
-- 正文、stderr、工具和状态到达即显示，不做本地逐字播放；订阅就绪后提交，断流补齐和最终去重见 [流式输出设计](cli-streaming-output.md)。
+- 过程默认折叠成一行，执行中补充当前工具摘要；工具参数、输出和原始事件在操作详情中查看。失败／诊断提示折叠时仍可见。
+- 最后回答使用正常正文，支持标题、粗体与代码，不再带日志前缀或引用竖线。收到工具操作后，将之前未标注为最终回答的中间说明归入过程；优先使用 provider 的最终结果。
+- 到达即更新，不做本地逐字播放；订阅就绪后提交，断流补齐和最终去重见 [流式输出设计](cli-streaming-output.md)。实时与历史回放使用同一展示模型；展开长回答上方的过程时自动定位。
 - 提交、会话加载、检查、权限和交接通过工作线程执行。界面继续响应编辑、帮助、滚动和退出。
 - 请求响应必须与原 session 对应，迟到响应不得绑定到新会话。
 - Git 变更和上下文是最近一次读取的快照，明确刷新入口。上下文预览使用占位请求，不声称包含未发送草稿。
@@ -60,11 +63,12 @@
 
 2026-11-22 本地验证通过：
 
-- `cargo test --workspace`：340 个测试通过，其中 TUI 138 个，0 失败。
+- `cargo test --workspace`：352 个测试通过，其中 TUI 150 个；`--all-targets` 额外包含 7 个离线预览测试，总计 359 个，0 失败。
 - `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
 - `cargo build -p baize-cli` 构建成功。
 - POSIX PTY + 本地假 daemon 验证启动、命令面板、多行中文粘贴、草稿退出确认、新会话草稿保留及终端模式恢复。7 次 fixture 请求，0 次 provider prompt。可在 daemon 端口空闲时运行 `python3 scripts/tui_smoke.py` 重现。
 - TestBackend 覆盖宽窄屏、极小屏、空搜索、六种检查视图、浮层、Unicode 光标，以及超过 65,535 行的会话。
 - 事件回放、分页、同会话跨回合去重、过期响应、未确认执行保护、HTTP 分块 Unicode 和 SSE 超时碎片有回归测试。
+- 正式 release TUI 在独立 PTY 中恢复已有真实 Antigravity 会话，验证 F9 定位过程、Enter 查看原始详情、草稿退出保护和终端模式恢复。另回放该会话的 381 条已记录事件，包含 4 次工具操作与最终正文；未提交新 provider 请求。
 
 以上验证不消耗真实 provider 配额，不构成真实供应商入口、Windows/Linux 全平台发布或所有跨产品原生工具能力的验收。取消不保证终止 provider 进程、草稿仅保存在当前客户端内存等边界按本文明确呈现。

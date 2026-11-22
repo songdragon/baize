@@ -7,6 +7,7 @@ pub(crate) enum CommandId {
     Latest,
     Refresh,
     Details,
+    Process,
     Handoff,
     Accept,
     Permissions,
@@ -33,6 +34,7 @@ pub(super) const COMMANDS: &[(CommandId, &str, &str)] = &[
         "Ctrl-R",
     ),
     (CommandId::Details, "Refresh changes and context", "F5"),
+    (CommandId::Process, "Fold / expand latest process", "F9"),
     (
         CommandId::Handoff,
         "Prepare handoff to target provider",
@@ -114,6 +116,9 @@ pub(super) fn run_command(
             start_ui_task_if_idle(state, ui, "Refreshing connection", start_initial_load_task);
         }
         CommandId::Details => request_action(state, ui, Action::Details),
+        CommandId::Process => {
+            process_key(state, KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
+        }
         CommandId::Handoff => request_action(state, ui, Action::PreviewHandoff),
         CommandId::Accept => request_action(state, ui, Action::AcceptHandoff),
         CommandId::Permissions => {

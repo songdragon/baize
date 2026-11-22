@@ -26,7 +26,7 @@ The repository includes the persistent-session core and a terminal workbench for
 
 The current implementation executes through CLI adapters and preserves Baize session identity and provider-native resume references. Provider Desktop execution, shared agent-configuration mapping, and end-to-end seamless switching are not yet implemented or verified. Baize's own future Desktop UI is separate from integrating a provider's Desktop execution environment.
 
-CLI stdout/stderr and provider tool progress now stream through the daemon into the conversation. The client waits for its SSE subscription before submitting a prompt, reconnects without resubmitting work, and merges final snapshots without a local typing animation. See [streaming behavior and verification](doc/cli-streaming-output.md).
+CLI stdout/stderr and provider tool progress stream through the daemon into a folded process block. Final replies appear as normal prose with headings, emphasis and code. Press F9 to reveal the process, then Space to fold, arrows to select, Enter for full details and Esc to return to the composer. The client waits for its SSE subscription before submitting a prompt, reconnects without resubmitting work, and merges final snapshots without a local typing animation. See [streaming behavior and verification](doc/cli-streaming-output.md).
 
 ## Commands
 

@@ -19,6 +19,7 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
                 }
             }
             Ok(PromptTaskMessage::NotSubmitted(error)) => {
+                finish_output_turn(state, "not_submitted", None);
                 state.activity_status = "blocked".into();
                 state.ui.execution_uncertain = false;
                 if state.input.is_empty() {
@@ -45,6 +46,7 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
                 break;
             }
             Ok(PromptTaskMessage::Failed(error)) => {
+                finish_output_turn(state, "unconfirmed", None);
                 state.ui.execution_uncertain = state.session_id.is_some();
                 state.activity_status = "failed".to_string();
                 state.streaming_assistant_open = false;
@@ -55,6 +57,7 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
+                finish_output_turn(state, "unconfirmed", None);
                 state.ui.execution_uncertain = state.session_id.is_some();
                 state.activity_status = "failed".to_string();
                 state.streaming_assistant_open = false;
@@ -248,6 +251,14 @@ pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTa
     apply_prompt_completion_context(state, &completion);
     let events_response = unseen_events_response(state, &completion.events_response);
     append_recent_events(state, &events_response);
+    finish_output_turn(
+        state,
+        completion.prompt_response["turn_status"]
+            .as_str()
+            .or_else(|| completion.prompt_response["status"].as_str())
+            .unwrap_or("completed"),
+        None,
+    );
     append_prompt_response(state, &completion.prompt_response);
     if state.detail_mode {
         append_route_history(state, &completion.routes_response);
@@ -299,9 +310,6 @@ pub(super) fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStar
         state.selected_session_index = state.recent_sessions.len().saturating_sub(1);
     }
     if let Some(provider) = &started.active_provider {
-        state.push_message(format!("{provider} · CLI"));
-    }
-    if let Some(provider) = &started.active_provider {
         state.active_provider = Some(provider.clone());
     }
     if let Some(reason) = &started.route_reason {
@@ -312,7 +320,13 @@ pub(super) fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStar
         state.seen_event_ids.clear();
     }
     state.streaming_assistant_open = false;
-    reset_stream_output(state);
+    if state.ui.output.active.is_none() {
+        begin_output_turn(
+            state,
+            started.active_provider.as_deref().unwrap_or("agent"),
+            None,
+        );
+    }
     if started.created_session {
         let provider = started.active_provider.as_deref().unwrap_or("unknown");
         if state.detail_mode {
@@ -348,29 +362,6 @@ pub(super) fn apply_prompt_stream_event(state: &mut TuiState, event: &Value) {
         return;
     }
     render_agent_event(state, event);
-}
-
-pub(super) fn append_stream_assistant_event(state: &mut TuiState, payload: &Value) -> bool {
-    let lines = assistant_event_lines(payload);
-    if lines.is_empty() {
-        return false;
-    }
-    if !state.streaming_assistant_open {
-        push_transcript_section(state, "assistant:");
-        state.streaming_assistant_open = true;
-    }
-    for line in lines {
-        state.push_message(format!("  {line}"));
-    }
-    true
-}
-
-pub(super) fn append_stream_status_event(state: &mut TuiState, payload: &Value) {
-    let Some(detail) = raw_stream_event_detail(payload) else {
-        return;
-    };
-    push_transcript_section(state, "status:");
-    state.push_message(format!("  stream: {detail}"));
 }
 
 pub(super) fn raw_stream_event_detail(payload: &Value) -> Option<String> {

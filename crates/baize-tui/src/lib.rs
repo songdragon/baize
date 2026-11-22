@@ -259,6 +259,10 @@ mod prompt;
 use prompt::*;
 mod output;
 use output::*;
+mod conversation;
+use conversation::*;
+mod process_view;
+use process_view::*;
 mod stream;
 use stream::*;
 mod commands;
@@ -330,7 +334,7 @@ mod tests {
         assert!(!rendered.contains("Prompt"));
         assert!(rendered.contains("Ask Baize to work on"));
         assert!(rendered.contains("Enter send"));
-        assert!(rendered.contains("F8 details"));
+        assert!(rendered.contains("F9 process"));
     }
 
     #[test]
@@ -511,7 +515,7 @@ mod tests {
         assert!(!transcript.contains("turn: completed via codex"));
         assert!(!transcript.contains("session: task_1"));
         assert!(!transcript.contains("route:"));
-        assert!(transcript.contains("╭─ assistant:"));
+        assert!(!transcript.contains("╭─ assistant:"));
         assert!(transcript.contains("  done"));
         assert!(!transcript.contains("╭─ routes:"));
         assert!(transcript.contains("workspace clean"));
@@ -814,7 +818,7 @@ mod tests {
         apply_prompt_stream_event(&mut state, &event);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("assistant:"));
+        assert!(!transcript.contains("assistant:"));
         assert_eq!(transcript.matches("stream hello").count(), 1);
     }
 
@@ -834,7 +838,7 @@ mod tests {
         apply_prompt_stream_event(&mut state, &event);
 
         let partial = state.transcript_text();
-        assert!(partial.contains("assistant:"));
+        assert!(!partial.contains("assistant:"));
         assert!(partial.contains("abcdefghijklmnop"));
         assert!(partial.contains("TAIL"));
 
@@ -863,8 +867,8 @@ mod tests {
         apply_prompt_stream_event(&mut state, &event);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("status:"));
-        assert!(transcript.contains("stream: step-start"));
+        assert!(transcript.contains("status │"));
+        assert!(transcript.contains("step-start"));
     }
 
     #[test]
@@ -923,7 +927,7 @@ mod tests {
         assert_eq!(state.activity_status, "running antigravity");
         assert!(!state.transcript_text().contains("╭─ task"));
         assert!(state.transcript_text().contains("> 你能做什么"));
-        assert!(state.transcript_text().contains("antigravity thinking..."));
+        assert!(state.ui.output.active.is_some());
     }
 
     #[test]
@@ -1765,10 +1769,10 @@ mod tests {
         let transcript = state.transcript_text();
         assert!(transcript.contains("tool │ cargo test"));
         assert!(transcript.contains("cargo test"));
-        assert!(transcript.contains("╭─ assistant:"));
+        assert!(!transcript.contains("╭─ assistant:"));
         assert!(transcript.contains("  reading files"));
-        assert!(transcript.contains("error │"));
-        assert!(transcript.contains("agent failed: tests failed"));
+        assert!(transcript.contains("stderr │"));
+        assert!(transcript.contains("tests failed"));
         assert!(!transcript.contains("Reading additional input"));
         assert!(!transcript.contains("session.agent.output: reading files"));
     }
@@ -1789,7 +1793,7 @@ mod tests {
         append_recent_events(&mut state, &response);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("assistant:"));
+        assert!(!transcript.contains("assistant:"));
         assert!(transcript.contains("tail"));
         assert!(!transcript.contains("..."));
     }
@@ -1859,7 +1863,7 @@ mod tests {
         append_recent_events(&mut state, &response);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("assistant:"));
+        assert!(!transcript.contains("assistant:"));
         assert!(transcript.contains("tool │ cargo test --all passed"));
         assert!(transcript.contains("cargo test --all passed"));
     }
@@ -1881,7 +1885,7 @@ mod tests {
         append_recent_events(&mut state, &response);
 
         let transcript = state.transcript_text();
-        assert!(transcript.contains("assistant:"));
+        assert!(!transcript.contains("assistant:"));
         assert!(!transcript.contains("test results:"));
     }
 

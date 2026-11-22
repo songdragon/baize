@@ -208,7 +208,42 @@ impl TuiState {
 
     #[cfg(test)]
     pub(super) fn transcript_text(&self) -> String {
-        self.transcript.join("\n")
+        self.transcript
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                if let Some(turn) = self
+                    .ui
+                    .output
+                    .turns
+                    .iter()
+                    .find(|turn| turn.anchor == index)
+                {
+                    let items = turn
+                        .items
+                        .iter()
+                        .map(|item| {
+                            let prefix = match item.role {
+                                OutputRole::Tool => "tool │ ",
+                                OutputRole::Diagnostic => "stderr │ ",
+                                OutputRole::Status => "status │ ",
+                                _ => "  ",
+                            };
+                            safe_output_text(&item.text)
+                                .split('\n')
+                                .map(|line| format!("{prefix}{line}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("{line}\n{items}")
+                } else {
+                    line.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 

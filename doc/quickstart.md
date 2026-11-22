@@ -79,9 +79,9 @@ The default is `ask`. Use `deny` when you want Baize to inspect or plan without 
 
 ## Live process output
 
-Agent text, stderr diagnostics and available tool progress appear as they arrive. JSON messages are merged using their original identity; there is no local typing animation. A failed SSE subscription means the prompt was not submitted and its draft is retained. A later disconnect reconnects and replays recorded events without rerunning the prompt. See [streaming implementation and tests](cli-streaming-output.md).
+Agent text, stderr diagnostics and available tool progress update as they arrive. Process output stays folded above the final prose reply. Press F9 to reveal the latest process; use Space to fold, Up/Down to select, Enter for full details, Left/Right for earlier turns and Esc to return to input. JSON messages merge using their original identity; there is no local typing animation. A failed SSE subscription means the prompt was not submitted and its draft is retained. A later disconnect reconnects and replays recorded events without rerunning the prompt. See [streaming implementation and tests](cli-streaming-output.md).
 
-Restart an existing daemon before testing a newly built streaming version: closing the TUI alone leaves the daemon running. Wait for any active provider turn to finish before restarting it.
+Restart an existing daemon after adapter/daemon changes: closing the TUI alone leaves the daemon running. Wait for any active provider turn to finish before restarting it. The folded process display is a TUI update and works with the `e02e94c` streaming daemon.
 
 ## TUI Keys
 

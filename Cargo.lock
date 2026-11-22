@@ -278,6 +278,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "baize-config",
+ "chrono",
  "crossterm",
  "ratatui",
  "serde_json",

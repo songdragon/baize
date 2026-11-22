@@ -57,7 +57,13 @@ fn run_app(
     let mut workspace_loaded = false;
     state.background_status = Some("Connecting".into());
     loop {
-        state.ui.wrap_width = conversation_wrap_width(&state, terminal.size()?.width);
+        let size = terminal.size()?;
+        state.ui.wrap_width = conversation_wrap_width(&state, size.width);
+        let (_, cursor_row, _) = editor_rows(&state, size.width.saturating_sub(6));
+        let composer_height = (cursor_row as u16 + 4)
+            .clamp(4, 8)
+            .min(size.height.saturating_sub(6));
+        state.ui.viewport_height = usize::from(size.height.saturating_sub(composer_height + 5));
         poll_prompt_task(&mut state, &mut prompt_task);
         poll_ui_task(&mut state, &mut ui_task);
         if state.ui.session_status == "Canceled" && prompt_task.is_some() {
@@ -193,6 +199,9 @@ pub(super) fn handle_key(
         }
         return Ok(false);
     }
+    if process_key(state, key) {
+        return Ok(false);
+    }
     match key.code {
         KeyCode::F(1) => open_overlay(state, Overlay::Help),
         KeyCode::F(2) => {
@@ -207,7 +216,8 @@ pub(super) fn handle_key(
         KeyCode::F(5) => request_action(state, ui, Action::Details),
         KeyCode::F(6) | KeyCode::BackTab => {
             state.ui.focus = match state.ui.focus {
-                Focus::Composer => Focus::Sessions,
+                Focus::Composer => Focus::Conversation,
+                Focus::Conversation => Focus::Sessions,
                 Focus::Sessions => {
                     state.detail_mode = true;
                     Focus::Inspector
@@ -327,6 +337,46 @@ pub(super) fn open_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_focus_preserves_draft_and_enter_opens_details_without_submitting() {
+        let mut state = TuiState {
+            input: "my draft".into(),
+            ..TuiState::default()
+        };
+        let (mut prompt, mut ui) = (None, None);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &mut prompt,
+            &mut ui,
+        )
+        .unwrap();
+        assert_eq!(state.input, "my draft ");
+        apply_prompt_stream_event(
+            &mut state,
+            &json!({"id":"1","event_type":"session.agent.tool_call","payload":{"text":"read [DONE]"}}),
+        );
+        run_command(&mut state, CommandId::Process, &mut prompt, &mut ui).unwrap();
+        assert_eq!(state.ui.focus, Focus::Conversation);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut prompt,
+            &mut ui,
+        )
+        .unwrap();
+        assert!(state.ui.output.turns[0].details);
+        assert!(prompt.is_none());
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut prompt,
+            &mut ui,
+        )
+        .unwrap();
+        assert_eq!(state.ui.focus, Focus::Composer);
+        assert_eq!(state.input, "my draft ");
+    }
     #[test]
     fn escape_dismisses_overlay_without_quitting_or_losing_draft() {
         let mut state = TuiState {

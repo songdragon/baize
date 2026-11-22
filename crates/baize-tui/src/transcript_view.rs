@@ -34,7 +34,10 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &TuiSt
                 .take(visible_height)
                 .collect::<Vec<_>>(),
         ))
-        .block(panel_block(&title, state.ui.focus == Focus::Composer)),
+        .block(panel_block(
+            &title,
+            matches!(state.ui.focus, Focus::Composer | Focus::Conversation),
+        )),
         area,
     );
 }
@@ -44,15 +47,25 @@ pub(super) fn transcript_wrap_width(area: Rect) -> u16 {
 }
 
 pub(super) fn transcript_text_for_width(state: &TuiState, wrap_width: u16) -> Text<'static> {
-    let lines = state
-        .transcript
-        .iter()
-        .flat_map(|line| {
-            line.split('\n')
-                .flat_map(|part| wrap_transcript_raw_line(part, wrap_width))
-        })
-        .map(|line| transcript_line(&line))
-        .collect::<Vec<_>>();
+    let mut lines = vec![];
+    let mut turns = state.ui.output.turns.iter().enumerate().peekable();
+    for (index, line) in state.transcript.iter().enumerate() {
+        if let Some((turn_index, turn)) = turns.peek().filter(|(_, turn)| turn.anchor == index) {
+            lines.extend(output_turn_lines(
+                turn,
+                wrap_width,
+                state.ui.focus == Focus::Conversation && state.ui.output.selected == *turn_index,
+                &state.workspace,
+            ));
+            turns.next();
+        } else {
+            lines.extend(
+                line.split('\n')
+                    .flat_map(|part| wrap_transcript_raw_line(part, wrap_width))
+                    .map(|line| transcript_line(&line)),
+            );
+        }
+    }
     Text::from(lines)
 }
 

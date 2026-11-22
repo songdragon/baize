@@ -36,13 +36,13 @@ pub(super) fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPro
             state.command_policy_label(),
             state.execution_mode()
         ));
-        state.push_message("  status: thinking...".to_string());
     } else {
         if !state.image_paths.is_empty() {
             state.push_message(format!("  attached {} image(s)", state.image_paths.len()));
         }
-        state.push_message(format!("  {provider_id} thinking..."));
     }
+    begin_output_turn(state, &provider_id, None);
+    state.scroll_to_bottom();
     state.input.clear();
     let image_paths = std::mem::take(&mut state.image_paths);
 

@@ -73,10 +73,9 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         render_transcript(frame, main, state);
     }
     render_composer(frame, chunks[2], state);
-    let status =
-        state.ui.notice.as_deref().unwrap_or(
-            "F1 help  Ctrl-K commands  Ctrl-O sessions  F6 focus  F7 inspect  F8 details",
-        );
+    let status = state.ui.notice.as_deref().unwrap_or(
+        "F9 process · F6 focus · Space fold / Enter detail when focused · Esc compose · F1 help",
+    );
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(if state.ui.notice.is_some() {
             Color::Yellow
@@ -310,6 +309,9 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, state: &TuiState, overlay: 
             ));
             lines.push(Line::raw(
                 "F6 focus · F7 inspector tab · F8 details · Esc return",
+            ));
+            lines.push(Line::raw(
+                "F9 process · Space fold · ↑↓ operation · Enter details · ←→ turn",
             ));
             lines.push(Line::raw(
                 "PgUp/PgDn scroll conversation or focused inspector",

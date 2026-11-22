@@ -4,6 +4,7 @@ use super::*;
 pub(crate) enum Focus {
     #[default]
     Composer,
+    Conversation,
     Sessions,
     Inspector,
 }
@@ -53,9 +54,10 @@ pub(crate) enum Overlay {
 
 #[derive(Debug, Clone)]
 pub(crate) struct UiState {
-    pub stream_items: HashMap<String, StreamItem>,
+    pub output: ConversationOutput,
     pub stderr_seen: bool,
     pub wrap_width: u16,
+    pub viewport_height: usize,
     pub execution_uncertain: bool,
     pub focus: Focus,
     pub panel: Panel,
@@ -76,9 +78,10 @@ pub(crate) struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
-            stream_items: HashMap::new(),
+            output: ConversationOutput::default(),
             stderr_seen: false,
             wrap_width: 75,
+            viewport_height: 16,
             execution_uncertain: false,
             focus: Focus::Composer,
             panel: Panel::Overview,
@@ -164,22 +167,24 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
         let provider = event["provider_id"].as_str().unwrap_or("agent");
         match event["event_type"].as_str().unwrap_or("") {
             "session.agent.started" => {
-                reset_stream_output(state);
                 state.ui.execution_uncertain = true;
                 if let Some(prompt) = payload["prompt"].as_str() {
                     push_transcript_gap(state);
                     state.push_message(format!("> {prompt}"));
-                    state.push_message(format!("{provider} · CLI"));
                 }
+                begin_output_turn(state, provider, event_time(event));
+                render_agent_event(state, event);
             }
             "session.agent.completed" if payload["status"].as_str() != Some("canceled") => {
-                state.ui.execution_uncertain = false
+                state.ui.execution_uncertain = false;
+                render_agent_event(state, event);
             }
             "session.recovered"
             | "session.agent.failed"
             | "session.agent.ignored"
             | "session.completed" => {
                 state.ui.execution_uncertain = false;
+                render_agent_event(state, event);
                 state.push_message(status_event_line(
                     event["event_type"].as_str().unwrap_or("status"),
                     payload,
@@ -190,6 +195,7 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
             | "session.agent.diagnostic"
             | "session.agent.status" => render_agent_event(state, event),
             "session.canceled" => {
+                render_agent_event(state, event);
                 state.push_message(status_event_line(
                     event["event_type"].as_str().unwrap_or("status"),
                     payload,
