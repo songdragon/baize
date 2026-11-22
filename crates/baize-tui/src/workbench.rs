@@ -50,6 +50,7 @@ pub(crate) enum Overlay {
     Commands,
     Sessions,
     Quit,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +74,10 @@ pub(crate) struct UiState {
     pub notice: Option<String>,
     pub drafts: HashMap<String, (String, usize, Vec<PathBuf>)>,
     pub last_submission: Option<PendingPromptSubmission>,
+    pub cancel_session_id: Option<String>,
+    pub reviewed_permission_id: Option<String>,
+    pub drafts_persisted: bool,
+    pub draft_error: Option<String>,
 }
 
 impl Default for UiState {
@@ -97,6 +102,10 @@ impl Default for UiState {
             notice: None,
             drafts: HashMap::new(),
             last_submission: None,
+            cancel_session_id: None,
+            reviewed_permission_id: None,
+            drafts_persisted: false,
+            draft_error: None,
         }
     }
 }
@@ -131,14 +140,11 @@ pub(super) fn session_matches(state: &TuiState) -> Vec<usize> {
 
 pub(super) fn save_draft(state: &mut TuiState) {
     let key = state.session_id.clone().unwrap_or_default();
-    state.ui.drafts.insert(
-        key,
-        (
-            state.input.clone(),
-            state.ui.cursor,
-            state.image_paths.clone(),
-        ),
-    );
+    if let Some(draft) = current_draft(state) {
+        state.ui.drafts.insert(key, draft);
+    } else {
+        state.ui.drafts.remove(&key);
+    }
 }
 
 pub(super) fn restore_draft(state: &mut TuiState) {

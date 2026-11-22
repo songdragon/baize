@@ -16,22 +16,28 @@ pub(super) fn load_selected_session_data(session_id: &str) -> Result<SelectedSes
 }
 
 pub(super) fn apply_selected_session_load(state: &mut TuiState, load: SelectedSessionLoad) {
-    if let Err(error) = apply_loaded_session(state, &load.session) {
+    // Loading runs in the background while the composer remains editable.
+    // Stage the latest draft and the entire restored view before changing IDs.
+    let mut restored = state.clone();
+    save_draft(&mut restored);
+    if let Err(error) = apply_loaded_session(&mut restored, &load.session) {
         state.ui.notice = Some(format!("Cannot load session: {error:#}"));
         return;
     }
-    state.ui.last_submission = None;
-    state.workspace = load.workspace_display;
-    state.ui.session_status = load.session["status"].as_str().unwrap_or("Unknown").into();
-    state.ui.diff = load.diff_response["diff"].clone();
-    state.ui.context = Value::Null;
-    state.ui.handoff = Value::Null;
-    if let Err(error) = replay_session(state, &load.events_response) {
+    restored.ui.last_submission = None;
+    restored.workspace = load.workspace_display;
+    restored.ui.session_status = load.session["status"].as_str().unwrap_or("Unknown").into();
+    restored.ui.diff = load.diff_response["diff"].clone();
+    restored.ui.context = Value::Null;
+    restored.ui.handoff = Value::Null;
+    if let Err(error) = replay_session(&mut restored, &load.events_response) {
         state.ui.notice = Some(format!("Cannot restore conversation: {error:#}"));
+        return;
     }
-    append_route_history(state, &load.routes_response);
-    restore_draft(state);
-    state.ui.focus = Focus::Composer;
+    append_route_history(&mut restored, &load.routes_response);
+    restore_draft(&mut restored);
+    restored.ui.focus = Focus::Composer;
+    *state = restored;
 }
 
 pub(super) fn workspace_display_for(session: &Value) -> Result<String> {
@@ -184,4 +190,76 @@ pub(super) fn apply_loaded_session(state: &mut TuiState, session: &Value) -> Res
     state.push_message(format!("loaded session: {id} ({provider})"));
     state.push_message(format!("objective: {}", one_line(objective)));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(id: &str, events: Value) -> SelectedSessionLoad {
+        SelectedSessionLoad {
+            workspace_display: "/workspace".into(),
+            session: json!({"id":id,"workspace_id":"ws_1","status":"Running","active_provider_id":"codex"}),
+            events_response: events,
+            routes_response: json!({"routes":[]}),
+            diff_response: json!({"diff":{}}),
+        }
+    }
+
+    #[test]
+    fn invalid_history_never_commits_a_partial_session_or_discards_its_draft() {
+        let mut state = TuiState {
+            session_id: Some("old".into()),
+            workspace_id: Some("ws_old".into()),
+            input: "draft 中文".into(),
+            image_paths: vec![PathBuf::from("image.png")],
+            ..TuiState::default()
+        };
+        state.ui.cursor = 3;
+        state.ui.execution_uncertain = true;
+        let transcript = state.transcript.clone();
+        let draft_map = state.ui.drafts.clone();
+        apply_selected_session_load(&mut state, load("new", json!({"error":"unavailable"})));
+        assert_eq!(state.session_id.as_deref(), Some("old"));
+        assert_eq!(state.workspace_id.as_deref(), Some("ws_old"));
+        assert_eq!(state.input, "draft 中文");
+        assert_eq!(state.image_paths, [PathBuf::from("image.png")]);
+        assert_eq!(state.ui.cursor, 3);
+        assert!(state.ui.execution_uncertain);
+        assert_eq!(state.transcript, transcript);
+        assert_eq!(state.ui.drafts, draft_map);
+        assert!(state
+            .ui
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("Cannot restore"));
+        let mut invalid = load("new", json!({"events":[]}));
+        invalid.session = json!({"id":"new"});
+        apply_selected_session_load(&mut state, invalid);
+        assert_eq!(state.session_id.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn switching_saves_edits_made_after_request_started_and_same_session_reload_keeps_input() {
+        let mut state = TuiState {
+            session_id: Some("old".into()),
+            input: "draft".into(),
+            ..TuiState::default()
+        };
+        save_draft(&mut state);
+        state.input.push_str(" edited while loading");
+        state.image_paths.push(PathBuf::from("new.png"));
+        state.ui.cursor = 5;
+        apply_selected_session_load(&mut state, load("new", json!({"events":[]})));
+        assert_eq!(state.session_id.as_deref(), Some("new"));
+        assert!(state.input.is_empty());
+        apply_selected_session_load(&mut state, load("old", json!({"events":[]})));
+        assert_eq!(state.input, "draft edited while loading");
+        assert_eq!(state.image_paths, [PathBuf::from("new.png")]);
+        assert_eq!(state.ui.cursor, 5);
+        state.input.push('!');
+        apply_selected_session_load(&mut state, load("old", json!({"events":[]})));
+        assert_eq!(state.input, "draft edited while loading!");
+    }
 }

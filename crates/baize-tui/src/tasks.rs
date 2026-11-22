@@ -196,48 +196,6 @@ pub(super) fn apply_ui_task_completion(state: &mut TuiState, completion: UiTaskC
     }
 }
 
-pub(super) fn apply_initial_load_result(state: &mut TuiState, result: InitialLoadResult) {
-    if result.providers.is_ok() {
-        state.daemon_status = daemon_connected_message();
-    }
-    match result.providers {
-        Ok(providers) if !providers.is_empty() => {
-            state.providers = providers;
-            state.selected_provider_index = 0;
-        }
-        Ok(_) => state.push_message("daemon returned no enabled providers; using defaults"),
-        Err(error) => state.push_message(format!("provider load failed: {error}")),
-    }
-    match result.diagnostics {
-        Ok(diagnostics) => {
-            if let Some((from, to)) = state.set_provider_diagnostics(diagnostics) {
-                state.push_message(format!("provider auto-selected: {from} -> {to}"));
-            }
-            if state.detail_mode {
-                append_provider_diagnostic_issues(state);
-            }
-        }
-        Err(error) => state.push_message(format!("provider diagnostics failed: {error}")),
-    }
-    match result.permissions {
-        Ok(permissions) => state.set_pending_permissions(permissions),
-        Err(error) => state.push_message(format!("permission load failed: {error}")),
-    }
-    match result.runtime_policy {
-        Ok(policy) => state.runtime_policy = Some(policy),
-        Err(error) => {
-            state.runtime_policy = Some(default_runtime_policy());
-            state.push_message(format!(
-                "runtime policy unavailable; using safe default ask mode ({})",
-                runtime_policy_error_hint(&anyhow!(error.clone()))
-            ));
-        }
-    }
-    if state.detail_mode {
-        state.push_message("status load complete");
-    }
-}
-
 pub(super) fn detach_prompt_task_after_cancel(
     state: &mut TuiState,
     prompt_task: &mut Option<PromptTask>,

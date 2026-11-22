@@ -95,24 +95,26 @@ Restart an existing daemon after adapter/daemon changes: closing the TUI alone l
 | `Tab` | Choose next executor; active and target providers remain distinct |
 | `Ctrl-K` / `F1` | Search commands / keyboard help |
 | `Ctrl-O` | Search saved workspace sessions and open with Enter |
-| `Ctrl-R` | Refresh connection and provider diagnostics |
+| `Ctrl-R` | Refresh connection and diagnostics, retaining an available selected provider |
 | `Ctrl-L` | Restore latest session in the loaded workspace list |
-| `Ctrl-N` | New conversation, keeping the old draft in memory |
-| `Ctrl-X` | Cancel Baize session; provider process may continue |
+| `Ctrl-N` | New conversation, keeping the old session draft locally |
+| `Ctrl-X` | Review cancellation; Enter cancels the Baize session, Esc stays; provider may continue |
 | `Ctrl-E` | Mark session complete |
 | `Ctrl-H` / `Ctrl-Y` | Prepare / accept a reviewed handoff |
 | `Ctrl-P` | Refresh permissions and open their inspector |
 | `Ctrl-A` / `Ctrl-D` | Review then approve / deny selected permission |
 | `F2` / `F3` / `F4` | Previous / next / open selected session |
 | `F5` | Refresh changes, target context and recorded execution results |
-| `F6` or `Shift-Tab` | Move focus: composer, sessions, inspector |
+| `F6` / `Shift-Tab` | Forward / reverse focus: composer, conversation, sessions, inspector |
 | `F7` / `F8` | Next inspector tab / toggle inspector |
 | `PgUp` / `PgDn` / mouse wheel | Scroll conversation or focused inspector |
 | `Ctrl-V`, `/image path`, `/unimage` | Clipboard image, image path, clear attachments |
 | `Esc` | Close overlay or return focus to composer |
-| `Ctrl-Q` or `Ctrl-C` | Exit; confirm when unsent drafts or operations exist |
+| `Ctrl-Q` or `Ctrl-C` | Always confirm exit; Enter quits, Esc stays |
 
-Wide terminals can show conversations, the main dialogue and an inspector. Below 100 columns, use F6 to focus the inspector. F5 reconciles recorded results after a disconnect; it never automatically resubmits work. Recover the last submission for editing through Ctrl-K, and inspect uncertain results before sending again. Session drafts survive switching within the running client, but are not saved across client exits. Baize permission records are separate from provider-native approval dialogs.
+Wide terminals can show conversations, the main dialogue and an inspector. Below 100 columns, use F6 or Shift-Tab to focus the inspector. F5 reconciles recorded results after a disconnect; it never automatically resubmits work. Recover the last submission for editing through Ctrl-K, and inspect uncertain results before sending again. Both Ctrl-A and Ctrl-D first open a hidden permission for review; press again after reviewing the same target. Baize permission records are separate from provider-native approval dialogs.
+
+Draft text, cursor and attachment paths are saved in `{data_dir}/tui-drafts.json`, grouped by workspace and session. `BAIZE_DATA_DIR` overrides the data directory; otherwise Baize uses the system application data directory (on macOS, `~/Library/Application Support/baize`). New-conversation drafts return on startup; Ctrl-O / Ctrl-L restores drafts attached to saved sessions. Saving uses atomic replacement and Unix mode `0600`; a damaged file is preserved and a visible error replaces the normal footer. The file contains local plain text and attachment paths, not copies of attached images. Clearing a draft and allowing the next UI refresh removes it from the cache. A running or uncertain submission remains recoverable until its recorded result is reconciled; recovery never sends it automatically. Confirmed finished submissions are removed unless you have started another draft.
 
 An offline UI fixture is available without any daemon or provider calls:
 
@@ -128,6 +130,15 @@ python3 scripts/tui_smoke.py
 ```
 
 The smoke test reads configuration without changing it, checks terminal restoration and sends zero provider prompts.
+
+To test the release client with an already-running loopback daemon, using temporary drafts and no provider prompts:
+
+```sh
+cargo build --release -p baize-cli
+python3 scripts/tui_interaction_smoke.py
+```
+
+This POSIX/Python 3.11+ check covers crash/restart recovery, focus, permission review, cancellation review and terminal restoration. Normal TUI startup registers the current workspace and probes diagnostics; the check never confirms cancellation or permission decisions. See [the interaction audit](tui-interaction-audit.md) for issues and verification evidence.
 
 ## Local API Examples
 

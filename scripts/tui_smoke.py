@@ -12,6 +12,7 @@ import pty
 import select
 import struct
 import subprocess
+import tempfile
 import termios
 import threading
 import time
@@ -76,7 +77,11 @@ def main():
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 150, 0, 0))
     original = termios.tcgetattr(slave)
-    process = subprocess.Popen([binary, "tui"], stdin=slave, stdout=slave, stderr=slave)
+    draft_directory = tempfile.TemporaryDirectory(prefix="baize-tui-fixture-")
+    process = subprocess.Popen(
+        [binary, "tui"], stdin=slave, stdout=slave, stderr=slave,
+        env=dict(os.environ, BAIZE_DATA_DIR=draft_directory.name),
+    )
     output = bytearray()
 
     def drain(seconds):
@@ -151,6 +156,7 @@ def main():
         server.server_close()
         os.close(master)
         os.close(slave)
+        draft_directory.cleanup()
 
 
 if __name__ == "__main__":
