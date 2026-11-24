@@ -25,6 +25,7 @@ pub(super) fn apply_selected_session_load(state: &mut TuiState, load: SelectedSe
         return;
     }
     restored.ui.last_submission = None;
+    restore_recovery_submission(&mut restored);
     restored.workspace = load.workspace_display;
     restored.ui.session_status = load.session["status"].as_str().unwrap_or("Unknown").into();
     restored.ui.diff = load.diff_response["diff"].clone();

@@ -161,6 +161,58 @@ fn capture_current_interaction_review() {
     open_overlay(&mut recovered, Overlay::Quit);
     capture(&directory, "10-saved-draft-quit", &recovered);
     capture_size(&directory, "11-small-terminal-quit", &recovered, 35, 9);
+
+    let mut permissions = editor_state();
+    permissions.pending_permissions = vec![PermissionView {
+        id: "perm_review".into(),
+        session_id: Some("task_review".into()),
+        command: "cargo test".into(),
+        reason: "Inspect tests before execution".into(),
+        status: "Pending".into(),
+        risk_level: Some("High".into()),
+    }];
+    permissions.ui.terminal_size = (80, 18);
+    permission_review_ready(&mut permissions);
+    capture_size(
+        &directory,
+        "12-permission-review-short-terminal",
+        &permissions,
+        80,
+        18,
+    );
+    permissions.ui.draft_error =
+        Some("Drafts not saved: draft cache changed in another client".into());
+    request_cancel_confirmation(&mut permissions);
+    assert!(!confirm_cancel(&mut permissions, true));
+    capture(
+        &directory,
+        "13-save-error-and-operation-feedback",
+        &permissions,
+    );
+
+    let mut submitted = TuiState {
+        input: "Previously submitted input · explicit recovery only".into(),
+        workspace: "/audit/baize".into(),
+        ..TuiState::default()
+    };
+    let path = temp.path().join("submissions.json");
+    let mut store = DraftStore::open(
+        path.clone(),
+        submitted.workspace.clone(),
+        &mut TuiState::default(),
+    )
+    .expect("submission store");
+    submitted.ui.last_submission = begin_prompt_submission(&mut submitted);
+    store.checkpoint(&mut submitted);
+    let mut review = TuiState::default();
+    DraftStore::open(path, submitted.workspace, &mut review)
+        .expect("recover submission for review");
+    assert!(review.input.is_empty());
+    capture(
+        &directory,
+        "14-submitted-input-needs-explicit-recovery",
+        &review,
+    );
     assert!(prompt.is_none() && task.is_none());
     std::fs::write(
         directory.join("observations.json"),

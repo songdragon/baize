@@ -283,6 +283,8 @@ mod editor;
 use editor::*;
 mod drafts;
 use drafts::*;
+mod draft_store;
+use draft_store::*;
 mod actions;
 use actions::*;
 mod runtime;
@@ -1245,6 +1247,7 @@ mod tests {
             ActionResult {
                 action: Action::PreviewHandoff,
                 session_id: None,
+                workspace_id: None,
                 response,
                 extra: Value::Null,
             },
@@ -1289,6 +1292,7 @@ mod tests {
             ActionResult {
                 action: Action::PreviewHandoff,
                 session_id: None,
+                workspace_id: None,
                 response,
                 extra: Value::Null,
             },

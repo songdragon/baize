@@ -12,16 +12,26 @@ pub(super) fn render_resize_screen(frame: &mut Frame<'_>, area: Rect, state: &Tu
             }
         ),
         Some(Overlay::Cancel) => {
-            format!(
+            let mut text = format!(
                 "Cancel Baize session?\nEnter cancel\nEsc stay\n{}\nProvider may keep running.",
                 state
                     .ui
                     .cancel_session_id
                     .as_deref()
                     .unwrap_or("No session selected")
-            )
+            );
+            if let Some(notice) = state.ui.notice.as_deref() {
+                text.push('\n');
+                text.push_str(notice);
+            }
+            text
         }
-        _ => "Baize\nResize terminal to at least 36 × 10\nCtrl-Q / Ctrl-C: review exit".into(),
+        _ => match state.ui.notice.as_deref() {
+            Some(notice) => format!("Baize\nResize terminal to at least 36 × 10\n{notice}\nCtrl-Q / Ctrl-C: review exit"),
+            None => {
+                "Baize\nResize terminal to at least 36 × 10\nCtrl-Q / Ctrl-C: review exit".into()
+            }
+        },
     };
     frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
 }
@@ -71,6 +81,7 @@ pub(super) fn render_overlay(
         Overlay::Quit => {
             let has_draft = !state.input.is_empty()
                 || !state.image_paths.is_empty()
+                || !state.ui.recovery_drafts.is_empty()
                 || state
                     .ui
                     .drafts
@@ -251,6 +262,8 @@ mod tests {
         ] {
             assert!(text.contains(expected));
         }
+        assert!(!confirm_cancel(&mut state, true));
+        assert!(draw(&state, 35, 9).contains("Wait for the current"));
         for size in [(0, 0), (1, 1), (10, 2)] {
             draw(&state, size.0, size.1);
         }

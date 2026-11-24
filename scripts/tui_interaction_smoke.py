@@ -116,7 +116,7 @@ def main():
         try:
             client.send(b"\x1b[200~" + draft.encode() + b"\x1b[201~")
             document = json.loads((Path(directory) / "tui-drafts.json").read_text())
-            stored = document["workspaces"][str(Path.cwd())][""]
+            stored = document["workspaces"][str(Path.cwd())]["drafts"][""]
             assert stored[0] == draft, "Pasted draft was not checkpointed"
             client.process.kill()  # Simulate abrupt client failure, without an exit checkpoint.
             client.process.wait(timeout=3)
@@ -159,6 +159,34 @@ def main():
             assert b"\x1b[?1049l" in client.output
             (args.output_dir / "after-restart.ansi").write_bytes(client.output)
             report = {"passed": True, "checks": ["Unicode multiline paste checkpoint", "SIGKILL and restart recovery", "reverse focus", "permission review", "cancel review without confirmation", "saved-draft quit dialog", "repeated exit shortcut protection", "Esc resumes", "terminal mode restoration"], "cancel_dialog_observed": cancel_dialog_observed, "provider_prompts_submitted": 0}
+        finally:
+            client.close()
+
+        # V1 did not distinguish unsent drafts from possibly executed submissions.
+        marker = "LEGACY_REVIEW_INPUT"
+        cache = Path(directory) / "tui-drafts.json"
+        cache.write_text(json.dumps({"version": 1, "workspaces": {str(Path.cwd()): {"": [marker, 3, []]}}}))
+        client = Client(binary, directory)
+        try:
+            assert marker not in client.screen(), "Legacy input returned as an unsent prompt"
+            assert "Ctrl-K" in client.screen()
+            client.send(b"\x0b")
+            assert "Commands" in client.screen(), "Refusing Enter outside the command palette"
+            client.send(b"recover")
+            assert "Recover last submitted prompt" in client.screen()
+            client.send(b"\r")  # Explicit recovery, never provider submission.
+            assert marker in client.screen()
+            migrated = json.loads(cache.read_text())
+            assert migrated["version"] == 2
+            assert migrated["workspaces"][str(Path.cwd())]["drafts"][""][0] == marker
+            assert not migrated["workspaces"][str(Path.cwd())]["submissions"]
+            client.send(b"\x11")
+            assert "Enter quit" in client.screen()
+            client.send(b"\r")
+            assert client.process.wait(timeout=3) == 0
+            assert termios.tcgetattr(client.slave) == client.original
+            (args.output_dir / "legacy-review.ansi").write_bytes(client.output)
+            report["checks"].append("explicit legacy recovery without automatic composer fill")
             (args.output_dir / "result.json").write_text(json.dumps(report, indent=2) + "\n")
             print(json.dumps(report))
         finally:

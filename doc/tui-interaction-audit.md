@@ -2,6 +2,8 @@
 
 2026-11-22，基线 `fe0a2cae88de8acbc5c85ae377b31da67c778234`。本轮检查 Baize 日常编辑、会话恢复、执行过程阅读、provider 选择、权限处理、取消和退出恢复链路。目标是避免用户输入丢失、目标错配和不可见的快捷键副作用。
 
+本页保留当轮验收快照。2026-11-25 的双重 review、草稿格式升级及修复取舍见 [后续核验](tui-review-followup.md)；当前操作说明见 [quickstart](quickstart.md)。
+
 ## 方法与范围
 
 先采集基线，再修复、捕获相同状态并执行回归。离线截图来自真实 `render()` 与 Ratatui `CompletedFrame.buffer`，并非静态 UI 示意；故障和权限使用受控数据，不对真实会话发送取消或审批。修复后的 release 二进制另在 POSIX PTY 中连接已有本机 daemon，读取历史、强制结束客户端并重启；草稿目录使用临时目录，不读取或覆盖用户的客户端草稿。正常启动会注册当前工作区并探测 provider diagnostics。

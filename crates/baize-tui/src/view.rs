@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         Constraint::Length(2),
         Constraint::Min(3),
         Constraint::Length(composer_height),
-        Constraint::Length(1),
+        Constraint::Length(1 + u16::from(state.ui.draft_error.is_some())),
     ])
     .split(area);
     render_header(frame, chunks[0], state);
@@ -69,19 +69,21 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         render_transcript(frame, main, state);
     }
     render_composer(frame, chunks[2], state);
-    let status = state.ui.draft_error.as_deref().or(state.ui.notice.as_deref()).unwrap_or(
+    let status = state.ui.notice.as_deref().unwrap_or(
         "F9 process · F6 focus · Space fold / Enter detail when focused · Esc compose · F1 help",
     );
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(
-            if state.ui.notice.is_some() || state.ui.draft_error.is_some() {
-                Color::Yellow
-            } else {
-                Color::Gray
-            },
-        )),
-        chunks[3],
-    );
+    let mut status_lines = vec![Line::styled(
+        status,
+        Style::default().fg(if state.ui.notice.is_some() {
+            Color::Yellow
+        } else {
+            Color::Gray
+        }),
+    )];
+    if let Some(error) = state.ui.draft_error.as_deref() {
+        status_lines.push(Line::styled(error, Style::default().fg(Color::Yellow)));
+    }
+    frame.render_widget(Paragraph::new(status_lines), chunks[3]);
     if let Some(overlay) = state.ui.overlay {
         render_overlay(frame, area, state, overlay);
     }

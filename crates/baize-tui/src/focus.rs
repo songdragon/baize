@@ -32,6 +32,7 @@ mod tests {
                     image_paths: vec!["image.png".into()],
                     ..TuiState::default()
                 };
+                begin_output_turn(&mut state, "codex", None);
                 state.ui.cursor = 2;
                 state.ui.focus = *start;
                 let (mut prompt, mut ui) = (None, None);

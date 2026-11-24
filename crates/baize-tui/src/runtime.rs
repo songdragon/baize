@@ -66,12 +66,16 @@ fn run_app(
     state.background_status = Some("Connecting".into());
     loop {
         let size = terminal.size()?;
+        state.ui.terminal_size = (size.width, size.height);
         state.ui.wrap_width = conversation_wrap_width(&state, size.width);
         let (_, cursor_row, _) = editor_rows(&state, size.width.saturating_sub(6));
         let composer_height = (cursor_row as u16 + 4)
             .clamp(4, 8)
             .min(size.height.saturating_sub(6));
-        state.ui.viewport_height = usize::from(size.height.saturating_sub(composer_height + 5));
+        state.ui.viewport_height = usize::from(
+            size.height
+                .saturating_sub(composer_height + 5 + u16::from(state.ui.draft_error.is_some())),
+        );
         poll_prompt_task(&mut state, &mut prompt_task);
         poll_ui_task(&mut state, &mut ui_task);
         if state.ui.session_status == "Canceled" && prompt_task.is_some() {
@@ -307,7 +311,7 @@ pub(super) fn handle_key(
                     .modifiers
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
         {
-            if prompt.is_some() || ui.is_some() || state.ui.execution_uncertain {
+            if prompt.is_some() || ui.is_some() {
                 state.ui.notice = Some("An operation is running. Your draft is kept.".into());
                 return Ok(false);
             }

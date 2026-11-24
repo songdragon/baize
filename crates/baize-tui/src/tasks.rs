@@ -22,13 +22,7 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
                 finish_output_turn(state, "not_submitted", None);
                 state.activity_status = "blocked".into();
                 state.ui.execution_uncertain = false;
-                if state.input.is_empty() {
-                    if let Some(last) = &state.ui.last_submission {
-                        state.input = last.prompt.clone();
-                        state.image_paths = last.image_paths.clone();
-                        state.ui.cursor = usize::MAX;
-                    }
-                }
+                restore_unsubmitted_prompt(state);
                 state.ui.notice = Some(format!(
                     "Prompt not submitted: {error}. Your draft can be reviewed and sent again."
                 ));
@@ -46,22 +40,13 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
                 break;
             }
             Ok(PromptTaskMessage::Failed(error)) => {
-                finish_output_turn(state, "unconfirmed", None);
-                state.ui.execution_uncertain = state.session_id.is_some();
-                state.activity_status = "failed".to_string();
-                state.streaming_assistant_open = false;
-                state.ui.notice=Some("Execution result uncertain. Inspect changes and history before sending again; recover the prompt via Ctrl-K.".into());
-                state.push_message(format!("error: {error}"));
+                apply_prompt_task_failure(state, &error);
                 *prompt_task = None;
                 break;
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
-                finish_output_turn(state, "unconfirmed", None);
-                state.ui.execution_uncertain = state.session_id.is_some();
-                state.activity_status = "failed".to_string();
-                state.streaming_assistant_open = false;
-                state.push_message("error: prompt worker disconnected".to_string());
+                apply_prompt_task_failure(state, "prompt worker disconnected");
                 *prompt_task = None;
                 break;
             }
@@ -239,9 +224,20 @@ pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTa
     append_session_diff(state, &completion.diff_response);
     state.streaming_assistant_open = false;
     state.activity_status = prompt_activity_after_response(&completion.prompt_response).to_string();
+    state.ui.recovery_drafts.remove(&completion.session_id);
 }
 
 pub(super) fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStarted) {
+    if let Some(recovery) = state
+        .ui
+        .recovery_drafts
+        .remove(state.session_id.as_deref().unwrap_or_default())
+    {
+        state
+            .ui
+            .recovery_drafts
+            .insert(started.session_id.clone(), recovery);
+    }
     if let Some(workspace_id) = &started.workspace_id {
         state.workspace_id = Some(workspace_id.clone());
     }

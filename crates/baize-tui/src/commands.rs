@@ -149,14 +149,18 @@ pub(super) fn run_command(
         CommandId::Cancel => request_cancel_confirmation(state),
         CommandId::RecoverDraft => {
             if let Some(last) = state.ui.last_submission.clone() {
-                if !state.input.is_empty() {
+                if !state.input.is_empty() || !state.image_paths.is_empty() {
                     state.ui.notice = Some(
-                        "Clear the current draft before recovering the last submission".into(),
+                        "Clear the current draft and attachments before recovering the last submission".into(),
                     );
                 } else {
                     state.input = last.prompt;
                     state.image_paths = last.image_paths;
                     state.ui.cursor = usize::MAX;
+                    state
+                        .ui
+                        .recovery_drafts
+                        .remove(state.session_id.as_deref().unwrap_or_default());
                     state.ui.notice=Some("Draft restored for review. Check the previous result before sending again.".into());
                 }
             }

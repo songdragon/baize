@@ -112,9 +112,11 @@ Restart an existing daemon after adapter/daemon changes: closing the TUI alone l
 | `Esc` | Close overlay or return focus to composer |
 | `Ctrl-Q` or `Ctrl-C` | Always confirm exit; Enter quits, Esc stays |
 
-Wide terminals can show conversations, the main dialogue and an inspector. Below 100 columns, use F6 or Shift-Tab to focus the inspector. F5 reconciles recorded results after a disconnect; it never automatically resubmits work. Recover the last submission for editing through Ctrl-K, and inspect uncertain results before sending again. Both Ctrl-A and Ctrl-D first open a hidden permission for review; press again after reviewing the same target. Baize permission records are separate from provider-native approval dialogs.
+Wide terminals can show conversations, the main dialogue and an inspector. Below 100 columns, use F6 or Shift-Tab to focus the inspector. F5 reconciles recorded results after a disconnect; it never automatically resubmits work. Recover the last submission for editing through Ctrl-K, and inspect uncertain results before sending again. Both Ctrl-A and Ctrl-D first open a hidden permission for review; press again after reviewing the same target. Decisions require at least 36×18; use PgUp/PgDn to read long commands and reasons. Baize permission records are separate from provider-native approval dialogs.
 
-Draft text, cursor and attachment paths are saved in `{data_dir}/tui-drafts.json`, grouped by workspace and session. `BAIZE_DATA_DIR` overrides the data directory; otherwise Baize uses the system application data directory (on macOS, `~/Library/Application Support/baize`). New-conversation drafts return on startup; Ctrl-O / Ctrl-L restores drafts attached to saved sessions. Saving uses atomic replacement and Unix mode `0600`; a damaged file is preserved and a visible error replaces the normal footer. The file contains local plain text and attachment paths, not copies of attached images. Clearing a draft and allowing the next UI refresh removes it from the cache. A running or uncertain submission remains recoverable until its recorded result is reconciled; recovery never sends it automatically. Confirmed finished submissions are removed unless you have started another draft.
+Draft text, cursor and attachment paths are saved in `{data_dir}/tui-drafts.json`, grouped by workspace and session. `BAIZE_DATA_DIR` overrides the data directory; otherwise Baize uses the system application data directory (on macOS, `~/Library/Application Support/baize`). Unsent new-conversation drafts return on startup; Ctrl-O / Ctrl-L restores unsent drafts attached to saved sessions. Saving uses atomic replacement and Unix mode `0600`; damaged files are preserved. Save errors have their own footer row alongside operation feedback. The file contains local plain text and attachment paths, not copies of attached images. Clearing an unsent draft and allowing the next UI refresh removes it from the cache.
+
+Cache format v2 separates unsent drafts from submitted or uncertain inputs. Submitted inputs stay out of the composer until you explicitly choose Recover through Ctrl-K; recovery never sends a prompt. Version 1 entries are ambiguous and are imported for explicit review, including previously unsent input. Unknown versions are preserved. Check history before recovery. On a save conflict, copy your unsaved input before closing and reopening that client; concurrent clients do not merge drafts or overwrite each other's workspace snapshot.
 
 An offline UI fixture is available without any daemon or provider calls:
 
@@ -138,7 +140,7 @@ cargo build --release -p baize-cli
 python3 scripts/tui_interaction_smoke.py
 ```
 
-This POSIX/Python 3.11+ check covers crash/restart recovery, focus, permission review, cancellation review and terminal restoration. Normal TUI startup registers the current workspace and probes diagnostics; the check never confirms cancellation or permission decisions. See [the interaction audit](tui-interaction-audit.md) for issues and verification evidence.
+This POSIX/Python 3.11+ check covers crash/restart recovery, explicit legacy recovery, focus, permission review, cancellation review and terminal restoration. Normal TUI startup registers the current workspace and probes diagnostics; the check never confirms cancellation or permission decisions. See [the interaction audit](tui-interaction-audit.md) and [review follow-up](tui-review-followup.md) for issues and verification evidence.
 
 ## Local API Examples
 

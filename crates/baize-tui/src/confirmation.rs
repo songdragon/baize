@@ -33,6 +33,16 @@ pub(super) fn confirm_cancel(state: &mut TuiState, background_busy: bool) -> boo
 }
 
 pub(super) fn permission_review_ready(state: &mut TuiState) -> bool {
+    if state.ui.terminal_size.0 < 36 || state.ui.terminal_size.1 < 18 {
+        state.ui.focus = Focus::Inspector;
+        state.ui.panel = Panel::Permissions;
+        state.detail_mode = true;
+        state.ui.reviewed_permission_id = None;
+        state.ui.notice = Some(
+            "Resize to at least 36 × 18 to review permissions; PgUp/PgDn scroll details.".into(),
+        );
+        return false;
+    }
     let selected = state
         .selected_permission()
         .map(|permission| permission.id.clone());
@@ -62,6 +72,71 @@ pub(super) fn permission_review_ready(state: &mut TuiState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_decisions_require_a_readable_terminal_and_review_again_after_resize() {
+        let mut state = TuiState {
+            pending_permissions: vec![PermissionView {
+                id: "perm_1".into(),
+                session_id: Some("task_1".into()),
+                command: "cargo test".into(),
+                reason: "review first".into(),
+                status: "Pending".into(),
+                risk_level: None,
+            }],
+            ..TuiState::default()
+        };
+        let (mut prompt, mut task) = (None, None);
+        for size in [(35, 9), (36, 10), (80, 17)] {
+            state.ui.terminal_size = size;
+            for command in [CommandId::Approve, CommandId::Deny, CommandId::Approve] {
+                run_command(&mut state, command, &mut prompt, &mut task).unwrap();
+                assert!(task.is_none());
+                assert!(state.ui.reviewed_permission_id.is_none());
+                assert!(state.ui.notice.as_deref().unwrap().contains("Resize"));
+            }
+        }
+        state.ui.terminal_size = (80, 18);
+        assert!(!permission_review_ready(&mut state));
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &mut prompt,
+            &mut task,
+        )
+        .unwrap();
+        assert!(permission_review_ready(&mut state));
+        assert_eq!(state.ui.inspector_scroll, 10);
+        state.ui.terminal_size = (35, 9);
+        assert!(!permission_review_ready(&mut state));
+        state.ui.terminal_size = (80, 18);
+        assert!(!permission_review_ready(&mut state));
+        assert_eq!(state.ui.inspector_scroll, 0);
+        assert!(prompt.is_none() && task.is_none());
+    }
+
+    #[test]
+    fn an_uncertain_result_with_no_worker_explains_how_to_reconcile_without_resubmitting() {
+        let mut state = TuiState {
+            session_id: Some("task_uncertain".into()),
+            input: "keep my draft".into(),
+            image_paths: vec!["image.png".into()],
+            ..TuiState::default()
+        };
+        state.ui.execution_uncertain = true;
+        let (mut prompt, mut task) = (None, None);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut prompt,
+            &mut task,
+        )
+        .unwrap();
+        assert!(state.ui.notice.as_deref().unwrap().contains("F5"));
+        assert_eq!(state.input, "keep my draft");
+        assert_eq!(state.image_paths, [PathBuf::from("image.png")]);
+        assert!(prompt.is_none() && task.is_none());
+    }
 
     #[test]
     fn cancellation_requires_confirmation_and_escape_preserves_execution_and_draft() {
