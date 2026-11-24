@@ -159,7 +159,7 @@ All dependency versions are pinned in `[workspace.dependencies]`. Add new deps t
 
 See `doc/tui-design.md` and `doc/mvp-implementation-plan.md` for implementation status. Do not reintroduce obsolete MVP TODOs for features already shipped.
 
-- TUI drafts are currently held in client memory, with exit confirmation; they are not durable across client restarts.
+- TUI drafts persist locally by workspace/session. Unsent drafts restore automatically; submitted, uncertain and legacy inputs require explicit recovery through Ctrl-K. Cache conflicts preserve disk data and show a save error; concurrent draft merging is not implemented.
 - Canceling a Baize session does not guarantee provider process termination. Unconfirmed results require reconciliation before continuing.
 - Provider Desktop execution, shared configuration mapping and full native capability equivalence remain unverified/unimplemented as documented.
 - Provider validation must use evidence from the actual entry point; unit tests must not require local provider availability or spend model quota.

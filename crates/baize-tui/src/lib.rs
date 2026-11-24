@@ -267,6 +267,10 @@ mod stream;
 use stream::*;
 mod commands;
 use commands::*;
+mod confirmation;
+use confirmation::*;
+mod focus;
+use focus::*;
 mod transcript_view;
 use transcript_view::*;
 mod pagination;
@@ -277,14 +281,22 @@ mod workbench;
 use workbench::*;
 mod editor;
 use editor::*;
+mod drafts;
+use drafts::*;
+mod draft_store;
+use draft_store::*;
 mod actions;
 use actions::*;
 mod runtime;
 use runtime::*;
 mod tasks;
 use tasks::*;
+mod refresh;
+use refresh::*;
 mod view;
 use view::*;
+mod overlays;
+use overlays::*;
 mod providers;
 use providers::*;
 mod attachments;
@@ -305,6 +317,9 @@ mod transport;
 pub use runtime::run;
 use transport::*;
 pub use view::render;
+
+#[cfg(test)]
+mod interaction_audit;
 
 #[cfg(test)]
 mod tests {
@@ -1232,6 +1247,7 @@ mod tests {
             ActionResult {
                 action: Action::PreviewHandoff,
                 session_id: None,
+                workspace_id: None,
                 response,
                 extra: Value::Null,
             },
@@ -1276,6 +1292,7 @@ mod tests {
             ActionResult {
                 action: Action::PreviewHandoff,
                 session_id: None,
+                workspace_id: None,
                 response,
                 extra: Value::Null,
             },

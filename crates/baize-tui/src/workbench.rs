@@ -50,6 +50,7 @@ pub(crate) enum Overlay {
     Commands,
     Sessions,
     Quit,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,7 @@ pub(crate) struct UiState {
     pub stderr_seen: bool,
     pub wrap_width: u16,
     pub viewport_height: usize,
+    pub terminal_size: (u16, u16),
     pub execution_uncertain: bool,
     pub focus: Focus,
     pub panel: Panel,
@@ -72,7 +74,12 @@ pub(crate) struct UiState {
     pub session_status: String,
     pub notice: Option<String>,
     pub drafts: HashMap<String, (String, usize, Vec<PathBuf>)>,
+    pub recovery_drafts: HashMap<String, (String, usize, Vec<PathBuf>)>,
     pub last_submission: Option<PendingPromptSubmission>,
+    pub cancel_session_id: Option<String>,
+    pub reviewed_permission_id: Option<String>,
+    pub drafts_persisted: bool,
+    pub draft_error: Option<String>,
 }
 
 impl Default for UiState {
@@ -82,6 +89,7 @@ impl Default for UiState {
             stderr_seen: false,
             wrap_width: 75,
             viewport_height: 16,
+            terminal_size: (112, 36),
             execution_uncertain: false,
             focus: Focus::Composer,
             panel: Panel::Overview,
@@ -96,7 +104,12 @@ impl Default for UiState {
             session_status: "New".to_string(),
             notice: None,
             drafts: HashMap::new(),
+            recovery_drafts: HashMap::new(),
             last_submission: None,
+            cancel_session_id: None,
+            reviewed_permission_id: None,
+            drafts_persisted: false,
+            draft_error: None,
         }
     }
 }
@@ -130,15 +143,13 @@ pub(super) fn session_matches(state: &TuiState) -> Vec<usize> {
 }
 
 pub(super) fn save_draft(state: &mut TuiState) {
+    remember_recovery_draft(state);
     let key = state.session_id.clone().unwrap_or_default();
-    state.ui.drafts.insert(
-        key,
-        (
-            state.input.clone(),
-            state.ui.cursor,
-            state.image_paths.clone(),
-        ),
-    );
+    if let Some(draft) = current_draft(state) {
+        state.ui.drafts.insert(key, draft);
+    } else {
+        state.ui.drafts.remove(&key);
+    }
 }
 
 pub(super) fn restore_draft(state: &mut TuiState) {
@@ -147,6 +158,7 @@ pub(super) fn restore_draft(state: &mut TuiState) {
     state.input = input;
     state.ui.cursor = cursor;
     state.image_paths = images;
+    restore_recovery_submission(state);
 }
 
 pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()> {
@@ -159,6 +171,7 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
     reset_stream_output(state);
     state.streaming_assistant_open = false;
     state.ui.execution_uncertain = false;
+    let mut terminal_result = false;
     for event in events {
         if !mark_event_seen(state, event) {
             continue;
@@ -168,6 +181,7 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
         match event["event_type"].as_str().unwrap_or("") {
             "session.agent.started" => {
                 state.ui.execution_uncertain = true;
+                terminal_result = false;
                 if let Some(prompt) = payload["prompt"].as_str() {
                     push_transcript_gap(state);
                     state.push_message(format!("> {prompt}"));
@@ -177,6 +191,7 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
             }
             "session.agent.completed" if payload["status"].as_str() != Some("canceled") => {
                 state.ui.execution_uncertain = false;
+                terminal_result = true;
                 render_agent_event(state, event);
             }
             "session.recovered"
@@ -184,6 +199,7 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
             | "session.agent.ignored"
             | "session.completed" => {
                 state.ui.execution_uncertain = false;
+                terminal_result = true;
                 render_agent_event(state, event);
                 state.push_message(status_event_line(
                     event["event_type"].as_str().unwrap_or("status"),
@@ -204,6 +220,12 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
             _ => {}
         }
     }
+    if terminal_result {
+        state
+            .ui
+            .recovery_drafts
+            .remove(state.session_id.as_deref().unwrap_or_default());
+    }
     state.activity_status = if state.ui.execution_uncertain {
         "execution unconfirmed"
     } else {
@@ -223,6 +245,32 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_markers_do_not_unlock_new_sessions_until_execution_finishes() {
+        let mut state = TuiState {
+            session_id: Some("task_old".into()),
+            input: "draft".into(),
+            ..TuiState::default()
+        };
+        state.ui.session_status = "Canceled".into();
+        let mut events = vec![
+            json!({"id":"started","event_type":"session.agent.started","payload":{"prompt":"running"}}),
+            json!({"id":"cancel","event_type":"session.agent.completed","payload":{"status":"canceled"}}),
+        ];
+        replay_session(&mut state, &json!({"events":events})).unwrap();
+        let (mut prompt, mut task) = (None, None);
+        run_command(&mut state, CommandId::New, &mut prompt, &mut task).unwrap();
+        assert!(state.ui.execution_uncertain);
+        assert_eq!(state.session_id.as_deref(), Some("task_old"));
+        assert_eq!(state.input, "draft");
+        events.push(json!({"id":"finished","event_type":"session.agent.ignored","payload":{"reason":"provider returned after cancel"}}));
+        replay_session(&mut state, &json!({"events":events})).unwrap();
+        assert!(!state.ui.execution_uncertain);
+        run_command(&mut state, CommandId::New, &mut prompt, &mut task).unwrap();
+        assert!(state.session_id.is_none());
+        assert_eq!(state.ui.drafts["task_old"].0, "draft");
+    }
 
     #[test]
     fn replay_retains_roles_provider_order_and_deduplicates() {

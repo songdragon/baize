@@ -1,10 +1,10 @@
 use super::*;
-use ratatui::widgets::{BorderType, Clear};
+use ratatui::widgets::BorderType;
 
-const BG: Color = Color::Rgb(18, 22, 30);
-const PANEL: Color = Color::Rgb(24, 29, 39);
-const TEXT: Color = Color::Rgb(218, 225, 236);
-const ACCENT: Color = Color::Rgb(109, 211, 194);
+pub(super) const BG: Color = Color::Rgb(18, 22, 30);
+pub(super) const PANEL: Color = Color::Rgb(24, 29, 39);
+pub(super) const TEXT: Color = Color::Rgb(218, 225, 236);
+pub(super) const ACCENT: Color = Color::Rgb(109, 211, 194);
 
 pub(super) fn panel_block(title: &str, focused: bool) -> Block<'static> {
     Block::default()
@@ -26,11 +26,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         area,
     );
     if area.width < 36 || area.height < 10 {
-        frame.render_widget(
-            Paragraph::new("Baize\nResize terminal to at least 36 × 10\nCtrl-Q to quit")
-                .wrap(Wrap { trim: false }),
-            area,
-        );
+        render_resize_screen(frame, area, state);
         return;
     }
     let (_, cursor_row, _) = editor_rows(state, area.width.saturating_sub(6));
@@ -41,7 +37,7 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
         Constraint::Length(2),
         Constraint::Min(3),
         Constraint::Length(composer_height),
-        Constraint::Length(1),
+        Constraint::Length(1 + u16::from(state.ui.draft_error.is_some())),
     ])
     .split(area);
     render_header(frame, chunks[0], state);
@@ -76,14 +72,18 @@ pub fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let status = state.ui.notice.as_deref().unwrap_or(
         "F9 process · F6 focus · Space fold / Enter detail when focused · Esc compose · F1 help",
     );
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(if state.ui.notice.is_some() {
+    let mut status_lines = vec![Line::styled(
+        status,
+        Style::default().fg(if state.ui.notice.is_some() {
             Color::Yellow
         } else {
             Color::Gray
-        })),
-        chunks[3],
-    );
+        }),
+    )];
+    if let Some(error) = state.ui.draft_error.as_deref() {
+        status_lines.push(Line::styled(error, Style::default().fg(Color::Yellow)));
+    }
+    frame.render_widget(Paragraph::new(status_lines), chunks[3]);
     if let Some(overlay) = state.ui.overlay {
         render_overlay(frame, area, state, overlay);
     }
@@ -265,144 +265,6 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &TuiStat
     }
 }
 
-fn render_overlay(frame: &mut Frame<'_>, area: Rect, state: &TuiState, overlay: Overlay) {
-    let width = area.width.saturating_sub(4).min(90);
-    let height = area
-        .height
-        .saturating_sub(2)
-        .min(if overlay == Overlay::Quit { 9 } else { 25 });
-    let popup = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
-    frame.render_widget(Clear, popup);
-    let title = match overlay {
-        Overlay::Help => "Keyboard help · ↑↓ scroll",
-        Overlay::Commands => "Commands",
-        Overlay::Sessions => "Open conversation",
-        Overlay::Quit => "Leave Baize?",
-    };
-    let mut lines = vec![];
-    match overlay {
-        Overlay::Quit => {
-            let has_draft = !state.input.is_empty()
-                || !state.image_paths.is_empty()
-                || state
-                    .ui
-                    .drafts
-                    .values()
-                    .any(|(input, _, images)| !input.is_empty() || !images.is_empty());
-            lines.push(Line::raw(if has_draft {
-                "Your unsent drafts and attachments will be lost."
-            } else {
-                "Close this terminal client?"
-            }));
-            lines.push(Line::raw(
-                "The daemon and any provider execution remain active.",
-            ));
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                "Enter quit · Esc stay",
-                Style::default().fg(ACCENT),
-            ));
-        }
-        Overlay::Help => {
-            lines.push(Line::raw(
-                "One conversation. Interchangeable coding agents.",
-            ));
-            lines.push(Line::styled(
-                "Enter send · Alt-Enter / Ctrl-J newline · arrows edit",
-                Style::default().fg(ACCENT),
-            ));
-            lines.push(Line::raw(
-                "F6 focus · F7 inspector tab · F8 details · Esc return",
-            ));
-            lines.push(Line::raw(
-                "F9 process · Space fold · ↑↓ operation · Enter details · ←→ turn",
-            ));
-            lines.push(Line::raw(
-                "PgUp/PgDn scroll conversation or focused inspector",
-            ));
-            lines.push(Line::raw(
-                "Tab target provider · next turn keeps this Baize session",
-            ));
-            lines.push(Line::raw(
-                "Ctrl-V image · /image path · /unimage clears attachments",
-            ));
-            lines.push(Line::raw(""));
-            for (_, label, key) in COMMANDS {
-                lines.push(Line::raw(format!("{key:<9} {label}")));
-            }
-        }
-        Overlay::Commands | Overlay::Sessions => {
-            lines.push(Line::styled(
-                format!("Search: {}▏", state.ui.query),
-                Style::default().fg(ACCENT),
-            ));
-            lines.push(Line::styled(
-                "↑↓ select · Enter open · Esc dismiss",
-                muted_style(),
-            ));
-            lines.push(Line::raw(""));
-            let entries: Vec<String> = if overlay == Overlay::Commands {
-                command_matches(state)
-                    .iter()
-                    .map(|i| format!("{}  {}", COMMANDS[*i].1, COMMANDS[*i].2))
-                    .collect()
-            } else {
-                session_matches(state)
-                    .iter()
-                    .map(|i| {
-                        let s = &state.recent_sessions[*i];
-                        format!(
-                            "{} · {} · {}",
-                            s.objective,
-                            s.status,
-                            s.active_provider_id.as_deref().unwrap_or("none")
-                        )
-                    })
-                    .collect()
-            };
-            let visible = usize::from(height.saturating_sub(6)).max(1);
-            let start = state.ui.menu_index.saturating_sub(visible - 1);
-            for (i, entry) in entries.iter().enumerate().skip(start).take(visible) {
-                lines.push(Line::styled(
-                    format!(
-                        "{} {}",
-                        if i == state.ui.menu_index { "›" } else { " " },
-                        entry
-                    ),
-                    if i == state.ui.menu_index {
-                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(TEXT)
-                    },
-                ));
-            }
-            if entries.is_empty() {
-                lines.push(Line::raw("No matches"));
-            }
-        }
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(PANEL).fg(TEXT))
-            .block(panel_block(title, true))
-            .scroll((
-                if overlay == Overlay::Help {
-                    state.ui.menu_index as u16
-                } else {
-                    0
-                },
-                0,
-            ))
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
-
 pub(super) fn conversation_wrap_width(state: &TuiState, width: u16) -> u16 {
     let sidebar = if width >= 120 { 25 } else { 0 };
     let inspector = state.detail_mode
@@ -467,6 +329,7 @@ mod tests {
                             Overlay::Commands => "No matches",
                             Overlay::Sessions => "No matches",
                             Overlay::Quit => "Enter quit",
+                            Overlay::Cancel => "Enter cancel",
                         })
                     );
                 }

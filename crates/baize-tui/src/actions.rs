@@ -16,6 +16,7 @@ pub(crate) enum Action {
 pub(crate) struct ActionResult {
     pub(super) action: Action,
     pub(super) session_id: Option<String>,
+    pub(super) workspace_id: Option<String>,
     pub(super) response: Value,
     pub(super) extra: Value,
 }
@@ -96,6 +97,7 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
         Ok(UiTaskCompletion::Action(Box::new(ActionResult {
             action,
             session_id,
+            workspace_id,
             response,
             extra,
         })))
@@ -103,7 +105,16 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
 }
 
 pub(super) fn apply_action(state: &mut TuiState, result: ActionResult) {
-    if result.session_id != state.session_id {
+    if result.action == Action::Sessions && result.workspace_id != state.workspace_id {
+        state.ui.notice =
+            Some("Ignored a response for a different workspace; refresh to reconcile".into());
+        return;
+    }
+    if !matches!(
+        result.action,
+        Action::Approve | Action::Deny | Action::Sessions
+    ) && result.session_id != state.session_id
+    {
         state.ui.notice =
             Some("Ignored a response for a different session; refresh to reconcile".into());
         return;
@@ -204,6 +215,70 @@ fn session_views_json(sessions: &[SessionView]) -> Value {
 mod tests {
     use super::*;
     #[test]
+    fn permission_results_are_applied_after_a_first_prompt_creates_its_session() {
+        for action in [Action::Approve, Action::Deny] {
+            let mut state = TuiState {
+                pending_permissions: vec![PermissionView {
+                    id: "perm_reviewed".into(),
+                    session_id: Some("task_other".into()),
+                    command: "cargo test".into(),
+                    reason: "reviewed".into(),
+                    status: "Pending".into(),
+                    risk_level: None,
+                }],
+                ..TuiState::default()
+            };
+            // The permission action started before this new session ID arrived.
+            state.session_id = Some("task_new".into());
+            apply_action(
+                &mut state,
+                ActionResult {
+                    action,
+                    session_id: None,
+                    workspace_id: None,
+                    response: json!({"permission":{"id":"perm_reviewed","status":"Resolved"}}),
+                    extra: Value::Null,
+                },
+            );
+            assert!(state.pending_permissions.is_empty());
+            assert_eq!(state.session_id.as_deref(), Some("task_new"));
+        }
+    }
+
+    #[test]
+    fn session_lists_are_scoped_to_workspace_while_the_current_session_can_change() {
+        let mut state = TuiState {
+            workspace_id: Some("ws_one".into()),
+            session_id: Some("task_new".into()),
+            ..TuiState::default()
+        };
+        apply_action(
+            &mut state,
+            ActionResult {
+                action: Action::Sessions,
+                session_id: None,
+                workspace_id: Some("ws_one".into()),
+                response: json!({"sessions":[{"id":"task_new","workspace_id":"ws_one","objective":"new"}]}),
+                extra: Value::Null,
+            },
+        );
+        assert_eq!(state.recent_sessions.len(), 1);
+        assert_eq!(state.recent_sessions[0].id, "task_new");
+        apply_action(
+            &mut state,
+            ActionResult {
+                action: Action::Sessions,
+                session_id: Some("task_new".into()),
+                workspace_id: Some("ws_other".into()),
+                response: json!({"sessions":[]}),
+                extra: Value::Null,
+            },
+        );
+        assert_eq!(state.recent_sessions.len(), 1);
+        assert!(state.ui.notice.as_deref().unwrap().contains("workspace"));
+    }
+
+    #[test]
     fn rejects_missing_and_concurrent_actions_without_network() {
         let mut state = TuiState::default();
         let mut task = None;
@@ -226,6 +301,7 @@ mod tests {
             ActionResult {
                 action: Action::Cancel,
                 session_id: Some("other".into()),
+                workspace_id: None,
                 response: json!({}),
                 extra: Value::Null,
             },
@@ -236,6 +312,7 @@ mod tests {
             ActionResult {
                 action: Action::PreviewHandoff,
                 session_id: Some("task_1".into()),
+                workspace_id: None,
                 response: json!({"handoff":{"id":"h_1","summary_markdown":"current facts"}}),
                 extra: Value::Null,
             },

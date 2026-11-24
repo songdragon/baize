@@ -52,18 +52,30 @@ fn run_app(
         daemon_status,
         ..TuiState::default()
     };
+    let mut draft_store =
+        match DraftStore::open(default_draft_path(), state.workspace.clone(), &mut state) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                state.ui.draft_error = Some(format!("Draft recovery unavailable: {error:#}"));
+                None
+            }
+        };
     let mut prompt_task = None;
     let mut ui_task = Some(start_initial_load_task());
     let mut workspace_loaded = false;
     state.background_status = Some("Connecting".into());
     loop {
         let size = terminal.size()?;
+        state.ui.terminal_size = (size.width, size.height);
         state.ui.wrap_width = conversation_wrap_width(&state, size.width);
         let (_, cursor_row, _) = editor_rows(&state, size.width.saturating_sub(6));
         let composer_height = (cursor_row as u16 + 4)
             .clamp(4, 8)
             .min(size.height.saturating_sub(6));
-        state.ui.viewport_height = usize::from(size.height.saturating_sub(composer_height + 5));
+        state.ui.viewport_height = usize::from(
+            size.height
+                .saturating_sub(composer_height + 5 + u16::from(state.ui.draft_error.is_some())),
+        );
         poll_prompt_task(&mut state, &mut prompt_task);
         poll_ui_task(&mut state, &mut ui_task);
         if state.ui.session_status == "Canceled" && prompt_task.is_some() {
@@ -74,6 +86,9 @@ fn run_app(
             state.background_status = Some("Loading workspace sessions".into());
             ui_task = Some(start_workspace_load_task());
         }
+        if let Some(store) = draft_store.as_mut() {
+            store.checkpoint(&mut state);
+        }
         terminal.draw(|frame| render(frame, &state))?;
         if !event::poll(Duration::from_millis(UI_EVENT_POLL_MS))? {
             continue;
@@ -83,7 +98,10 @@ fn run_app(
                 if key.kind != KeyEventKind::Release
                     && handle_key(&mut state, key, &mut prompt_task, &mut ui_task)? =>
             {
-                break
+                if let Some(store) = draft_store.as_mut() {
+                    store.checkpoint(&mut state);
+                }
+                break;
             }
             Event::Paste(text) if state.ui.overlay.is_some() => {
                 state
@@ -125,8 +143,17 @@ pub(super) fn handle_key(
     }
     if let Some(overlay) = state.ui.overlay {
         match key.code {
-            KeyCode::Esc => state.ui.overlay = None,
+            KeyCode::Esc => {
+                state.ui.overlay = None;
+                state.ui.cancel_session_id = None;
+            }
             KeyCode::Enter if overlay == Overlay::Quit => return Ok(true),
+            KeyCode::Enter if overlay == Overlay::Cancel => {
+                if !confirm_cancel(state, ui.is_some()) {
+                    return Ok(false);
+                }
+                request_action(state, ui, Action::Cancel);
+            }
             KeyCode::Enter if overlay == Overlay::Help => state.ui.overlay = None,
             KeyCode::Enter => {
                 let index = state.ui.menu_index;
@@ -217,17 +244,8 @@ pub(super) fn handle_key(
         }
         KeyCode::F(4) => open_selected(state, prompt, ui),
         KeyCode::F(5) => request_action(state, ui, Action::Details),
-        KeyCode::F(6) | KeyCode::BackTab => {
-            state.ui.focus = match state.ui.focus {
-                Focus::Composer => Focus::Conversation,
-                Focus::Conversation => Focus::Sessions,
-                Focus::Sessions => {
-                    state.detail_mode = true;
-                    Focus::Inspector
-                }
-                Focus::Inspector => Focus::Composer,
-            }
-        }
+        KeyCode::F(6) => move_focus(state, false),
+        KeyCode::BackTab => move_focus(state, true),
         KeyCode::F(7) => {
             state.ui.focus = Focus::Inspector;
             state.detail_mode = true;
@@ -267,6 +285,9 @@ pub(super) fn handle_key(
         KeyCode::Up if state.ui.focus == Focus::Inspector => {
             if state.ui.panel == Panel::Permissions {
                 state.select_previous_permission();
+                state.ui.reviewed_permission_id = state
+                    .selected_permission()
+                    .map(|permission| permission.id.clone());
                 state.ui.inspector_scroll = 0;
             } else {
                 state.ui.inspector_scroll = state.ui.inspector_scroll.saturating_sub(1);
@@ -275,6 +296,9 @@ pub(super) fn handle_key(
         KeyCode::Down if state.ui.focus == Focus::Inspector => {
             if state.ui.panel == Panel::Permissions {
                 state.select_next_permission();
+                state.ui.reviewed_permission_id = state
+                    .selected_permission()
+                    .map(|permission| permission.id.clone());
                 state.ui.inspector_scroll = 0;
             } else {
                 state.ui.inspector_scroll = state.ui.inspector_scroll.saturating_add(1);
@@ -287,7 +311,7 @@ pub(super) fn handle_key(
                     .modifiers
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
         {
-            if prompt.is_some() || ui.is_some() || state.ui.execution_uncertain {
+            if prompt.is_some() || ui.is_some() {
                 state.ui.notice = Some("An operation is running. Your draft is kept.".into());
                 return Ok(false);
             }

@@ -82,11 +82,25 @@ impl TuiState {
     }
 
     pub(super) fn set_pending_permissions(&mut self, permissions: Vec<PermissionView>) {
+        let previous = self
+            .selected_permission()
+            .map(|permission| permission.id.clone());
         self.pending_permissions = permissions;
-        if self.pending_permissions.is_empty() {
-            self.selected_permission_index = 0;
-        } else if self.selected_permission_index >= self.pending_permissions.len() {
-            self.selected_permission_index = self.pending_permissions.len() - 1;
+        self.selected_permission_index = previous
+            .as_ref()
+            .and_then(|id| {
+                self.pending_permissions
+                    .iter()
+                    .position(|permission| &permission.id == id)
+            })
+            .unwrap_or(0);
+        if self.ui.reviewed_permission_id.as_ref().is_some_and(|id| {
+            !self
+                .pending_permissions
+                .iter()
+                .any(|permission| &permission.id == id)
+        }) {
+            self.ui.reviewed_permission_id = None;
         }
     }
 

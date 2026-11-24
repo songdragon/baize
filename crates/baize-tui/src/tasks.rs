@@ -22,13 +22,7 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
                 finish_output_turn(state, "not_submitted", None);
                 state.activity_status = "blocked".into();
                 state.ui.execution_uncertain = false;
-                if state.input.is_empty() {
-                    if let Some(last) = &state.ui.last_submission {
-                        state.input = last.prompt.clone();
-                        state.image_paths = last.image_paths.clone();
-                        state.ui.cursor = usize::MAX;
-                    }
-                }
+                restore_unsubmitted_prompt(state);
                 state.ui.notice = Some(format!(
                     "Prompt not submitted: {error}. Your draft can be reviewed and sent again."
                 ));
@@ -46,22 +40,13 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
                 break;
             }
             Ok(PromptTaskMessage::Failed(error)) => {
-                finish_output_turn(state, "unconfirmed", None);
-                state.ui.execution_uncertain = state.session_id.is_some();
-                state.activity_status = "failed".to_string();
-                state.streaming_assistant_open = false;
-                state.ui.notice=Some("Execution result uncertain. Inspect changes and history before sending again; recover the prompt via Ctrl-K.".into());
-                state.push_message(format!("error: {error}"));
+                apply_prompt_task_failure(state, &error);
                 *prompt_task = None;
                 break;
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
-                finish_output_turn(state, "unconfirmed", None);
-                state.ui.execution_uncertain = state.session_id.is_some();
-                state.activity_status = "failed".to_string();
-                state.streaming_assistant_open = false;
-                state.push_message("error: prompt worker disconnected".to_string());
+                apply_prompt_task_failure(state, "prompt worker disconnected");
                 *prompt_task = None;
                 break;
             }
@@ -196,48 +181,6 @@ pub(super) fn apply_ui_task_completion(state: &mut TuiState, completion: UiTaskC
     }
 }
 
-pub(super) fn apply_initial_load_result(state: &mut TuiState, result: InitialLoadResult) {
-    if result.providers.is_ok() {
-        state.daemon_status = daemon_connected_message();
-    }
-    match result.providers {
-        Ok(providers) if !providers.is_empty() => {
-            state.providers = providers;
-            state.selected_provider_index = 0;
-        }
-        Ok(_) => state.push_message("daemon returned no enabled providers; using defaults"),
-        Err(error) => state.push_message(format!("provider load failed: {error}")),
-    }
-    match result.diagnostics {
-        Ok(diagnostics) => {
-            if let Some((from, to)) = state.set_provider_diagnostics(diagnostics) {
-                state.push_message(format!("provider auto-selected: {from} -> {to}"));
-            }
-            if state.detail_mode {
-                append_provider_diagnostic_issues(state);
-            }
-        }
-        Err(error) => state.push_message(format!("provider diagnostics failed: {error}")),
-    }
-    match result.permissions {
-        Ok(permissions) => state.set_pending_permissions(permissions),
-        Err(error) => state.push_message(format!("permission load failed: {error}")),
-    }
-    match result.runtime_policy {
-        Ok(policy) => state.runtime_policy = Some(policy),
-        Err(error) => {
-            state.runtime_policy = Some(default_runtime_policy());
-            state.push_message(format!(
-                "runtime policy unavailable; using safe default ask mode ({})",
-                runtime_policy_error_hint(&anyhow!(error.clone()))
-            ));
-        }
-    }
-    if state.detail_mode {
-        state.push_message("status load complete");
-    }
-}
-
 pub(super) fn detach_prompt_task_after_cancel(
     state: &mut TuiState,
     prompt_task: &mut Option<PromptTask>,
@@ -281,9 +224,20 @@ pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTa
     append_session_diff(state, &completion.diff_response);
     state.streaming_assistant_open = false;
     state.activity_status = prompt_activity_after_response(&completion.prompt_response).to_string();
+    state.ui.recovery_drafts.remove(&completion.session_id);
 }
 
 pub(super) fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStarted) {
+    if let Some(recovery) = state
+        .ui
+        .recovery_drafts
+        .remove(state.session_id.as_deref().unwrap_or_default())
+    {
+        state
+            .ui
+            .recovery_drafts
+            .insert(started.session_id.clone(), recovery);
+    }
     if let Some(workspace_id) = &started.workspace_id {
         state.workspace_id = Some(workspace_id.clone());
     }

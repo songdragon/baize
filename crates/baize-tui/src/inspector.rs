@@ -231,14 +231,6 @@ pub(super) fn inspector_lines(state: &TuiState, panel: Panel) -> Vec<Line<'stati
         }
         Panel::Permissions => {
             heading(&mut lines, "PENDING PERMISSIONS");
-            lines.push(Line::styled(
-                "↑↓ select · Ctrl-A approve · Ctrl-D deny",
-                muted_style(),
-            ));
-            lines.push(Line::styled(
-                "Baize approvals are distinct from provider-native prompts.",
-                muted_style(),
-            ));
             if state.pending_permissions.is_empty() {
                 lines.push(Line::raw("No pending permissions. Ctrl-P refreshes."));
             }
@@ -248,7 +240,6 @@ pub(super) fn inspector_lines(state: &TuiState, panel: Panel) -> Vec<Line<'stati
                 .enumerate()
                 .filter(|(i, _)| *i == state.selected_permission_index)
             {
-                lines.push(Line::raw(""));
                 heading(
                     &mut lines,
                     &format!(
@@ -263,11 +254,6 @@ pub(super) fn inspector_lines(state: &TuiState, panel: Panel) -> Vec<Line<'stati
                 );
                 field(
                     &mut lines,
-                    "Selection",
-                    &format!("{} / {}", index + 1, state.pending_permissions.len()),
-                );
-                field(
-                    &mut lines,
                     "Session",
                     p.session_id.as_deref().unwrap_or("workspace"),
                 );
@@ -278,7 +264,20 @@ pub(super) fn inspector_lines(state: &TuiState, panel: Panel) -> Vec<Line<'stati
                 );
                 field(&mut lines, "Command", &p.command);
                 field(&mut lines, "Reason", &p.reason);
+                field(
+                    &mut lines,
+                    "Selection",
+                    &format!("{} / {}", index + 1, state.pending_permissions.len()),
+                );
             }
+            lines.push(Line::styled(
+                "↑↓ select · PgUp/PgDn scroll · Ctrl-A approve · Ctrl-D deny",
+                muted_style(),
+            ));
+            lines.push(Line::styled(
+                "Baize approvals are distinct from provider-native prompts.",
+                muted_style(),
+            ));
         }
         Panel::Providers => {
             heading(&mut lines, "EXECUTION ENVIRONMENTS");
@@ -362,6 +361,29 @@ fn provider_rows(lines: &mut Vec<Line<'static>>, state: &TuiState, details: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn permission_command_and_reason_are_visible_in_a_short_terminal() {
+        let mut state = TuiState {
+            pending_permissions: vec![PermissionView {
+                id: "perm_1".into(),
+                session_id: Some("task_1".into()),
+                command: "cargo test".into(),
+                reason: "inspect tests first".into(),
+                status: "Pending".into(),
+                risk_level: Some("High".into()),
+            }],
+            ..TuiState::default()
+        };
+        state.ui.focus = Focus::Inspector;
+        state.ui.panel = Panel::Permissions;
+        state.detail_mode = true;
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 18)).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("task_1"));
+        assert!(text.contains("cargo test"));
+        assert!(text.contains("inspect tests first"));
+    }
     use ratatui::backend::TestBackend;
     #[test]
     fn renders_all_inspector_panels_with_real_details() {

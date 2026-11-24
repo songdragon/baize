@@ -132,30 +132,35 @@ pub(super) fn run_command(
                 start_permission_refresh_task,
             );
         }
-        CommandId::Approve
-            if state.ui.focus != Focus::Inspector || state.ui.panel != Panel::Permissions =>
-        {
-            state.ui.focus = Focus::Inspector;
-            state.ui.panel = Panel::Permissions;
-            state.detail_mode = true;
-            state.ui.inspector_scroll = 0;
-            state.ui.notice =
-                Some("Review the selected command and reason, then Ctrl-A approves it.".into());
+        CommandId::Approve | CommandId::Deny => {
+            if permission_review_ready(state) {
+                request_action(
+                    state,
+                    ui,
+                    if command == CommandId::Approve {
+                        Action::Approve
+                    } else {
+                        Action::Deny
+                    },
+                );
+            }
         }
-        CommandId::Approve => request_action(state, ui, Action::Approve),
-        CommandId::Deny => request_action(state, ui, Action::Deny),
         CommandId::Complete => request_action(state, ui, Action::Complete),
-        CommandId::Cancel => request_action(state, ui, Action::Cancel),
+        CommandId::Cancel => request_cancel_confirmation(state),
         CommandId::RecoverDraft => {
             if let Some(last) = state.ui.last_submission.clone() {
-                if !state.input.is_empty() {
+                if !state.input.is_empty() || !state.image_paths.is_empty() {
                     state.ui.notice = Some(
-                        "Clear the current draft before recovering the last submission".into(),
+                        "Clear the current draft and attachments before recovering the last submission".into(),
                     );
                 } else {
                     state.input = last.prompt;
                     state.image_paths = last.image_paths;
                     state.ui.cursor = usize::MAX;
+                    state
+                        .ui
+                        .recovery_drafts
+                        .remove(state.session_id.as_deref().unwrap_or_default());
                     state.ui.notice=Some("Draft restored for review. Check the previous result before sending again.".into());
                 }
             }
