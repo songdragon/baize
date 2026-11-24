@@ -35,6 +35,11 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
     let session_id = state.session_id.clone();
     let workspace_id = state.workspace_id.clone();
     let provider = state.selected_provider().to_string();
+    let draft = if state.input.trim().is_empty() {
+        "<context preview request>".into()
+    } else {
+        state.input.clone()
+    };
     let handoff = state.pending_handoff_id.clone();
     let permission = state.selected_permission().map(|p| p.id.clone());
     if action == Action::PreviewHandoff && state.active_provider.as_deref() == Some(&provider) {
@@ -59,7 +64,7 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
         let response = match action {
             Action::PreviewHandoff => post_json(
                 &format!("/sessions/{id}/handoff"),
-                json!({"to_provider_id":provider}),
+                json!({"to_provider_id":provider,"prompt":draft}),
             )?,
             Action::AcceptHandoff => post_json(
                 &format!(
@@ -85,7 +90,7 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
             Action::Cancel => post_json(&format!("/sessions/{id}/cancel"), json!({}))?,
             Action::Complete => post_json(&format!("/sessions/{id}/complete"), json!({}))?,
             Action::Details => {
-                extra = json!({"context_response":get_json(&format!("/sessions/{id}/context-preview?provider_id={provider}"))?,"events_response":load_session_events(id)?,"session_response":get_json(&format!("/sessions/{id}"))?});
+                extra = json!({"context_response":post_json(&format!("/sessions/{id}/context-preview"),json!({"provider_id":provider,"prompt":draft}))?,"events_response":load_session_events(id)?,"session_response":get_json(&format!("/sessions/{id}"))?});
                 get_json(&format!("/sessions/{id}/diff"))?
             }
             Action::Sessions => {
@@ -125,6 +130,9 @@ pub(super) fn apply_action(state: &mut TuiState, result: ActionResult) {
             state.pending_handoff_id = handoff["id"].as_str().map(str::to_string);
             state.pending_handoff_session_id = state.session_id.clone();
             state.ui.handoff = handoff.clone();
+            if result.response.get("context_preview").is_some() {
+                state.ui.context = result.response["context_preview"].clone();
+            }
             state.ui.panel = Panel::Handoff;
             state.detail_mode = true;
             state.ui.focus = Focus::Inspector;
@@ -182,6 +190,7 @@ pub(super) fn apply_action(state: &mut TuiState, result: ActionResult) {
             if let Err(error) = replay_session(state, &result.extra["events_response"]) {
                 state.ui.notice = Some(error.to_string());
             }
+            apply_continuity_status(state, &result.extra["session_response"]["session"]);
         }
         Action::Sessions => match parse_session_views(&result.response) {
             Ok(sessions) => {

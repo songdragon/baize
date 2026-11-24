@@ -35,6 +35,7 @@ pub(super) fn apply_selected_session_load(state: &mut TuiState, load: SelectedSe
         state.ui.notice = Some(format!("Cannot restore conversation: {error:#}"));
         return;
     }
+    apply_continuity_status(&mut restored, &load.session);
     append_route_history(&mut restored, &load.routes_response);
     restore_draft(&mut restored);
     restored.ui.focus = Focus::Composer;
@@ -63,6 +64,8 @@ pub(super) fn start_new_session(state: &mut TuiState) {
     state.ui.context = Value::Null;
     state.ui.handoff = Value::Null;
     state.ui.session_status = "New".into();
+    state.ui.uncertain_turn_id = None;
+    state.ui.execution_uncertain = false;
     state.ui.last_submission = None;
     state.session_id = None;
     state.active_provider = None;

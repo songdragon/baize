@@ -107,7 +107,9 @@ fn parse_http_json_bytes(response: &[u8]) -> Result<Value> {
     }
     let value: Value = serde_json::from_slice(&body).context("parse daemon JSON response")?;
     if !(200..300).contains(&status) {
-        if matches!(value["status"].as_str(), Some("failed" | "canceled")) {
+        if value["not_submitted"] == true
+            || matches!(value["status"].as_str(), Some("failed" | "canceled"))
+        {
             return Ok(value);
         }
         if let Some(error) = value["error"].as_str() {

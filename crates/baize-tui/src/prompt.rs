@@ -20,6 +20,12 @@ pub(super) fn run_prompt_submission(
     sender: Sender<PromptTaskMessage>,
     stop_stream: Arc<AtomicBool>,
 ) -> Result<()> {
+    if let Err(error) =
+        get_json("/runtime/status").and_then(|runtime| require_continuity_runtime(&runtime))
+    {
+        let _ = sender.send(PromptTaskMessage::NotSubmitted(error.to_string()));
+        return Ok(());
+    }
     let (workspace_id, workspace_display) = prepare_workspace_for_submission(submission)?;
     let session = prepare_session_for_submission(submission, &workspace_id)?;
     let started = PromptTaskStarted {
@@ -61,6 +67,14 @@ pub(super) fn run_prompt_submission(
         }
     };
     drop(stream);
+    if prompt_response["not_submitted"] == true {
+        let session_response = get_json(&format!("/sessions/{}", session.session_id))?;
+        let _ = sender.send(PromptTaskMessage::Rejected {
+            response: prompt_response,
+            session: session_response["session"].clone(),
+        });
+        return Ok(());
+    }
     let events_response = load_session_events(&session.session_id)?;
     let routes_response = get_json(&format!("/sessions/{}/routes", session.session_id))?;
     let diff_response = get_json(&format!("/sessions/{}/diff", session.session_id))?;
@@ -80,7 +94,30 @@ pub(super) fn run_prompt_submission(
     Ok(())
 }
 
+fn require_continuity_runtime(value: &Value) -> Result<()> {
+    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=1,
+        "Daemon does not support reliable continuity. Restart it with the current Baize binary; no prompt was sent");
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) fn session_events_path(session_id: &str, provider_id: &str) -> String {
     format!("/sessions/{session_id}/events?provider_id={provider_id}")
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    #[test]
+    fn old_daemon_cannot_receive_local_commands_as_model_prompts() {
+        assert!(require_continuity_runtime(&json!({"runtime":{"command_policy":"ask"}})).is_err());
+        assert!(require_continuity_runtime(
+            &json!({"runtime":{"capabilities":{"session_continuity":0}}})
+        )
+        .is_err());
+        assert!(require_continuity_runtime(
+            &json!({"runtime":{"capabilities":{"session_continuity":1}}})
+        )
+        .is_ok());
+    }
 }

@@ -618,7 +618,7 @@ struct ProviderSessionRef {
 | 目标不支持 resume | 从 Baize 对话与 workspace 构建接续输入，说明限制 |
 | 源 agent 不可用 | 使用已有记录；不要求源 agent 先生成摘要 |
 
-当前 `context.rs` 已有 raw native resume、full context pack、cross-provider delta 的基础策略，但近期消息截取与机械信号尚不等于完整语义连续性。
+2026-11-25：当前实现按已确认原生回执选择 full context pack 或 native resume + delta，保留有效/撤销要求、来源和预算缺口。每轮重新检查 workspace；失败、未知和预览不确认交付。较早的 RawNativeResume 枚举保留兼容，当前发送路径不跳过 workspace/要求检查。实现与有界 CLI 接力验收见 [可靠连续会话](reliable-agent-continuity.md)；不代表所有入口或全部语义连续性已经验证。
 
 历史保留来源、角色、顺序和原始依据。选择近期相关消息时也保留较早但仍有效的约束，避免重复注入、把建议当作用户要求或继续使用已失效内容。摘要按预算与相关性辅助，不代替全部原始记录。
 

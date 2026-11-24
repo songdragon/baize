@@ -58,8 +58,29 @@ pub async fn create_handoff(
         Ok(facts) => facts,
         Err(error) => return internal_error(error.to_string()),
     };
-    let summary_markdown =
+    let preview = match super::prompt_context::prepare_context_pack(
+        &state,
+        &session,
+        &to_provider_id,
+        request
+            .prompt
+            .as_deref()
+            .unwrap_or("<context preview request>"),
+    ) {
+        Ok(preview) => preview,
+        Err(error) => return internal_error(error.to_string()),
+    };
+    let context_preview = serde_json::json!({"context":preview.summary,"prompt_preview":crate::context::prompt_preview(&preview.result.prompt),"continuity":session.continuity,"preview_only":true});
+    let mut summary_markdown =
         render_handoff_summary(&session, &from_provider_id, &to_provider_id, &facts);
+    summary_markdown.push_str("\n## Target context preview\n\nThis preview has not been delivered. Sending a turn rebuilds it from current facts.\n\n");
+    for warning in &preview.result.warnings {
+        summary_markdown.push_str(&format!("- {warning}\n"));
+    }
+    summary_markdown.push_str(&format!(
+        "\n{}\n",
+        crate::context::prompt_preview(&preview.result.prompt)
+    ));
     let handoff = HandoffSummary {
         id: handoff_id,
         session_id: session.id.clone(),
@@ -91,6 +112,7 @@ pub async fn create_handoff(
     ok_json(serde_json::json!({
         "handoff": handoff,
         "artifact_path": artifact_path,
+        "context_preview": context_preview,
     }))
 }
 
@@ -166,7 +188,20 @@ fn render_handoff_summary(
     facts: &HandoffFacts,
 ) -> String {
     let mut summary = String::new();
-    summary.push_str("# Handoff\n\n");
+    summary.push_str("# Handoff\n\nPreview only; accepting selects the provider. Context receipts advance only after a successful execution.\n\n");
+    for (key, requirement) in &session.continuity.requirements {
+        summary.push_str(&format!(
+            "Requirement {key} [{} r{} source={}]: {}\n\n",
+            if requirement.active {
+                "active"
+            } else {
+                "revoked"
+            },
+            requirement.revision,
+            requirement.source_ref,
+            requirement.text
+        ));
+    }
     summary.push_str(&format!(
         "Objective: {}\n\n",
         one_line_limit(&session.objective)
@@ -306,6 +341,17 @@ pub async fn accept_handoff(
         Err(error) => return internal_error(error.to_string()),
     };
 
+    if session.continuity.active_turn.is_some() {
+        return bad_request(
+            "Execution is running or uncertain; reconcile before accepting a handoff",
+        );
+    }
+    if matches!(session.status, baize_core::TaskSessionStatus::Canceled)
+        || !matches!(handoff.status, HandoffStatus::Draft)
+    {
+        return bad_request("Review a fresh handoff for an active session before accepting");
+    }
+    let expected_updated_at = session.updated_at;
     let previous_provider_id = session.active_provider_id.clone();
     let selected_provider_id = handoff.to_provider_id.clone();
     let now = Utc::now();
@@ -329,6 +375,12 @@ pub async fn accept_handoff(
     };
 
     let save = with_store(&state, |store| {
+        let latest = store
+            .get_task_session(&session.id)?
+            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+        if latest.continuity.active_turn.is_some() || latest.updated_at != expected_updated_at {
+            anyhow::bail!("Session changed; review handoff again");
+        }
         store.upsert_task_session(&session)?;
         store.insert_handoff(&handoff)?;
         store.insert_route_decision(&decision)?;

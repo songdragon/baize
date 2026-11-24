@@ -57,12 +57,16 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/sessions/:id", get(handlers::sessions::session))
         .route(
+            "/sessions/:id/requirements",
+            get(handlers::continuity::requirements).post(handlers::continuity::update_requirement),
+        )
+        .route(
             "/sessions/:id/prompt",
             post(handlers::sessions::prompt_session),
         )
         .route(
             "/sessions/:id/context-preview",
-            get(handlers::sessions::context_preview),
+            get(handlers::sessions::context_preview).post(handlers::sessions::context_preview_post),
         )
         .route(
             "/sessions/:id/cancel",

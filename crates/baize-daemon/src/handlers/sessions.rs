@@ -1,3 +1,5 @@
+pub use super::prompt_context::{context_preview, context_preview_post};
+pub use super::prompts::prompt_session;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -6,25 +8,14 @@ use baize_core::{
     TaskSessionId, TaskSessionStatus, TaskType,
 };
 use chrono::Utc;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
 
 use crate::helpers::{
-    bad_request, format_error_chain, infer_provider_limit, infer_task_type, internal_error,
-    json_result, json_result_option, ok_json, select_provider, with_store,
+    bad_request, infer_task_type, internal_error, json_result, json_result_option, ok_json,
+    select_provider, with_store,
 };
 use crate::state::{
-    AppState, ContextPreviewQuery, CreateSessionRequest, HandoffsQuery, PaginationQuery,
-    PromptRequest, RoutesQuery, SessionsQuery,
+    AppState, CreateSessionRequest, HandoffsQuery, PaginationQuery, RoutesQuery, SessionsQuery,
 };
-
-struct PreparedContextPack {
-    project: baize_core::Project,
-    result: baize_core::ContextPackBuildResult,
-    summary: crate::context::ContextPackSummary,
-}
 
 pub async fn sessions(
     State(state): State<AppState>,
@@ -88,7 +79,7 @@ fn parse_session_status(value: &str) -> Option<TaskSessionStatus> {
     }
 }
 
-fn session_status_label(status: &TaskSessionStatus) -> &'static str {
+pub(super) fn session_status_label(status: &TaskSessionStatus) -> &'static str {
     match status {
         TaskSessionStatus::Running => "Running",
         TaskSessionStatus::WaitingForPermission => "WaitingForPermission",
@@ -345,6 +336,7 @@ pub async fn create_session(
         objective: request.objective,
         active_provider_id: Some(routing.provider_id.clone()),
         provider_native_session_ids: Default::default(),
+        continuity: Default::default(),
         status: TaskSessionStatus::Running,
         created_at: now,
         updated_at: now,
@@ -389,491 +381,11 @@ pub async fn create_session(
     ok_json(serde_json::json!({ "session": session, "route_decision": decision }))
 }
 
-pub async fn prompt_session(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-    Json(request): Json<PromptRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let session_id = TaskSessionId(id);
-    let mut session = match with_store(&state, |store| store.get_task_session(&session_id)) {
-        Ok(Some(session)) => session,
-        Ok(None) => return not_found("session not found"),
-        Err(error) => return internal_error(error.to_string()),
-    };
-    if matches!(session.status, TaskSessionStatus::Canceled) {
-        return bad_request("session is canceled");
-    }
-    let previous_provider_id = session.active_provider_id.clone();
-    let provider_id = match apply_prompt_provider_target(&state, &mut session, &request) {
-        Ok(provider_id) => provider_id,
-        Err(response) => return response,
-    };
-    if !baize_adapters::is_prompt_runtime_supported(&provider_id) {
-        return crate::helpers::bad_request(&format!(
-            "provider {} does not support Baize prompt execution yet",
-            provider_id.0
-        ));
-    }
-    if !request.image_paths.is_empty() && !baize_adapters::supports_file_attachment(&provider_id) {
-        return bad_request(&format!(
-            "provider {} does not support image attachments",
-            provider_id.0
-        ));
-    }
-    if let Err(error) = validate_prompt_image_paths(&request.image_paths) {
-        return bad_request(&error);
-    }
-
-    session.status = TaskSessionStatus::Running;
-    session.updated_at = Utc::now();
-    if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
-        return internal_error(error.to_string());
-    }
-
-    let native_resume_session_id = session
-        .provider_native_session_ids
-        .get(&provider_id.0)
-        .cloned();
-    let prepared_context = match prepare_context_pack(
-        &state,
-        &session,
-        &provider_id,
-        &request.prompt,
-        previous_provider_id.as_ref(),
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => return internal_error(error.to_string()),
-    };
-    let context_summary = prepared_context.summary.clone();
-    let prompt_for_agent = prepared_context.result.prompt.clone();
-
-    let mut context_event = baize_core::BaizeEvent::new(
-        "session.context.built",
-        serde_json::json!({ "context": context_summary }),
-    );
-    context_event.workspace_id = Some(session.workspace_id.clone());
-    context_event.session_id = Some(session.id.clone());
-    context_event.provider_id = Some(provider_id.clone());
-    state.record_event(context_event);
-
-    let project = prepared_context.project;
-
-    let mut started = baize_core::BaizeEvent::new(
-        "session.agent.started",
-        serde_json::json!({
-            "prompt": request.prompt,
-            "provider_id": provider_id.0,
-            "image_paths": request.image_paths.clone(),
-        }),
-    );
-    started.workspace_id = Some(session.workspace_id.clone());
-    started.session_id = Some(session.id.clone());
-    started.provider_id = Some(provider_id.clone());
-    state.record_event(started);
-
-    let streamed_event_count = Arc::new(AtomicUsize::new(0));
-    let agent_request = baize_adapters::AgentPromptRequest {
-        provider_id: provider_id.clone(),
-        prompt: prompt_for_agent,
-        cwd: project.root,
-        session_id: native_resume_session_id,
-        image_paths: request.image_paths,
-        timeout_seconds: request.timeout_seconds.or(Some(120)),
-        execution_policy: baize_adapters::AgentExecutionPolicy::from_command_policy(
-            &state.config.workspace.command_policy,
-        ),
-    };
-    let run = {
-        let executor = state.executor.clone();
-        let stream_state = state.clone();
-        let stream_workspace_id = session.workspace_id.clone();
-        let stream_session_id = session.id.clone();
-        let stream_provider_id = provider_id.clone();
-        let stream_count = streamed_event_count.clone();
-        match tokio::task::spawn_blocking(move || {
-            let mut event_sink = |adapter_event: baize_adapters::AgentExecutionEvent| {
-                stream_count.fetch_add(1, Ordering::SeqCst);
-                record_adapter_event(
-                    &stream_state,
-                    &stream_workspace_id,
-                    &stream_session_id,
-                    &stream_provider_id,
-                    &adapter_event,
-                );
-            };
-            executor.run_prompt(agent_request, Some(&mut event_sink))
-        })
-        .await
-        {
-            Ok(run) => run,
-            Err(error) => Err(anyhow::anyhow!("agent worker join failed: {error}")),
-        }
-    };
-    let streamed_event_count = streamed_event_count.load(Ordering::SeqCst);
-
-    match run {
-        Ok(result) => {
-            if session_was_canceled(&state, &session.id) {
-                let mut ignored = baize_core::BaizeEvent::new(
-                    "session.agent.ignored",
-                    serde_json::json!({
-                        "reason": "session canceled before provider result completed",
-                        "provider_id": provider_id.0,
-                    }),
-                );
-                ignored.workspace_id = Some(session.workspace_id.clone());
-                ignored.session_id = Some(session.id.clone());
-                ignored.provider_id = Some(provider_id.clone());
-                state.record_event(ignored);
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "status": "canceled",
-                        "turn_status": "canceled",
-                        "session_status": "Canceled",
-                        "session_id": session.id.0,
-                        "provider_id": provider_id,
-                        "error": "session was canceled before provider result completed",
-                    })),
-                );
-            }
-            for adapter_event in result.events.iter().skip(streamed_event_count) {
-                record_adapter_event(
-                    &state,
-                    &session.workspace_id,
-                    &session.id,
-                    &provider_id,
-                    adapter_event,
-                );
-            }
-
-            let new_status = if result.success {
-                TaskSessionStatus::Running
-            } else {
-                TaskSessionStatus::Failed
-            };
-            let final_event_type = if result.success {
-                "session.agent.completed"
-            } else {
-                "session.agent.failed"
-            };
-            let stderr = result.stderr.clone();
-            let provider_error = result.error.clone();
-            let native_session_id = result.native_session_id.clone();
-            let limit_inference = if result.success {
-                None
-            } else {
-                infer_provider_limit(&stderr)
-            };
-            let mut final_event = baize_core::BaizeEvent::new(
-                final_event_type,
-                serde_json::json!({
-                    "success": result.success,
-                    "exit_code": result.exit_code,
-                    "native_session_id": native_session_id,
-                    "stderr": stderr,
-                    "provider_error": provider_error,
-                    "limit_inference": limit_inference,
-                }),
-            );
-            final_event.workspace_id = Some(session.workspace_id.clone());
-            final_event.session_id = Some(session.id.clone());
-            final_event.provider_id = Some(provider_id.clone());
-            state.record_event(final_event);
-
-            session.status = new_status.clone();
-            if result.success {
-                if let Some(native_session_id) = native_session_id.as_deref() {
-                    session
-                        .provider_native_session_ids
-                        .insert(provider_id.0.clone(), native_session_id.to_string());
-                }
-            }
-            session.updated_at = Utc::now();
-            if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
-                return internal_error(error.to_string());
-            }
-
-            let mut status_event = baize_core::BaizeEvent::new(
-                "session.status.changed",
-                serde_json::json!({ "status": new_status }),
-            );
-            status_event.workspace_id = Some(session.workspace_id.clone());
-            status_event.session_id = Some(session.id.clone());
-            status_event.provider_id = Some(provider_id.clone());
-            state.record_event(status_event);
-
-            let code = if result.success {
-                StatusCode::OK
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (
-                code,
-                Json(serde_json::json!({
-                    "status": if result.success { "running" } else { "failed" },
-                    "turn_status": if result.success { "completed" } else { "failed" },
-                    "session_status": session_status_label(&new_status),
-                    "session_id": session.id.0,
-                    "provider_id": provider_id,
-                    "events": result.events,
-                    "exit_code": result.exit_code,
-                    "native_session_id": native_session_id,
-                    "stderr": stderr,
-                    "provider_error": provider_error,
-                    "limit_inference": limit_inference,
-                    "context": context_summary,
-                })),
-            )
-        }
-        Err(error) => {
-            let error = format_error_chain(error.as_ref());
-            let limit_inference = infer_provider_limit(&error);
-            let mut failed = baize_core::BaizeEvent::new(
-                "session.agent.failed",
-                serde_json::json!({
-                    "error": error,
-                    "limit_inference": limit_inference,
-                }),
-            );
-            failed.workspace_id = Some(session.workspace_id.clone());
-            failed.session_id = Some(session.id.clone());
-            failed.provider_id = Some(provider_id.clone());
-            state.record_event(failed);
-
-            session.status = TaskSessionStatus::Failed;
-            session.updated_at = Utc::now();
-            if let Err(store_error) =
-                with_store(&state, |store| store.upsert_task_session(&session))
-            {
-                return internal_error(store_error.to_string());
-            }
-
-            let mut status_event = baize_core::BaizeEvent::new(
-                "session.status.changed",
-                serde_json::json!({ "status": "Failed" }),
-            );
-            status_event.workspace_id = Some(session.workspace_id.clone());
-            status_event.session_id = Some(session.id.clone());
-            status_event.provider_id = Some(provider_id.clone());
-            state.record_event(status_event);
-
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "status": "failed",
-                    "turn_status": "failed",
-                    "session_status": "Failed",
-                    "session_id": session.id.0,
-                    "provider_id": provider_id,
-                    "error": error,
-                    "limit_inference": limit_inference,
-                    "context": context_summary,
-                })),
-            )
-        }
-    }
-}
-
-pub async fn context_preview(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-    axum::extract::Query(query): axum::extract::Query<ContextPreviewQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let session_id = TaskSessionId(id);
-    let session = match with_store(&state, |store| store.get_task_session(&session_id)) {
-        Ok(Some(session)) => session,
-        Ok(None) => return not_found("session not found"),
-        Err(error) => return internal_error(error.to_string()),
-    };
-    let provider_id = query
-        .provider_id
-        .as_ref()
-        .map(|provider| ProviderId(provider.clone()))
-        .or_else(|| session.active_provider_id.clone())
-        .unwrap_or_else(|| ProviderId("codex".to_string()));
-    let prompt = query
-        .prompt
-        .as_deref()
-        .unwrap_or("<context preview request>");
-    let prepared = match prepare_context_pack(&state, &session, &provider_id, prompt, None) {
-        Ok(prepared) => prepared,
-        Err(error) => return internal_error(error.to_string()),
-    };
-
-    ok_json(serde_json::json!({
-        "context": prepared.summary,
-        "prompt_preview": crate::context::prompt_preview(&prepared.result.prompt),
-    }))
-}
-
-fn record_adapter_event(
-    state: &AppState,
-    workspace_id: &baize_core::WorkspaceId,
-    session_id: &TaskSessionId,
-    provider_id: &ProviderId,
-    adapter_event: &baize_adapters::AgentExecutionEvent,
-) {
-    let event_type = match adapter_event.kind {
-        baize_adapters::AgentExecutionEventKind::Output => "session.agent.output",
-        baize_adapters::AgentExecutionEventKind::Diagnostic => "session.agent.diagnostic",
-        baize_adapters::AgentExecutionEventKind::Raw => "session.agent.status",
-        baize_adapters::AgentExecutionEventKind::ToolCall => "session.agent.tool_call",
-    };
-    let mut event = baize_core::BaizeEvent::new(
-        event_type,
-        serde_json::json!({
-            "text": adapter_event.text,
-            "raw": adapter_event.raw,
-            "stream": adapter_event.stream,
-        }),
-    );
-    event.workspace_id = Some(workspace_id.clone());
-    event.session_id = Some(session_id.clone());
-    event.provider_id = Some(provider_id.clone());
-    state.record_event(event);
-}
-
-fn prepare_context_pack(
-    state: &AppState,
-    session: &TaskSession,
-    provider_id: &ProviderId,
-    current_prompt: &str,
-    previous_provider_id: Option<&ProviderId>,
-) -> anyhow::Result<PreparedContextPack> {
-    let (workspace, project, events, route_decisions, handoffs) = with_store(state, |store| {
-        let workspace = store
-            .get_workspace(&session.workspace_id)?
-            .ok_or_else(|| anyhow::anyhow!("workspace not found"))?;
-        let project = store
-            .get_primary_project(&workspace)?
-            .ok_or_else(|| anyhow::anyhow!("project not found"))?;
-        let events = store.list_events_for_session(&session.id, Some(i64::MAX as u64), None)?;
-        let route_decisions = store.list_route_decisions_for_session(&session.id)?;
-        let handoffs = store.list_handoffs_for_session(&session.id)?;
-        Ok((workspace, project, events, route_decisions, handoffs))
-    })?;
-    let _workspace = workspace;
-    let workspace_status = baize_workspace::inspect(&project.root).ok();
-    let diff_hunks = baize_workspace::diff_hunks(&project.root).unwrap_or_default();
-    let profile = crate::context::provider_context_profile(provider_id, &state.config);
-    let result = crate::context::build_context_pack(crate::context::ContextPackInput {
-        session,
-        target_provider: provider_id,
-        current_prompt,
-        profile: &profile,
-        workspace_status: workspace_status.as_ref(),
-        project: &project,
-        events: &events,
-        route_decisions: &route_decisions,
-        handoffs: &handoffs,
-        diff_hunks: &diff_hunks,
-        previous_provider_id,
-    });
-    let summary = crate::context::summarize_context_pack(provider_id, &result);
-    Ok(PreparedContextPack {
-        project,
-        result,
-        summary,
-    })
-}
-
 pub(crate) fn session_was_canceled(state: &AppState, session_id: &TaskSessionId) -> bool {
     with_store(state, |store| store.get_task_session(session_id))
         .ok()
         .flatten()
         .is_some_and(|session| matches!(session.status, TaskSessionStatus::Canceled))
-}
-
-fn validate_prompt_image_paths(image_paths: &[std::path::PathBuf]) -> Result<(), String> {
-    for image_path in image_paths {
-        if image_path.as_os_str().is_empty() {
-            return Err("image attachment path cannot be empty".to_string());
-        }
-        let metadata = image_path.metadata().map_err(|error| {
-            format!(
-                "image attachment {} is not readable: {error}",
-                image_path.display()
-            )
-        })?;
-        if !metadata.is_file() {
-            return Err(format!(
-                "image attachment {} is not a file",
-                image_path.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn apply_prompt_provider_target(
-    state: &AppState,
-    session: &mut TaskSession,
-    request: &PromptRequest,
-) -> Result<ProviderId, (StatusCode, Json<serde_json::Value>)> {
-    let current_provider = session
-        .active_provider_id
-        .clone()
-        .unwrap_or_else(|| ProviderId("codex".to_string()));
-    let Some(requested_provider) = request.provider_id.as_ref() else {
-        return Ok(current_provider);
-    };
-    let requested_provider = ProviderId(requested_provider.clone());
-    if requested_provider == current_provider {
-        return Ok(current_provider);
-    }
-    if !baize_adapters::is_prompt_runtime_supported(&requested_provider) {
-        return Err(crate::helpers::bad_request(&format!(
-            "provider {} does not support Baize prompt execution yet",
-            requested_provider.0
-        )));
-    }
-    if !request.image_paths.is_empty()
-        && !baize_adapters::supports_file_attachment(&requested_provider)
-    {
-        return Err(crate::helpers::bad_request(&format!(
-            "provider {} does not support image attachments",
-            requested_provider.0
-        )));
-    }
-
-    let now = Utc::now();
-    let task_type = infer_task_type(&request.prompt);
-    let decision = RouteDecision {
-        id: RouteDecisionId::new(),
-        session_id: session.id.clone(),
-        selected_provider_id: requested_provider.clone(),
-        previous_provider_id: Some(current_provider),
-        reason: format!(
-            "Prompt target provider override. Task hint: {:?}.",
-            task_type
-        ),
-        task_type: Some(task_type),
-        confidence: 1.0,
-        mode: RoutingMode::Manual,
-        created_at: now,
-    };
-
-    session.active_provider_id = Some(requested_provider.clone());
-    session.updated_at = now;
-    if let Err(error) = with_store(state, |store| {
-        store.upsert_task_session(session)?;
-        store.insert_route_decision(&decision)?;
-        Ok(())
-    }) {
-        return Err(internal_error(error.to_string()));
-    }
-
-    let mut routed = baize_core::BaizeEvent::new(
-        "session.route.decided",
-        serde_json::json!({ "decision": decision }),
-    );
-    routed.workspace_id = Some(session.workspace_id.clone());
-    routed.session_id = Some(session.id.clone());
-    routed.provider_id = Some(requested_provider.clone());
-    state.record_event(routed);
-
-    Ok(requested_provider)
 }
 
 pub async fn cancel_session(
@@ -916,10 +428,22 @@ pub async fn complete_session(
         return bad_request("session is canceled");
     }
 
+    if session.continuity.active_turn.is_some() {
+        return bad_request("Execution is running or uncertain; reconcile before completing");
+    }
+    let expected_updated_at = session.updated_at;
     let changed = !matches!(session.status, TaskSessionStatus::Completed);
     session.status = TaskSessionStatus::Completed;
     session.updated_at = Utc::now();
-    if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
+    if let Err(error) = with_store(&state, |store| {
+        let latest = store
+            .get_task_session(&session_id)?
+            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+        if latest.updated_at != expected_updated_at || latest.continuity.active_turn.is_some() {
+            anyhow::bail!("Session changed; reconcile before completing");
+        }
+        store.upsert_task_session(&session)
+    }) {
         return internal_error(error.to_string());
     }
 

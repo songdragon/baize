@@ -1,3 +1,6 @@
+mod continuity;
+pub use continuity::{ExecutionAttempt, ProviderCheckpoint, SessionContinuity, SessionRequirement};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -273,6 +276,23 @@ pub struct ContextPackBuildResult {
     pub included_sections: Vec<String>,
     pub truncated_sections: Vec<String>,
     pub source_event_count: usize,
+    #[serde(default)]
+    pub sources: Vec<ContextSource>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default)]
+    pub omitted_event_ids: Vec<EventId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSource {
+    pub event_id: EventId,
+    pub role: String,
+    pub provider_id: Option<ProviderId>,
+    pub included: bool,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +345,8 @@ pub struct TaskSession {
     pub active_provider_id: Option<ProviderId>,
     #[serde(default)]
     pub provider_native_session_ids: BTreeMap<String, String>,
+    #[serde(default)]
+    pub continuity: SessionContinuity,
     pub status: TaskSessionStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -604,6 +626,7 @@ mod tests {
         let session: TaskSession = serde_json::from_value(raw).expect("legacy session");
 
         assert!(session.provider_native_session_ids.is_empty());
+        assert_eq!(session.continuity, SessionContinuity::default());
         assert_eq!(session.active_provider_id.expect("provider").0, "codex");
     }
 
@@ -618,6 +641,7 @@ mod tests {
             objective: "round trip".to_string(),
             active_provider_id: Some(ProviderId("codex".to_string())),
             provider_native_session_ids: native_ids,
+            continuity: Default::default(),
             status: TaskSessionStatus::Running,
             created_at: now,
             updated_at: now,
@@ -688,6 +712,16 @@ mod tests {
             included_sections: vec!["objective".to_string()],
             truncated_sections: vec!["diff_hunks".to_string()],
             source_event_count: 7,
+            sources: vec![ContextSource {
+                event_id: EventId::new(),
+                role: "user".into(),
+                provider_id: Some(ProviderId("codex".into())),
+                included: true,
+                truncated: false,
+            }],
+            warnings: vec!["excerpt".into()],
+            blocked: false,
+            omitted_event_ids: vec![],
         };
 
         let raw = serde_json::to_value(&result).expect("serialize result");
@@ -695,6 +729,13 @@ mod tests {
         assert_eq!(raw["strategy"], "CrossProviderDelta");
         assert_eq!(raw["included_sections"][0], "objective");
         assert_eq!(raw["truncated_sections"][0], "diff_hunks");
+        let restored: ContextPackBuildResult =
+            serde_json::from_value(raw).expect("round trip context sources");
+        assert_eq!(restored.sources, result.sources);
+        assert!(serde_json::from_value::<ContextPackBuildResult>(
+            json!({"sources":[{"event_id":3}]})
+        )
+        .is_err());
     }
 
     #[test]

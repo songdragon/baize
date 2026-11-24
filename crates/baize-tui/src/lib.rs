@@ -173,6 +173,7 @@ enum PromptTaskMessage {
     StreamUnavailable(String),
     StreamRecovered,
     NotSubmitted(String),
+    Rejected { response: Value, session: Value },
     Completed(PromptTaskCompletion),
     Failed(String),
 }
@@ -259,7 +260,11 @@ mod prompt;
 use prompt::*;
 mod output;
 use output::*;
+mod continuity;
 mod conversation;
+use continuity::{
+    apply_continuity_status, can_reconcile, continuity_context_lines, is_continuity_command,
+};
 use conversation::*;
 mod process_view;
 use process_view::*;

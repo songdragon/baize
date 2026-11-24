@@ -315,7 +315,7 @@ pub(super) fn handle_key(
                 state.ui.notice = Some("An operation is running. Your draft is kept.".into());
                 return Ok(false);
             }
-            if state.ui.execution_uncertain {
+            if state.ui.execution_uncertain && !can_reconcile(state) {
                 state.ui.notice = Some(
                     "Execution is unconfirmed. F5 reconciles history before another submission."
                         .into(),

@@ -88,6 +88,7 @@ pub struct ContextPreviewQuery {
 #[derive(Debug, Deserialize)]
 pub struct HandoffRequest {
     pub to_provider_id: String,
+    pub prompt: Option<String>,
     pub user_constraints: Option<Vec<String>>,
 }
 
@@ -191,10 +192,55 @@ impl AppState {
         };
 
         for mut session in sessions {
-            if !matches!(session.status, TaskSessionStatus::Running) {
+            let mut confirmed_idle = false;
+            // Older records have no lease field. An unmatched dispatch is still
+            // uncertain; upgrading must not turn it into permission to replay.
+            if session.continuity.active_turn.is_none() {
+                let events = match self.store.lock() {
+                    Ok(store) => store
+                        .list_events_for_session(&session.id, Some(i64::MAX as u64), None)
+                        .unwrap_or_default(),
+                    Err(_) => continue,
+                };
+                for event in events {
+                    match event.event_type.as_str() {
+                        "session.agent.started" => {
+                            session.continuity.active_turn = Some(baize_core::ExecutionAttempt {
+                                id: event.id,
+                                provider_id: event
+                                    .provider_id
+                                    .or_else(|| session.active_provider_id.clone())
+                                    .unwrap_or_else(|| baize_core::ProviderId("unknown".into())),
+                                uncertain: true,
+                            })
+                        }
+                        "session.agent.completed" if event.payload["status"] != "canceled" => {
+                            confirmed_idle = true;
+                            session.continuity.active_turn = None
+                        }
+                        "session.agent.failed" if event.payload["exit_code"].is_number() => {
+                            confirmed_idle = true;
+                            session.continuity.active_turn = None
+                        }
+                        "session.agent.ignored" | "session.execution.reconciled" => {
+                            confirmed_idle = true;
+                            session.continuity.active_turn = None
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if (!matches!(session.status, TaskSessionStatus::Running) || confirmed_idle)
+                && session.continuity.active_turn.is_none()
+            {
                 continue;
             }
-            session.status = TaskSessionStatus::Failed;
+            if let Some(attempt) = session.continuity.active_turn.as_mut() {
+                attempt.uncertain = true;
+            }
+            if !matches!(session.status, TaskSessionStatus::Canceled) {
+                session.status = TaskSessionStatus::Failed;
+            }
             session.updated_at = chrono::Utc::now();
             if let Ok(store) = self.store.lock() {
                 let _ = store.upsert_task_session(&session);
@@ -203,8 +249,9 @@ impl AppState {
             let mut event = BaizeEvent::new(
                 "session.recovered",
                 serde_json::json!({
-                    "status": "Failed",
+                    "status": session.status,
                     "reason": "Recovered in-flight session after daemon startup.",
+                    "active_turn": session.continuity.active_turn,
                 }),
             );
             event.workspace_id = Some(session.workspace_id.clone());

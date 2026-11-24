@@ -11,6 +11,7 @@ pub async fn runtime_status(
     let command_policy = state.config.workspace.command_policy.as_str();
     ok_json(serde_json::json!({
         "runtime": {
+            "capabilities": {"session_continuity": 1},
             "command_policy": command_policy,
             "execution_mode": execution_mode_label(command_policy),
             "checkpoint_policy": state.config.workspace.checkpoint_policy,
