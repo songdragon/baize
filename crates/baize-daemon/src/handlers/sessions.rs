@@ -392,27 +392,86 @@ pub async fn cancel_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    request_stop(state, id, true)
+}
+
+pub async fn stop_execution(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    request_stop(state, id, false)
+}
+
+fn request_stop(
+    state: AppState,
+    id: String,
+    cancel_session: bool,
+) -> (StatusCode, Json<serde_json::Value>) {
     let session_id = TaskSessionId(id);
     let canceled = with_store(&state, |store| {
         let Some(mut session) = store.get_task_session(&session_id)? else {
             return Ok(None);
         };
-        session.status = TaskSessionStatus::Canceled;
+        if !cancel_session && session.continuity.active_turn.is_none() {
+            return Ok(Some((session, None, None)));
+        }
+        if cancel_session {
+            session.status = TaskSessionStatus::Canceled;
+        }
         session.updated_at = Utc::now();
+        if let Some(attempt) = session.continuity.active_turn.as_ref() {
+            session.continuity.last_stop = Some(baize_core::ExecutionStop {
+                attempt_id: attempt.id.clone(),
+                provider_id: attempt.provider_id.clone(),
+                status: if attempt.uncertain {
+                    baize_core::ExecutionStopStatus::Unconfirmed
+                } else {
+                    baize_core::ExecutionStopStatus::Stopping
+                },
+                detail: "Stop requested; waiting for native execution evidence.".into(),
+            });
+        }
         let mut event = baize_core::BaizeEvent::new(
-            "session.agent.completed",
-            serde_json::json!({"status":"canceled"}),
+            if cancel_session {
+                "session.agent.completed"
+            } else {
+                "session.execution.stop_requested"
+            },
+            serde_json::json!({"status":if cancel_session {"canceled"}else{"stopping"},"continuity":session.continuity}),
         );
         event.workspace_id = Some(session.workspace_id.clone());
         event.session_id = Some(session.id.clone());
         event.provider_id = session.active_provider_id.clone();
         store.save_session_event(&session, &event)?;
-        Ok(Some((session, event)))
+        let control = match session.continuity.active_turn.as_ref() {
+            Some(turn) => state.executions.get(&turn.id)?,
+            None => None,
+        };
+        Ok(Some((session, Some(event), control)))
     });
     match canceled {
-        Ok(Some((session, event))) => {
+        Ok(Some((session, Some(event), control))) => {
+            if let Some(control) = control {
+                control.cancel();
+            }
             let _ = state.events.send(event);
-            ok_json(serde_json::json!({"session":session}))
+            ok_json(
+                serde_json::json!({"session":session,"execution_stop_requested":!cancel_session}),
+            )
+        }
+        Ok(Some((session, None, _))) => {
+            if session
+                .continuity
+                .last_stop
+                .as_ref()
+                .is_some_and(|stop| stop.status == baize_core::ExecutionStopStatus::Stopped)
+            {
+                ok_json(
+                    serde_json::json!({"session":session,"execution_stop_requested":true,"already_stopped":true}),
+                )
+            } else {
+                bad_request("No active execution to stop")
+            }
         }
         Ok(None) => not_found("session not found"),
         Err(error) => internal_error(error.to_string()),

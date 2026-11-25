@@ -13,7 +13,7 @@ pub(super) fn render_resize_screen(frame: &mut Frame<'_>, area: Rect, state: &Tu
         ),
         Some(Overlay::Cancel) => {
             let mut text = format!(
-                "Cancel Baize session?\nEnter cancel\nEsc stay\n{}\nProvider may keep running.",
+                "Stop current execution?\nEnter stop\nEsc stay\n{}\nWait for confirmed stop evidence.",
                 state
                     .ui
                     .cancel_session_id
@@ -63,7 +63,7 @@ pub(super) fn render_overlay(
         Overlay::Commands => "Commands",
         Overlay::Sessions => "Open conversation",
         Overlay::Quit => "Leave Baize?",
-        Overlay::Cancel => "Cancel Baize session?",
+        Overlay::Cancel => "Stop current execution?",
     };
     let mut lines = vec![];
     match overlay {
@@ -71,10 +71,10 @@ pub(super) fn render_overlay(
             lines.push(Line::raw(
                 state.ui.cancel_session_id.clone().unwrap_or_default(),
             ));
-            lines.push(Line::raw("Provider may keep running."));
-            lines.push(Line::raw("This ends the Baize session."));
+            lines.push(Line::raw("Wait for confirmed stop evidence."));
+            lines.push(Line::raw("Conversation and partial changes are kept."));
             lines.push(Line::styled(
-                "Enter cancel · Esc stay",
+                "Enter stop · Esc stay",
                 Style::default().fg(ACCENT),
             ));
         }
@@ -261,11 +261,11 @@ mod tests {
         request_cancel_confirmation(&mut state);
         let text = draw(&state, 35, 9);
         for expected in [
-            "Cancel Baize session?",
-            "Enter cancel",
+            "Stop current execution?",
+            "Enter stop",
             "Esc stay",
             "task_target",
-            "Provider may keep running",
+            "Wait for confirmed stop evidence",
         ] {
             assert!(text.contains(expected));
         }

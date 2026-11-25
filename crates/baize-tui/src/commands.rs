@@ -51,7 +51,7 @@ pub(super) const COMMANDS: &[(CommandId, &str, &str)] = &[
     (CommandId::Complete, "Mark session complete", "Ctrl-E"),
     (
         CommandId::Cancel,
-        "Cancel Baize session (provider may continue)",
+        "Stop current execution (keep conversation)",
         "Ctrl-X",
     ),
     (

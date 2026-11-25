@@ -98,7 +98,7 @@ Restart an existing daemon after adapter/daemon changes: closing the TUI alone l
 | `Ctrl-R` | Refresh connection and diagnostics, retaining an available selected provider |
 | `Ctrl-L` | Restore latest session in the loaded workspace list |
 | `Ctrl-N` | New conversation, keeping the old session draft locally |
-| `Ctrl-X` | Review cancellation; Enter cancels the Baize session, Esc stays; provider may continue |
+| `Ctrl-X` | Review stopping the current execution; Enter requests stop, Esc stays; conversation and partial changes are kept |
 | `Ctrl-E` | Mark session complete |
 | `Ctrl-H` / `Ctrl-Y` | Prepare / accept a reviewed handoff |
 | `Ctrl-P` | Refresh permissions and open their inspector |

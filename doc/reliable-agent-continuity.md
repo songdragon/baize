@@ -24,6 +24,8 @@ Tab 选择下一轮执行者，Enter 仍使用原 Baize session。也可 Ctrl-H 
 
 ## 接续与失败恢复
 
+原生执行控制允许 Ctrl-X 停止当前回合并保留主对话；已确认停止后可以在同一会话继续或交接。Codex 实际执行入口为 app-server stdio，原生审批和停止证据的支持范围见 [执行控制说明](execution-control.md)。旧 session 的执行入口身份不匹配时仍要求显式重置，不自动更换原生引用。
+
 - 每个成功的原生执行引用都有回执：原生 ID、已确认事件位置、尚未完整交付的 assistant 来源、要求修订号和执行入口身份。
 - 原生 ID 与入口/cwd 身份相符、回执仍能在历史中定位时，补齐其尚未知晓的对话。旧 ID 没有回执时，不假设它了解已有历史。
 - 增量执行返回不同原生 ID 时，不为新 ID 推进覆盖回执；下一轮补齐完整上下文后才确认新的覆盖位置。字段名如 refresh_token 不会单独触发整行脱敏；实际凭据被脱敏的历史明确标为未完整交付并保留 pending。
@@ -59,7 +61,7 @@ Antigravity headless 可能因无法询问命令权限而自动拒绝工具，�
 - `POST /sessions/:id/requirements`：显式用户命令，例如 `{"action":"remember","key":"api","text":"保持公开签名"}`、`{"action":"forget","key":"api"}`。
 - `POST /sessions/:id/context-preview`：`{"provider_id":"codex","prompt":"待提交的请求"}`，与实际发送共用上下文构建路径；不写回执。原 GET 接口保留。
 - `POST /sessions/:id/prompt`：上述 `/remember`、`/forget`、`/requirements`、`/reconcile`、`/reset-provider` 也可作为本地命令使用。
-- 新客户端先核对 daemon 的 `runtime.capabilities.session_continuity >= 2`；能力缺失或版本 1 的旧 daemon 不会收到本地命令或普通 prompt。协议 2 包含取消竞争和未知执行保护修复，升级后需先用同一版本重新启动 daemon。
+- 新客户端先核对 daemon 的 `runtime.capabilities.session_continuity >= 3`；能力缺失或版本 1/2 的旧 daemon 不会收到本地命令或普通 prompt。协议 3 增加执行控制、原生审批和等待预算，升级后需先用同一版本重新启动 daemon。
 - 旧 session 缺少 continuity 字段时使用默认值；仅 Accepted 的旧 handoff 约束按来源导入，去除首尾空白后与现有文本去重。Draft 不会提前生效，撤销后的相同文本不会因另一份交接再次导入。既有已导入记录不自动删除，可按 key 撤销。
 - 缺少原生引用或重置引用后使用完整上下文。没有导入私有 transcript、迁移未完成工具进程，或声称 CLI 与 Desktop 能力等价。
 

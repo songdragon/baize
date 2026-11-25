@@ -136,11 +136,11 @@ def main():
             client.send(b"\x1b")
             client.send(b"\x0c", 1)  # Ctrl-L: read recorded history only.
             client.send(b"\x18")  # Ctrl-X: show cancel dialog, never confirm it.
-            cancel_dialog_observed = "Cancel Baize session?" in client.screen()
+            cancel_dialog_observed = "Stop current execution?" in client.screen()
             if cancel_dialog_observed:
                 client.send(b"\x18\x18")
                 assert client.process.poll() is None
-                assert "Enter cancel" in client.screen()
+                assert "Enter stop" in client.screen()
             else:
                 assert "Start or open a session first" in client.screen()
             client.send(b"\x1b")

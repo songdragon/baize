@@ -236,7 +236,8 @@ mod tests {
             assert!(text.contains("task_target"));
             if width >= 80 {
                 assert!(
-                    text.contains("Provider may keep running") && text.contains("Enter cancel")
+                    text.contains("Wait for confirmed stop evidence")
+                        && text.contains("Enter stop")
                 );
             }
         }

@@ -71,8 +71,10 @@ impl TurnGuard {
                 provider_id: provider_id.clone(),
                 uncertain: false,
             });
+            latest.continuity.last_stop = None;
             store.upsert_task_session(&latest)?;
             session.continuity.active_turn = latest.continuity.active_turn;
+            session.continuity.last_stop = None;
             Ok(())
         })?;
         Ok(Self {
@@ -103,7 +105,15 @@ pub(crate) fn save_turn(
         {
             return Ok(false);
         }
-        if matches!(latest.status, baize_core::TaskSessionStatus::Canceled) {
+        let stop_requested = latest.continuity.last_stop.as_ref().is_some_and(|stop| {
+            stop.attempt_id == *attempt_id
+                && matches!(
+                    stop.status,
+                    baize_core::ExecutionStopStatus::Stopping
+                        | baize_core::ExecutionStopStatus::Unconfirmed
+                )
+        });
+        if matches!(latest.status, baize_core::TaskSessionStatus::Canceled) || stop_requested {
             if !matches!(
                 event.event_type.as_str(),
                 "session.agent.completed" | "session.agent.failed"
@@ -122,6 +132,24 @@ pub(crate) fn save_turn(
             } else {
                 latest.continuity.active_turn = None;
             }
+            latest.continuity.last_stop = Some(baize_core::ExecutionStop {
+                attempt_id: attempt_id.clone(),
+                provider_id: event
+                    .provider_id
+                    .clone()
+                    .unwrap_or_else(|| baize_core::ProviderId("unknown".into())),
+                status: if uncertain {
+                    baize_core::ExecutionStopStatus::Unconfirmed
+                } else {
+                    baize_core::ExecutionStopStatus::Stopped
+                },
+                detail: if uncertain {
+                    "Native execution stop is unconfirmed; inspect workspace before reconciliation."
+                } else {
+                    "Execution ended; canceled result was discarded without advancing receipts."
+                }
+                .into(),
+            });
             latest.updated_at = chrono::Utc::now();
             let mut terminal = event.clone();
             terminal.event_type = if uncertain {
@@ -136,6 +164,7 @@ pub(crate) fn save_turn(
                 "Session canceled before provider result commit"
             });
             terminal.payload["active_turn"] = serde_json::to_value(&latest.continuity.active_turn)?;
+            terminal.payload["continuity"] = serde_json::to_value(&latest.continuity)?;
             store.save_session_event(&latest, &terminal)?;
             discarded = Some(terminal);
             return Ok(false);
@@ -163,8 +192,17 @@ impl Drop for TurnGuard {
             {
                 if self.dispatched {
                     attempt.uncertain = true;
+                    if let Some(stop) = session.continuity.last_stop.as_mut() {
+                        stop.status = baize_core::ExecutionStopStatus::Unconfirmed;
+                        stop.detail = "Execution response was lost; stop is unconfirmed.".into();
+                    }
                 } else {
                     session.continuity.active_turn = None;
+                    if let Some(stop) = session.continuity.last_stop.as_mut() {
+                        stop.status = baize_core::ExecutionStopStatus::Stopped;
+                        stop.detail =
+                            "Canceled before provider dispatch; no prompt was sent.".into();
+                    }
                 }
                 store.upsert_task_session(&session)?;
             }
@@ -263,10 +301,16 @@ pub(crate) fn apply_command(
                 .active_turn
                 .as_ref()
                 .context("no uncertain turn to reconcile")?;
+            anyhow::ensure!(state.executions.get(&turn.id)?.is_none(),"Execution still has a live worker; request cancellation and wait for stop evidence before reconciling");
             if !turn.uncertain || turn.id.0 != turn_id {
                 bail!("Only the exact uncertain turn can be reconciled; check execution has stopped first");
             }
             session.continuity.active_turn = None;
+            if let Some(stop) = session.continuity.last_stop.as_mut() {
+                stop.status = baize_core::ExecutionStopStatus::Stopped;
+                stop.detail =
+                    "User confirmed execution stopped and reviewed workspace; no replay.".into();
+            }
             event.event_type = "session.execution.reconciled".into();
             "Execution reviewed by user. No prompt was replayed; inspect changes before continuing."
                 .into()

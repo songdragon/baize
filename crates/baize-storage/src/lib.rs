@@ -194,6 +194,18 @@ impl EventStore {
         Ok(())
     }
 
+    pub fn save_permission_event(
+        &self,
+        permission: &PermissionRequest,
+        event: &BaizeEvent,
+    ) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        self.upsert_permission(permission)?;
+        self.append_event(event)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn append_event(&self, event: &BaizeEvent) -> Result<()> {
         self.conn.execute(
             r#"
@@ -772,6 +784,17 @@ impl EventStore {
         self.get_json("permissions", &id.0)
     }
 
+    pub fn list_pending_native_permissions(
+        &self,
+        attempt: Option<&baize_core::EventId>,
+    ) -> Result<Vec<PermissionRequest>> {
+        let mut statement=self.conn.prepare("select json from permissions where json_extract(json, '$.status') = 'Pending' and json_type(json, '$.native') = 'object' and (?1 is null or json_extract(json, '$.native.attempt_id') = ?1) order by rowid")?;
+        let rows = statement.query_map(params![attempt.map(|id| id.0.as_str())], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
     pub fn list_permissions(
         &self,
         limit: Option<u64>,
@@ -1201,6 +1224,7 @@ mod tests {
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
         let session_id = TaskSessionId::new();
         let first = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: Some(WorkspaceId::new()),
             session_id: Some(session_id),
@@ -1212,6 +1236,7 @@ mod tests {
             resolved_at: None,
         };
         let second = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: None,
             session_id: None,
@@ -1238,6 +1263,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
         let low = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: None,
             session_id: None,
@@ -1249,6 +1275,7 @@ mod tests {
             resolved_at: None,
         };
         let high = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: None,
             session_id: None,
@@ -1402,6 +1429,7 @@ mod tests {
         let session_id = TaskSessionId::new();
         let other_session_id = TaskSessionId::new();
         let first = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: Some(WorkspaceId::new()),
             session_id: Some(session_id.clone()),
@@ -1413,6 +1441,7 @@ mod tests {
             resolved_at: None,
         };
         let second = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: None,
             session_id: Some(session_id.clone()),
@@ -1424,6 +1453,7 @@ mod tests {
             resolved_at: Some(Utc::now()),
         };
         let other = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: None,
             session_id: Some(other_session_id),
@@ -1627,6 +1657,7 @@ mod tests {
 
         let session_id = TaskSessionId::new();
         let permission = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: None,
             session_id: Some(session_id.clone()),
@@ -1651,6 +1682,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = EventStore::open(temp.path().join("baize.db")).expect("store should open");
         let permission = PermissionRequest {
+            native: None,
             id: PermissionId::new(),
             workspace_id: None,
             session_id: None,
@@ -1951,5 +1983,72 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn permission_decision_and_event_commit_together_and_rollback_on_duplicate_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("approvals.db");
+        let store = EventStore::open(&path).unwrap();
+        let mut permission = PermissionRequest {
+            id: PermissionId::new(),
+            workspace_id: None,
+            session_id: Some(TaskSessionId::new()),
+            command: "one native operation".into(),
+            reason: "test".into(),
+            risk: Default::default(),
+            status: PermissionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+            native: Some(baize_core::NativePermission {
+                attempt_id: baize_core::EventId::new(),
+                provider_id: ProviderId("codex".into()),
+                request_id: "101".into(),
+                method: "item/commandExecution/requestApproval".into(),
+                params: serde_json::json!({"command":"one operation"}),
+            }),
+        };
+        let mut event = BaizeEvent::new(
+            "permission.requested",
+            serde_json::json!({"permission":permission}),
+        );
+        event.session_id = permission.session_id.clone();
+        store.save_permission_event(&permission, &event).unwrap();
+        assert_eq!(
+            store.list_pending_native_permissions(None).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_pending_native_permissions(Some(
+                    &permission.native.as_ref().unwrap().attempt_id
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .list_pending_native_permissions(Some(&baize_core::EventId::new()))
+            .unwrap()
+            .is_empty());
+        permission.status = PermissionStatus::Approved;
+        assert!(store.save_permission_event(&permission, &event).is_err());
+        drop(store);
+        let reopened = EventStore::open(path).unwrap();
+        let restored = reopened.get_permission(&permission.id).unwrap().unwrap();
+        assert!(matches!(restored.status, PermissionStatus::Pending));
+        assert_eq!(restored.native.unwrap().request_id, "101");
+        assert_eq!(
+            reopened
+                .list_events_for_session(permission.session_id.as_ref().unwrap(), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        reopened
+            .conn
+            .execute("update permissions set json = 'invalid-json'", [])
+            .unwrap();
+        assert!(reopened.list_pending_native_permissions(None).is_err());
     }
 }

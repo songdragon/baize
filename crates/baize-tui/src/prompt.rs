@@ -20,12 +20,16 @@ pub(super) fn run_prompt_submission(
     sender: Sender<PromptTaskMessage>,
     stop_stream: Arc<AtomicBool>,
 ) -> Result<()> {
-    if let Err(error) =
-        get_json("/runtime/status").and_then(|runtime| require_continuity_runtime(&runtime))
-    {
-        let _ = sender.send(PromptTaskMessage::NotSubmitted(error.to_string()));
-        return Ok(());
-    }
+    let runtime = match get_json("/runtime/status").and_then(|runtime| {
+        require_continuity_runtime(&runtime)?;
+        Ok(runtime)
+    }) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = sender.send(PromptTaskMessage::NotSubmitted(error.to_string()));
+            return Ok(());
+        }
+    };
     let (workspace_id, workspace_display) = prepare_workspace_for_submission(submission)?;
     let session = prepare_session_for_submission(submission, &workspace_id)?;
     let started = PromptTaskStarted {
@@ -57,7 +61,7 @@ pub(super) fn run_prompt_submission(
             &submission.prompt,
             &submission.image_paths,
         ),
-        Duration::from_secs(PROMPT_TIMEOUT_SECONDS + PROMPT_RESPONSE_GRACE_SECONDS),
+        prompt_response_timeout(&runtime, &submission.provider_id),
     ) {
         Ok(response) => response,
         Err(error) => {
@@ -95,9 +99,21 @@ pub(super) fn run_prompt_submission(
 }
 
 fn require_continuity_runtime(value: &Value) -> Result<()> {
-    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=2,
-        "Daemon requires continuity protocol 2. Restart it with the current Baize binary; no prompt was sent");
+    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=3,
+        "Daemon requires continuity protocol 3. Restart it with the current Baize binary; no prompt was sent");
     Ok(())
+}
+
+fn prompt_response_timeout(runtime: &Value, provider: &str) -> Duration {
+    let approval_wait = if provider == "codex" {
+        runtime["runtime"]["native_approval_wait_seconds"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(600)
+    } else {
+        0
+    };
+    Duration::from_secs(PROMPT_TIMEOUT_SECONDS + PROMPT_RESPONSE_GRACE_SECONDS + approval_wait)
 }
 
 #[cfg(test)]
@@ -108,6 +124,29 @@ pub(super) fn session_events_path(session_id: &str, provider_id: &str) -> String
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+    #[test]
+    fn approval_wait_budget_is_bounded_and_only_applies_to_supported_entry() {
+        let runtime = json!({"runtime":{"native_approval_wait_seconds":600}});
+        assert_eq!(
+            prompt_response_timeout(&runtime, "codex"),
+            Duration::from_secs(725)
+        );
+        assert_eq!(
+            prompt_response_timeout(&runtime, "antigravity"),
+            Duration::from_secs(125)
+        );
+        assert_eq!(
+            prompt_response_timeout(&json!({}), "codex"),
+            Duration::from_secs(125)
+        );
+        assert_eq!(
+            prompt_response_timeout(
+                &json!({"runtime":{"native_approval_wait_seconds":u64::MAX}}),
+                "codex"
+            ),
+            Duration::from_secs(725)
+        );
+    }
     #[test]
     fn old_daemon_cannot_receive_local_commands_as_model_prompts() {
         assert!(require_continuity_runtime(
@@ -121,6 +160,10 @@ mod compatibility_tests {
         .is_err());
         assert!(require_continuity_runtime(
             &json!({"runtime":{"capabilities":{"session_continuity":2}}})
+        )
+        .is_err());
+        assert!(require_continuity_runtime(
+            &json!({"runtime":{"capabilities":{"session_continuity":3}}})
         )
         .is_ok());
     }

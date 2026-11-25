@@ -438,6 +438,7 @@ pub fn parse_permission_status(status: &str) -> Option<PermissionStatus> {
         "pending" => Some(PermissionStatus::Pending),
         "approved" => Some(PermissionStatus::Approved),
         "denied" => Some(PermissionStatus::Denied),
+        "expired" => Some(PermissionStatus::Expired),
         _ => None,
     }
 }
@@ -448,6 +449,7 @@ pub fn permission_status_eq(left: &PermissionStatus, right: &PermissionStatus) -
         (PermissionStatus::Pending, PermissionStatus::Pending)
             | (PermissionStatus::Approved, PermissionStatus::Approved)
             | (PermissionStatus::Denied, PermissionStatus::Denied)
+            | (PermissionStatus::Expired, PermissionStatus::Expired)
     )
 }
 

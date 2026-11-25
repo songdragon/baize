@@ -157,6 +157,10 @@ pub async fn prompt_session(
     started.session_id = Some(session.id.clone());
     started.provider_id = Some(provider_id.clone());
     started.id = turn.id.clone();
+    let execution = match state.executions.start(&turn.id) {
+        Ok(execution) => execution,
+        Err(error) => return not_submitted(internal_error(error.to_string())),
+    };
     match crate::continuity::save_turn(&state, &session, &started, &turn.id) {
         Ok(true) => {}
         Ok(false) => {
@@ -190,10 +194,34 @@ pub async fn prompt_session(
         let stream_workspace_id = session.workspace_id.clone();
         let stream_session_id = session.id.clone();
         let stream_provider_id = provider_id.clone();
+        let stream_attempt_id = turn.id.clone();
         let stream_count = streamed_event_count.clone();
         match tokio::task::spawn_blocking(move || {
+            let execution = execution;
+            let _permissions = crate::native_permissions::PermissionScope {
+                state: stream_state.clone(),
+                attempt: stream_attempt_id.clone(),
+            };
             let mut event_sink = |adapter_event: baize_adapters::AgentExecutionEvent| {
                 stream_count.fetch_add(1, Ordering::SeqCst);
+                if let Some(raw) = adapter_event
+                    .raw
+                    .as_ref()
+                    .and_then(|value| value.get("native_approval"))
+                {
+                    if let Err(error) = crate::native_permissions::record(
+                        &stream_state,
+                        &stream_workspace_id,
+                        &stream_session_id,
+                        &stream_provider_id,
+                        &stream_attempt_id,
+                        raw,
+                    ) {
+                        execution.control.cancel();
+                        tracing::warn!("native approval could not be stored: {error:#}");
+                    }
+                    return;
+                }
                 record_adapter_event(
                     &stream_state,
                     &stream_workspace_id,
@@ -202,7 +230,26 @@ pub async fn prompt_session(
                     &adapter_event,
                 );
             };
-            executor.run_prompt(agent_request, Some(&mut event_sink))
+            let result = executor.run_prompt_controlled(
+                agent_request,
+                Some(&mut event_sink),
+                &execution.control,
+            );
+            if let Ok(result) = &result {
+                if result
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.kind == baize_adapters::AgentErrorKind::Canceled)
+                {
+                    crate::executions::confirm_stop(
+                        &stream_state,
+                        &stream_session_id,
+                        &stream_attempt_id,
+                        result,
+                    )?;
+                }
+            }
+            result
         })
         .await
         {
@@ -228,6 +275,12 @@ pub async fn prompt_session(
 
             let new_status = if result.success {
                 TaskSessionStatus::Running
+            } else if result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.kind == baize_adapters::AgentErrorKind::Canceled)
+            {
+                TaskSessionStatus::Canceled
             } else {
                 TaskSessionStatus::Failed
             };
@@ -268,10 +321,19 @@ pub async fn prompt_session(
                         .insert(provider_id.0.clone(), native_session_id.to_string());
                 }
             }
+            let confirmed_canceled = result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.kind == baize_adapters::AgentErrorKind::Canceled);
             let result_uncertain = !result.success
+                && !confirmed_canceled
                 && (result.exit_code.is_none()
                     || result.error.as_ref().is_some_and(|error| {
-                        error.kind == baize_adapters::AgentErrorKind::Timeout
+                        matches!(
+                            error.kind,
+                            baize_adapters::AgentErrorKind::Timeout
+                                | baize_adapters::AgentErrorKind::ExecutionUnconfirmed
+                        )
                     }));
             if result.success {
                 let coverage_lost = matches!(

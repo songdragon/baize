@@ -102,6 +102,7 @@ pub struct SessionView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePolicyView {
+    pub native_control: Value,
     pub command_policy: String,
     pub execution_mode: String,
     pub checkpoint_policy: String,
@@ -261,6 +262,8 @@ use prompt::*;
 mod output;
 use output::*;
 mod continuity;
+mod native_control;
+use native_control::*;
 mod conversation;
 use continuity::{
     apply_continuity_status, can_reconcile, continuity_context_lines, is_continuity_command,
@@ -640,6 +643,7 @@ mod tests {
                     risk_level: Some("Low".to_string()),
                 }]),
                 runtime_policy: Ok(RuntimePolicyView {
+                    native_control: Value::Null,
                     command_policy: "deny".to_string(),
                     execution_mode: "read_only".to_string(),
                     checkpoint_policy: "before_handoff".to_string(),
@@ -928,6 +932,7 @@ mod tests {
             selected_provider_index: 1,
             input: "你能做什么".to_string(),
             runtime_policy: Some(RuntimePolicyView {
+                native_control: Value::Null,
                 command_policy: "deny".to_string(),
                 execution_mode: "read_only".to_string(),
                 checkpoint_policy: "before_handoff".to_string(),
@@ -1149,6 +1154,7 @@ mod tests {
         let state = TuiState {
             detail_mode: true,
             runtime_policy: Some(RuntimePolicyView {
+                native_control: Value::Null,
                 command_policy: "allow_project".to_string(),
                 execution_mode: "project_write_allowed".to_string(),
                 checkpoint_policy: "before_handoff".to_string(),
