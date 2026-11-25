@@ -274,9 +274,19 @@ pub async fn prompt_session(
                         error.kind == baize_adapters::AgentErrorKind::Timeout
                     }));
             if result.success {
+                let coverage_lost = matches!(
+                    prepared_context.result.strategy,
+                    baize_core::ContextPackStrategy::CrossProviderDelta
+                ) && native_resume_session_id
+                    .as_ref()
+                    .zip(native_session_id.as_ref())
+                    .is_some_and(|(resumed, returned)| resumed != returned);
+                // A replacement ID only saw this delta. Keep the last confirmed
+                // receipt, whose ID mismatch forces a full pack on the next turn.
                 if let Some(native_id) = native_session_id
                     .as_ref()
                     .or(native_resume_session_id.as_ref())
+                    .filter(|_| !coverage_lost)
                 {
                     session.continuity.checkpoints.insert(
                         provider_id.0.clone(),

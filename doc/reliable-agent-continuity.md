@@ -16,6 +16,8 @@
 
 相同 key 表示替换；撤销保留修订号和来源，不删除审计依据。长期要求需要显式保存，Baize 不从 agent 建议中自动推断用户承诺。原始对话仍按用户/assistant、provider 和事件来源承接。原会话目标保留为背景，后续用户修正和当前有效要求优先。
 
+已撤销要求的正文仍保存在数据库；发送给 agent 时只携带 key、修订、来源和撤销标记。工作区改动文件清单最多展示 32 个及省略数量，详细事实仍应读取当前 workspace。有效要求和必要用户历史超预算时仍拒绝执行，不静默裁掉后发送。
+
 `/requirements` 是只读查询，执行中或结果未确认时也可以查看，不写会话、时间戳或事件。TUI 将结果展示在 Context 面板，保留原 provider 请求和后续草稿。其他要求修改命令仍受运行租约保护。
 
 Tab 选择下一轮执行者，Enter 仍使用原 Baize session。也可 Ctrl-H 准备交接、Ctrl-Y 接受。接受只选择执行者，不发送草稿、不推进回执。Ctrl-H 和 F5 都使用请求时的实际草稿；Context 面板展示来源、有效/撤销要求、预算省略和缺口。实际发送会重新检查当前输入与 workspace。
@@ -24,6 +26,7 @@ Tab 选择下一轮执行者，Enter 仍使用原 Baize session。也可 Ctrl-H 
 
 - 每个成功的原生执行引用都有回执：原生 ID、已确认事件位置、尚未完整交付的 assistant 来源、要求修订号和执行入口身份。
 - 原生 ID 与入口/cwd 身份相符、回执仍能在历史中定位时，补齐其尚未知晓的对话。旧 ID 没有回执时，不假设它了解已有历史。
+- 增量执行返回不同原生 ID 时，不为新 ID 推进覆盖回执；下一轮补齐完整上下文后才确认新的覆盖位置。字段名如 refresh_token 不会单独触发整行脱敏；实际凭据被脱敏的历史明确标为未完整交付并保留 pending。
 - 每轮重新读取 workspace、HEAD、改变的文件及包含 staged changes 的 Git hunk。旧测试信号只代表历史记录，不是当前代码已经通过验证。
 - 较早有效要求和未交付用户请求不按“最后 8 条”裁掉；无法放入预算时拒绝执行，TUI 保留未提交输入。可调整 `context.provider_token_budgets` 或另开聚焦会话。预算是保守估算，不是 provider tokenizer 的精确计数。
 - assistant 输出能容纳时保留全文；否则标明摘录/省略，来源留在 pending 集合中。预算不足时仍可能无法补齐全文，不能把回执解释成完整语义理解证明。
@@ -57,7 +60,7 @@ Antigravity headless 可能因无法询问命令权限而自动拒绝工具，�
 - `POST /sessions/:id/context-preview`：`{"provider_id":"codex","prompt":"待提交的请求"}`，与实际发送共用上下文构建路径；不写回执。原 GET 接口保留。
 - `POST /sessions/:id/prompt`：上述 `/remember`、`/forget`、`/requirements`、`/reconcile`、`/reset-provider` 也可作为本地命令使用。
 - 新客户端先核对 daemon 的 `runtime.capabilities.session_continuity >= 2`；能力缺失或版本 1 的旧 daemon 不会收到本地命令或普通 prompt。协议 2 包含取消竞争和未知执行保护修复，升级后需先用同一版本重新启动 daemon。
-- 旧 session 缺少 continuity 字段时使用默认值；旧 handoff 中用户明确提供的约束按来源导入，可撤销且不反复复活。
+- 旧 session 缺少 continuity 字段时使用默认值；仅 Accepted 的旧 handoff 约束按来源导入，去除首尾空白后与现有文本去重。Draft 不会提前生效，撤销后的相同文本不会因另一份交接再次导入。既有已导入记录不自动删除，可按 key 撤销。
 - 缺少原生引用或重置引用后使用完整上下文。没有导入私有 transcript、迁移未完成工具进程，或声称 CLI 与 Desktop 能力等价。
 
 ## 验证证据

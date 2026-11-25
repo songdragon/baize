@@ -461,3 +461,6 @@ mod handoff;
 
 #[path = "continuity_review_tests.rs"]
 mod review;
+
+#[path = "zcode_review_tests.rs"]
+mod zcode_review;

@@ -114,15 +114,28 @@ pub(super) fn objective_section(
                 "revoked"
             },
             requirement.source_ref,
-            requirement.text
+            if requirement.active {
+                &requirement.text
+            } else {
+                "[withdrawn content omitted]"
+            }
         ));
     }
-    for handoff in handoffs
-        .iter()
-        .filter(|handoff| !session.continuity.imported_handoffs.contains(&handoff.id.0))
-    {
+    let mut seen = session
+        .continuity
+        .requirements
+        .values()
+        .map(|requirement| requirement.text.trim())
+        .collect::<std::collections::HashSet<_>>();
+    for handoff in handoffs.iter().filter(|handoff| {
+        matches!(handoff.status, baize_core::HandoffStatus::Accepted)
+            && !session.continuity.imported_handoffs.contains(&handoff.id.0)
+    }) {
         for constraint in &handoff.mechanical_facts.user_constraints {
-            lines.push(format!("- legacy handoff {}: {}", handoff.id.0, constraint));
+            let constraint = constraint.trim();
+            if !constraint.is_empty() && seen.insert(constraint) {
+                lines.push(format!("- legacy handoff {}: {}", handoff.id.0, constraint));
+            }
         }
     }
     Some(lines.join("\n"))
@@ -148,7 +161,7 @@ pub(super) fn workspace_section(
         if !status.changed_files.is_empty() {
             lines.push(format!(
                 "changed_files: {}",
-                status.changed_files.join(", ")
+                limited_join(&status.changed_files, WORKSPACE_FILE_LIMIT)
             ));
         }
     }
@@ -339,9 +352,7 @@ pub(super) fn sanitize_context_text(text: &str) -> String {
 
 pub(super) fn is_sensitive_line(line: &str) -> bool {
     let normalized = line.to_ascii_lowercase();
-    [
-        "api_key",
-        "apikey",
+    let explicit_secret = [
         "authorization:",
         "bearer ",
         "password=",
@@ -349,11 +360,19 @@ pub(super) fn is_sensitive_line(line: &str) -> bool {
         "secret=",
         "secret:",
         "token=",
-        "access_token",
-        "refresh_token",
     ]
     .iter()
-    .any(|pattern| normalized.contains(pattern))
+    .any(|pattern| normalized.contains(pattern));
+    explicit_secret
+        || ["api_key", "apikey", "access_token", "refresh_token"]
+            .iter()
+            .any(|key| {
+                normalized.match_indices(key).any(|(index, key)| {
+                    let suffix =
+                        normalized[index + key.len()..].trim_start_matches([' ', '\t', '\'', '"']);
+                    suffix.starts_with('=') || suffix.starts_with(':')
+                })
+            })
 }
 
 pub(super) fn compact_line(text: &str) -> String {

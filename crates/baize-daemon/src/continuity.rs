@@ -6,19 +6,29 @@ use baize_core::{
 
 pub(crate) fn import_requirements(state: &AppState, session: &mut TaskSession) -> Result<()> {
     let handoffs = with_store(state, |store| store.list_handoffs_for_session(&session.id))?;
-    for handoff in handoffs {
+    for handoff in handoffs
+        .into_iter()
+        .filter(|handoff| matches!(handoff.status, baize_core::HandoffStatus::Accepted))
+    {
         if session.continuity.imported_handoffs.contains(&handoff.id.0) {
             continue;
         }
         for (index, text) in handoff.mechanical_facts.user_constraints.iter().enumerate() {
-            if text.trim().is_empty() {
+            let text = text.trim();
+            if text.is_empty()
+                || session
+                    .continuity
+                    .requirements
+                    .values()
+                    .any(|requirement| requirement.text.trim() == text)
+            {
                 continue;
             }
             session.continuity.revision += 1;
             session.continuity.requirements.insert(
                 format!("{}-{index}", handoff.id.0),
                 SessionRequirement {
-                    text: text.clone(),
+                    text: text.into(),
                     active: true,
                     revision: session.continuity.revision,
                     source_ref: format!("handoff:{}", handoff.id.0),

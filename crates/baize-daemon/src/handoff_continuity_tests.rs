@@ -155,6 +155,17 @@ async fn legacy_handoff_requirements_import_once_and_can_be_revoked_without_resu
     .await
     .1;
     let hid = handoff["handoff"]["id"].as_str().unwrap();
+    assert_eq!(
+        api(
+            &app,
+            Method::POST,
+            &format!("/sessions/{id}/handoff/{hid}/accept"),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
     let key = format!("{hid}-0");
     let before = api(
         &app,

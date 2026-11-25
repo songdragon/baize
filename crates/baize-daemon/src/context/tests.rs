@@ -6,6 +6,9 @@ use chrono::Utc;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+#[path = "zcode_tests.rs"]
+mod zcode_review;
+
 fn pack(session: &TaskSession, events: &[BaizeEvent], budget: u32) -> ContextPackBuildResult {
     build_context_pack(ContextPackInput {
         session,

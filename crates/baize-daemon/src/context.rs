@@ -11,6 +11,7 @@ use baize_workspace::{DiffHunk, WorkspaceStatus};
 use serde::Serialize;
 
 const MAX_LIST_ITEMS: usize = 8;
+const WORKSPACE_FILE_LIMIT: usize = 32;
 const LINE_LIMIT: usize = 180;
 const TEXT_LIMIT: usize = 800;
 const DIFF_HUNK_LIMIT: usize = 4;
@@ -236,6 +237,16 @@ pub fn build_context_pack_with_estimator(
         .collect::<Vec<_>>();
     sections.retain(|section| !matches!(section.name.as_str(), "objective" | "workspace"));
     let mut truncated = Vec::new();
+    if input.workspace_status.is_some_and(|status| {
+        status.changed_files.len() > WORKSPACE_FILE_LIMIT
+            || status
+                .changed_files
+                .iter()
+                .any(|path| path.chars().count() > LINE_LIMIT)
+    }) {
+        truncated.push("workspace.changed_files".into());
+        warnings.push("Workspace changed-file list is an excerpt; inspect git status for the full list before acting.".into());
+    }
     let budget = input
         .profile
         .default_context_budget_tokens
@@ -253,6 +264,7 @@ pub fn build_context_pack_with_estimator(
     let mut omitted_event_ids = Vec::new();
     for (index, mut message) in messages {
         let original = message.text.clone();
+        let mut excerpted = false;
         if message.source.role == "assistant"
             && used + estimator.estimate(&message.text) + 64 > budget
         {
@@ -261,6 +273,12 @@ pub fn build_context_pack_with_estimator(
                 message.text.chars().take(TEXT_LIMIT).collect::<String>()
             );
             message.source.truncated = true;
+            excerpted = true;
+        }
+        let sanitized = sanitize_context_text(&message.text);
+        if message.text.lines().any(is_sensitive_line) {
+            message.source.truncated = true;
+            warnings.push(format!("History source {} contains redacted sensitive content; its full text has not been delivered.",message.source.event_id.0));
         }
         let provider = message
             .source
@@ -270,10 +288,7 @@ pub fn build_context_pack_with_estimator(
             .unwrap_or("unknown");
         let text = format!(
             "{}: {}\n[source={} provider={}]",
-            message.source.role,
-            sanitize_context_text(&message.text),
-            message.source.event_id.0,
-            provider
+            message.source.role, sanitized, message.source.event_id.0, provider
         );
         let tokens = estimator.estimate(&text);
         if message.source.role == "user" || used + tokens <= budget {
@@ -287,7 +302,7 @@ pub fn build_context_pack_with_estimator(
         if !message.source.included || message.source.truncated {
             omitted_event_ids.push(message.source.event_id.clone());
         }
-        if message.source.truncated {
+        if excerpted {
             warnings.push(format!(
                 "Assistant output {} is an excerpt ({} characters).",
                 message.source.event_id.0,
