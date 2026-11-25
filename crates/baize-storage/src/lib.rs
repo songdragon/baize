@@ -17,6 +17,17 @@ pub struct EventStore {
 }
 
 impl EventStore {
+    pub fn project_config_backup_dir(&self) -> PathBuf {
+        self.data_dir.join("artifacts").join("project-config")
+    }
+
+    pub fn has_active_execution_in_workspace(&self, id: &WorkspaceId) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "select exists(select 1 from task_sessions where json_extract(json, '$.workspace_id') = ?1 and json_type(json, '$.continuity.active_turn') = 'object')",
+            [&id.0], |row|row.get(0),
+        )?)
+    }
+
     pub fn open_default() -> Result<Self> {
         let path = default_data_dir().join("baize.db");
         Self::open(path)
@@ -1004,6 +1015,23 @@ mod tests {
     };
     use chrono::Utc;
     use serde_json::json;
+
+    #[test]
+    fn project_configuration_uses_its_store_directory_and_fails_closed_on_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("baize.db")).unwrap();
+        assert_eq!(
+            store.project_config_backup_dir(),
+            temp.path().join("artifacts/project-config")
+        );
+        assert!(!store
+            .has_active_execution_in_workspace(&WorkspaceId::new())
+            .unwrap());
+        store.conn.execute("insert into task_sessions (id,workspace_id,json,status,active_provider_id) values ('corrupt','ws_corrupt','not-json','Running','codex')",[]).unwrap();
+        assert!(store
+            .has_active_execution_in_workspace(&WorkspaceId::new())
+            .is_err());
+    }
 
     fn index_names(store: &EventStore) -> Vec<String> {
         let mut stmt = store

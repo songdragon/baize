@@ -467,3 +467,6 @@ mod zcode_review;
 
 #[path = "execution_control_tests.rs"]
 mod execution_control;
+
+#[path = "project_config_tests.rs"]
+mod project_config;

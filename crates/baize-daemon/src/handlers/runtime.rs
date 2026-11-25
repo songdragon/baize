@@ -11,7 +11,7 @@ pub async fn runtime_status(
     let command_policy = state.config.workspace.command_policy.as_str();
     ok_json(serde_json::json!({
         "runtime": {
-            "capabilities": {"session_continuity": 3,"execution_control":1,"native_approvals":{"codex":1,"antigravity":0,"opencode":0}},
+            "capabilities": {"session_continuity": 3,"execution_control":1,"project_config":1,"native_approvals":{"codex":1,"antigravity":0,"opencode":0}},
             "native_approval_wait_seconds": baize_adapters::APPROVAL_WAIT_SECONDS,
             "execution_entrypoints":{"codex":"codex app-server (stdio)","antigravity":"agy --print; local process-group stop only","opencode":"CLI; local process-group stop only"},
             "command_policy": command_policy,

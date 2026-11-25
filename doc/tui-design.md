@@ -53,6 +53,7 @@
 - Git 变更和上下文是最近一次读取的快照，明确刷新入口。上下文预览使用占位请求，不声称包含未发送草稿。
 - 不把 provider health、CLI 存在或未知 quota 画成已验证的原生 Desktop 能力。
 - Providers 显示 daemon 报告的实际入口及原生审批支持。Codex 使用 app-server stdio 接收单次命令/文件审批与中断完成证据；Antigravity print 不支持审批控制往返，停止本地 CLI 后仍可能保持未确认。审批事件实时更新面板但不抢走输入焦点，命令、目录及作用范围可滚动审阅，过期请求不能再次批准。详见 [执行控制](execution-control.md)。
+- Ctrl-K 的 Review shared project configuration 展示项目指令、单份 skills、MCP 映射计划与冲突；这是文件审阅，不把原生加载或实际工具调用标为已验证。写入和受保护的恢复通过 daemon CLI 操作，详见 [项目共享配置](shared-project-config.md)。
 - 终端 raw mode、鼠标捕获、paste mode、备用屏在错误或 panic 时恢复。
 
 ## 验收场景

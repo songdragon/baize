@@ -5,6 +5,8 @@ use serde_json::json;
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+mod project_config;
+use project_config::ProjectConfigCommand;
 
 #[derive(Debug, Parser)]
 #[command(name = "baize")]
@@ -27,6 +29,12 @@ enum Command {
         path: String,
     },
     Doctor,
+    ProjectConfig {
+        #[arg(long, default_value = ".")]
+        path: String,
+        #[command(subcommand)]
+        command: ProjectConfigCommand,
+    },
     Providers,
     Validate {
         provider: Option<String>,
@@ -68,6 +76,10 @@ enum ConfigCommand {
 enum CliAction {
     RunTui,
     RunDaemon,
+    RunProjectConfig {
+        path: String,
+        command: ProjectConfigCommand,
+    },
     RunAsk(AskOptions),
     Print(String),
 }
@@ -99,6 +111,10 @@ async fn main() -> Result<()> {
             print!("{}", ask_output(options)?);
             Ok(())
         }
+        CliAction::RunProjectConfig { path, command } => {
+            print!("{}", project_config::output(&path, command)?);
+            Ok(())
+        }
         CliAction::Print(output) => {
             print!("{output}");
             Ok(())
@@ -110,6 +126,9 @@ fn plan_cli_action(command: Option<Command>) -> Result<CliAction> {
     match command.unwrap_or(Command::Tui) {
         Command::Tui => Ok(CliAction::RunTui),
         Command::Daemon => Ok(CliAction::RunDaemon),
+        Command::ProjectConfig { path, command } => {
+            Ok(CliAction::RunProjectConfig { path, command })
+        }
         Command::Config { command } => handle_config(command).map(CliAction::Print),
         Command::Status { path } => status_output(path).map(CliAction::Print),
         Command::Doctor => doctor_output().map(CliAction::Print),

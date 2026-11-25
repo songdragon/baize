@@ -338,7 +338,7 @@ MVP 至少应展示当前 workspace dirty state，并在 agent 切换前提醒�
 
 保留目标产品的内置 prompt、专属工具和配置，不通过统一系统提示词替换原生执行机制。共享配置减少设置负担，但不是跨 agent session 连续性的替代。
 
-此项是目标要求；当前 MVP 尚未实现跨产品配置同步或所有入口的等效配置。
+当前实现支持项目根 AGENTS.md、.agents/skills 的原生复用，以及项目 MCP 公共子集的审阅、Codex 映射、备份与恢复；见 [项目共享配置](shared-project-config.md)。原生信任与 provider 专属策略仍生效；全局配置同步和所有入口的等效配置尚未实现。
 
 ### 5.14 主对话连续
 

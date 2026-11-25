@@ -7,6 +7,10 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route(
+            "/workspaces/:id/project-config",
+            get(handlers::project_config::inspect).post(handlers::project_config::change),
+        )
         .route("/health", get(handlers::providers::health))
         .route("/runtime/status", get(handlers::runtime::runtime_status))
         .route(

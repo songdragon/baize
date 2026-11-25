@@ -295,6 +295,8 @@ mod draft_store;
 use draft_store::*;
 mod actions;
 use actions::*;
+mod project_config;
+use project_config::*;
 mod runtime;
 use runtime::*;
 mod tasks;

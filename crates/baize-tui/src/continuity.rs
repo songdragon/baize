@@ -45,6 +45,9 @@ pub(super) fn apply_continuity_status(state: &mut TuiState, value: &Value) {
 }
 
 pub(super) fn continuity_context_lines(state: &TuiState) -> Vec<Line<'static>> {
+    if state.ui.context["project_config"].is_object() {
+        return project_config_lines(&state.ui.context["project_config"]);
+    }
     let mut lines = vec![Line::raw(
         "Saved requirements: /remember <key> <text> · /forget <key> · /requirements",
     )];

@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod project;
+
 const KNOWN_PROVIDERS: &[&str] = &["codex", "antigravity", "gemini", "copilot", "opencode"];
 const COMMAND_POLICIES: &[&str] = &["ask", "allow_project", "deny"];
 const CHECKPOINT_POLICIES: &[&str] = &["before_handoff", "off"];

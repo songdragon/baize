@@ -2,7 +2,7 @@
 
 2026-11-22 UI 更新：原 TUI shell 已重做为持续会话工作台。下文保留早期实现记录；当前交互与产品边界以 [tui-design.md](tui-design.md) 为准，UI 框架候选见 [ui-research.md](ui-research.md)。
 
-Status: CLI foundation implemented and actively hardening. A bounded Codex → Antigravity → Codex CLI continuity acceptance passed on 2026-11-25; shared configuration and provider Desktop acceptance remain open. See [reliable agent continuity](reliable-agent-continuity.md) for implementation, tests and limits.
+Status: CLI foundation implemented and actively hardening. A bounded Codex → Antigravity → Codex continuity acceptance passed on 2026-11-25. Project instruction/skill reuse and reviewed MCP mapping are implemented as described in [shared project configuration](shared-project-config.md); global configuration synchronization and provider Desktop acceptance remain open. See [reliable agent continuity](reliable-agent-continuity.md) for implementation, tests and limits.
 
 ## Scope
 
@@ -24,7 +24,7 @@ The product goal is one continuous Baize session with interchangeable execution 
 
 CLI was the initial execution path. Provider Desktop execution means access to its actual built-in prompts, MCP, skills, computer use, browser use, and supported session interfaces; it is distinct from Baize's own future Desktop UI. Launching a window, sharing auth, or invoking a related CLI does not demonstrate Desktop integration.
 
-The inventory below records engineering already implemented. It does not claim shared agent-configuration mapping, provider Desktop execution, or end-to-end seamless switching. Provider capability research is dated and must be verified per execution entry.
+The inventory below records engineering already implemented. Project configuration mapping has a bounded support scope, not full configuration equivalence. It does not claim provider Desktop execution or end-to-end seamless switching. Provider capability research is dated and must be verified per execution entry.
 
 ## Next Product Validation Priorities
 
