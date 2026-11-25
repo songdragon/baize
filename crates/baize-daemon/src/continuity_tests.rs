@@ -464,3 +464,6 @@ mod review;
 
 #[path = "zcode_review_tests.rs"]
 mod zcode_review;
+
+#[path = "execution_control_tests.rs"]
+mod execution_control;

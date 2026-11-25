@@ -280,8 +280,8 @@ fn ask_output(options: AskOptions) -> Result<String> {
 }
 
 fn require_continuity_runtime(value: &Value) -> Result<()> {
-    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=2,
-        "Daemon requires continuity protocol 2. Restart it with the current Baize binary; no prompt was sent");
+    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=3,
+        "Daemon requires continuity protocol 3. Restart it with the current Baize binary; no prompt was sent");
     Ok(())
 }
 
@@ -684,6 +684,10 @@ mod tests {
         assert!(require_continuity_runtime(&json!({"runtime":{}})).is_err());
         assert!(require_continuity_runtime(
             &json!({"runtime":{"capabilities":{"session_continuity":2}}})
+        )
+        .is_err());
+        assert!(require_continuity_runtime(
+            &json!({"runtime":{"capabilities":{"session_continuity":3}}})
         )
         .is_ok());
     }

@@ -1,5 +1,8 @@
 mod continuity;
-pub use continuity::{ExecutionAttempt, ProviderCheckpoint, SessionContinuity, SessionRequirement};
+pub use continuity::{
+    ExecutionAttempt, ExecutionStop, ExecutionStopStatus, ProviderCheckpoint, SessionContinuity,
+    SessionRequirement,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -433,6 +436,17 @@ pub struct PermissionRequest {
     pub status: PermissionStatus,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativePermission>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativePermission {
+    pub attempt_id: EventId,
+    pub provider_id: ProviderId,
+    pub request_id: String,
+    pub method: String,
+    pub params: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -466,6 +480,7 @@ pub enum PermissionStatus {
     Pending,
     Approved,
     Denied,
+    Expired,
 }
 
 pub fn assess_permission_command(command: &str) -> PermissionRiskAssessment {

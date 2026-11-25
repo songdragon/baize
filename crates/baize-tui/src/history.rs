@@ -79,6 +79,12 @@ pub(super) fn start_new_session(state: &mut TuiState) {
 }
 
 pub(super) fn append_cancel_response(state: &mut TuiState, response: &Value) {
+    if response["execution_stop_requested"] == true {
+        state.push_message(
+            "Stop requested for the current execution. Conversation and partial changes are kept.",
+        );
+        return;
+    }
     finish_output_turn(state, "canceled", None);
     let session = response.get("session").unwrap_or(&Value::Null);
     let id = session

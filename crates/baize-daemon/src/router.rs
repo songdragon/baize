@@ -73,6 +73,10 @@ pub fn router(state: AppState) -> Router {
             post(handlers::sessions::cancel_session),
         )
         .route(
+            "/sessions/:id/execution/cancel",
+            post(handlers::sessions::stop_execution),
+        )
+        .route(
             "/sessions/:id/complete",
             post(handlers::sessions::complete_session),
         )

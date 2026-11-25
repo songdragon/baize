@@ -41,6 +41,7 @@ pub(super) fn apply_continuity_status(state: &mut TuiState, value: &Value) {
     {
         state.ui.notice = None;
     }
+    apply_execution_stop(state, continuity);
 }
 
 pub(super) fn continuity_context_lines(state: &TuiState) -> Vec<Line<'static>> {
@@ -48,6 +49,7 @@ pub(super) fn continuity_context_lines(state: &TuiState) -> Vec<Line<'static>> {
         "Saved requirements: /remember <key> <text> · /forget <key> · /requirements",
     )];
     let value = &state.ui.context;
+    lines.extend(execution_stop_lines(&value["continuity"]));
     if value.is_null() {
         lines.push(Line::raw(
             "F5 previews context for the selected provider and current draft.",

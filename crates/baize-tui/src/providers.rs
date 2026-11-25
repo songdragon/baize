@@ -93,6 +93,7 @@ pub(super) fn load_runtime_policy() -> Result<RuntimePolicyView> {
 
 pub(super) fn default_runtime_policy() -> RuntimePolicyView {
     RuntimePolicyView {
+        native_control: Value::Null,
         command_policy: "ask".to_string(),
         execution_mode: "ask_before_commands".to_string(),
         checkpoint_policy: "before_handoff".to_string(),
@@ -174,7 +175,17 @@ pub(super) fn parse_permissions(response: &Value) -> Result<Vec<PermissionView>>
                     .and_then(task_session_id)
                     .map(ToOwned::to_owned),
                 command: command.to_string(),
-                reason: reason.to_string(),
+                reason: if let Some(native) =
+                    permission.get("native").filter(|native| native.is_object())
+                {
+                    format!(
+                        "Native {} · attempt {} · single request\n{reason}",
+                        native["provider_id"].as_str().unwrap_or("unknown"),
+                        native["attempt_id"].as_str().unwrap_or("unknown")
+                    )
+                } else {
+                    reason.to_string()
+                },
                 status: status.to_string(),
                 risk_level,
             })
@@ -200,6 +211,7 @@ pub(super) fn parse_runtime_policy(response: &Value) -> Result<RuntimePolicyView
         .ok_or_else(|| response_error("runtime", response))?;
     let routing = runtime.get("routing").unwrap_or(&Value::Null);
     Ok(RuntimePolicyView {
+        native_control: json!({"approvals":runtime["capabilities"]["native_approvals"],"entrypoints":runtime["execution_entrypoints"]}),
         command_policy: runtime
             .get("command_policy")
             .and_then(Value::as_str)

@@ -253,12 +253,13 @@ pub(super) fn inspector_lines(state: &TuiState, panel: Panel) -> Vec<Line<'stati
                 muted_style(),
             ));
             lines.push(Line::styled(
-                "Baize approvals are distinct from provider-native prompts.",
+                "Native-bound requests control their provider; other approvals are Baize records.",
                 muted_style(),
             ));
         }
         Panel::Providers => {
             heading(&mut lines, "EXECUTION ENVIRONMENTS");
+            lines.extend(provider_control_lines(state));
             provider_rows(&mut lines, state, true);
             lines.push(Line::styled(
                 "Health is availability evidence; it does not prove every native tool capability.",
@@ -282,10 +283,13 @@ fn heading(lines: &mut Vec<Line<'static>>, label: &str) {
     ));
 }
 fn field(lines: &mut Vec<Line<'static>>, label: &str, value: &str) {
+    let safe = safe_output_text(value);
+    let mut values = safe.lines();
     lines.push(Line::from(vec![
         Span::styled(format!("{label}: "), muted_style()),
-        Span::raw(value.to_string()),
+        Span::raw(values.next().unwrap_or("").to_string()),
     ]));
+    lines.extend(values.map(|line| Line::raw(format!("  {line}"))));
 }
 fn diff_line(lines: &mut Vec<Line<'static>>, line: &str) {
     lines.push(Line::styled(

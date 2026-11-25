@@ -16,7 +16,14 @@ use std::time::{Duration, Instant};
 mod antigravity_stream;
 mod streaming;
 pub use streaming::parse_stream_json_line;
+mod codex_native;
+mod codex_transport;
+mod control;
+pub use codex_native::APPROVAL_WAIT_SECONDS;
+mod owned_process;
 mod process_stream;
+pub use control::AgentControl;
+#[cfg(test)]
 use process_stream::run_command_with_timeout_streaming;
 
 const ANTIGRAVITY_COMMAND: &str = "/Users/songdragon/.local/bin/agy";
@@ -182,6 +189,8 @@ pub enum AgentErrorKind {
     Authentication,
     PermissionDenied,
     Timeout,
+    Canceled,
+    ExecutionUnconfirmed,
     RateLimit,
     QuotaExceeded,
     ProcessFailure,
@@ -199,6 +208,8 @@ struct CommandRunOutput {
     timed_out: bool,
     timeout: Duration,
     events: Vec<AgentExecutionEvent>,
+    canceled: bool,
+    output_unconfirmed: bool,
 }
 
 pub fn default_provider_profiles() -> Vec<ProviderProfile> {
@@ -313,21 +324,21 @@ pub fn default_provider_context_profiles() -> Vec<ProviderContextProfile> {
         ProviderContextProfile {
             provider_id: ProviderId("codex".to_string()),
             command: "codex".to_string(),
-            transport: "cli".to_string(),
-            prompt_entrypoint: "codex exec [PROMPT]".to_string(),
+            transport: "app-server".to_string(),
+            prompt_entrypoint: "codex app-server (stdio JSON-RPC)".to_string(),
             supports_native_resume: true,
-            native_resume_arg: Some("codex exec resume <SESSION_ID> [PROMPT]".to_string()),
-            native_session_id_capture: Some("JSONL thread.started.thread_id".to_string()),
+            native_resume_arg: Some("thread/resume {threadId}".to_string()),
+            native_session_id_capture: Some("thread/start or thread/resume result.thread.id".to_string()),
             supports_structured_output: true,
             structured_output_format: Some(
-                "codex exec --json JSONL events; --output-schema for final JSON".to_string(),
+                "app-server JSON-RPC notifications and server approval requests".to_string(),
             ),
             supports_acp: false,
             supports_mcp: true,
             supports_workspace_arg: true,
-            workspace_arg: Some("--cd <DIR>; --add-dir <DIR>".to_string()),
+            workspace_arg: Some("thread/start or thread/resume cwd".to_string()),
             supports_file_attachment: true,
-            file_arg: Some("--image <FILE>".to_string()),
+            file_arg: Some("turn/start localImage input".to_string()),
             supports_conversation_export: false,
             supports_conversation_import: false,
             context_window_tokens: None,
@@ -343,8 +354,11 @@ pub fn default_provider_context_profiles() -> Vec<ProviderContextProfile> {
             workspace_exposure_notes:
                 "Codex can inspect/edit the selected workspace according to sandbox settings."
                     .to_string(),
-            last_verified_at: "2026-07-09".to_string(),
+            last_verified_at: "2026-11-25".to_string(),
             source_refs: vec![
+                "codex app-server --help".to_string(),
+                "codex app-server generate-json-schema --out <DIR>".to_string(),
+                "https://github.com/openai/codex/tree/main/codex-rs/app-server".to_string(),
                 "codex --help".to_string(),
                 "codex exec --help".to_string(),
                 "codex exec resume --help".to_string(),
@@ -628,13 +642,33 @@ pub fn run_agent_prompt_streaming(
     request: AgentPromptRequest,
     event_sink: Option<&mut AgentEventSink<'_>>,
 ) -> Result<AgentRunResult> {
+    run_agent_prompt_with_control(request, event_sink, None)
+}
+
+/// Control is scoped to this execution, never to a provider's global process list.
+pub fn run_agent_prompt_controlled(
+    request: AgentPromptRequest,
+    event_sink: Option<&mut AgentEventSink<'_>>,
+    control: &AgentControl,
+) -> Result<AgentRunResult> {
+    if request.provider_id.0 == "codex" {
+        return codex_native::run(request, event_sink, control);
+    }
+    run_agent_prompt_with_control(request, event_sink, Some(control))
+}
+
+fn run_agent_prompt_with_control(
+    request: AgentPromptRequest,
+    event_sink: Option<&mut AgentEventSink<'_>>,
+    control: Option<&AgentControl>,
+) -> Result<AgentRunResult> {
     match request.provider_id.0.as_str() {
-        "antigravity" => run_antigravity_prompt(request, event_sink),
-        "codex" => run_codex_prompt(request, event_sink),
+        "antigravity" => run_antigravity_prompt(request, event_sink, control),
+        "codex" => run_codex_prompt(request, event_sink, control),
         "gemini" => anyhow::bail!(
             "gemini prompt execution is disabled because Gemini CLI is no longer supported for individual Code Assist accounts; use antigravity instead"
         ),
-        "opencode" => run_opencode_prompt(request, event_sink),
+        "opencode" => run_opencode_prompt(request, event_sink, control),
         other => anyhow::bail!("provider execution is not implemented for {other}"),
     }
 }
@@ -858,13 +892,15 @@ pub fn classify_agent_error(text: &str, source: AgentErrorSource) -> Option<Agen
 fn run_antigravity_prompt(
     request: AgentPromptRequest,
     event_sink: Option<&mut AgentEventSink<'_>>,
+    control: Option<&AgentControl>,
 ) -> Result<AgentRunResult> {
-    let run = run_command_with_timeout_streaming(
+    let run = process_stream::run_command_controlled(
         ANTIGRAVITY_COMMAND,
         &build_antigravity_args(&request),
         &request.cwd,
         timeout_for(&request),
         event_sink,
+        control,
     )
     .with_context(|| "failed to run agy prompt")?;
     Ok(agent_result_from_command_run(
@@ -877,13 +913,15 @@ fn run_antigravity_prompt(
 fn run_codex_prompt(
     request: AgentPromptRequest,
     event_sink: Option<&mut AgentEventSink<'_>>,
+    control: Option<&AgentControl>,
 ) -> Result<AgentRunResult> {
-    let run = run_command_with_timeout_streaming(
+    let run = process_stream::run_command_controlled(
         "codex",
         &build_codex_args(&request),
         &request.cwd,
         timeout_for(&request),
         event_sink,
+        control,
     )
     .with_context(|| "failed to run codex prompt")?;
     Ok(agent_result_from_command_run(
@@ -896,13 +934,15 @@ fn run_codex_prompt(
 fn run_opencode_prompt(
     request: AgentPromptRequest,
     event_sink: Option<&mut AgentEventSink<'_>>,
+    control: Option<&AgentControl>,
 ) -> Result<AgentRunResult> {
-    let run = run_command_with_timeout_streaming(
+    let run = process_stream::run_command_controlled(
         "opencode",
         &build_opencode_args(&request),
         &request.cwd,
         timeout_for(&request),
         event_sink,
+        control,
     )
     .with_context(|| "failed to run opencode prompt")?;
     Ok(agent_result_from_command_run(
@@ -929,7 +969,9 @@ fn agent_result_from_command_run(
     } else {
         None
     };
-    let success = terminal_error.is_none()
+    let success = !run.canceled
+        && !run.output_unconfirmed
+        && terminal_error.is_none()
         && (run.output.status.success() || (run.timed_out && stream_completed));
     let stderr = if let Some(error) = terminal_error {
         format!("{raw_stderr}\n{error}")
@@ -938,7 +980,13 @@ fn agent_result_from_command_run(
     } else {
         raw_stderr
     };
-    let error = if success {
+    let error = if run.canceled || run.output_unconfirmed {
+        Some(AgentErrorDetail {
+            kind: AgentErrorKind::ExecutionUnconfirmed,
+            message: if run.canceled { "Owned CLI stop requested; native background execution is not confirmed stopped." } else { "Provider exited but output pipes remained open; execution completion is unconfirmed." }.into(),
+            source: AgentErrorSource::Runtime,
+        })
+    } else if success {
         None
     } else if run.timed_out {
         classify_agent_error(&stderr, AgentErrorSource::Runtime)
@@ -1404,7 +1452,7 @@ mod tests {
             .find(|profile| profile.provider_id.0 == "copilot")
             .expect("copilot profile");
 
-        assert_eq!(codex.prompt_entrypoint, "codex exec [PROMPT]");
+        assert_eq!(codex.prompt_entrypoint, "codex app-server (stdio JSON-RPC)");
         assert!(codex.supports_structured_output);
         assert!(codex.supports_mcp);
         assert_eq!(codex.context_window_tokens, None);
@@ -2349,6 +2397,8 @@ mod tests {
                 timed_out: false,
                 timeout: Duration::from_secs(1),
                 events: vec![],
+                canceled: false,
+                output_unconfirmed: false,
             };
             let parsed = agent_result_from_command_run(ProviderId(provider.into()), provider, run);
             assert_eq!(parsed.success, provider != "antigravity", "{provider}");
@@ -2374,6 +2424,8 @@ mod tests {
                 timed_out: false,
                 timeout: Duration::from_secs(1),
                 events: vec![],
+                canceled: false,
+                output_unconfirmed: false,
             };
             let parsed =
                 agent_result_from_command_run(ProviderId("antigravity".into()), "agy", run);

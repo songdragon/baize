@@ -88,7 +88,7 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
                     json!({}),
                 )?
             }
-            Action::Cancel => post_json(&format!("/sessions/{id}/cancel"), json!({}))?,
+            Action::Cancel => post_json(&format!("/sessions/{id}/execution/cancel"), json!({}))?,
             Action::Complete => post_json(&format!("/sessions/{id}/complete"), json!({}))?,
             Action::Details => {
                 extra = json!({"context_response":post_json(&format!("/sessions/{id}/context-preview"),json!({"provider_id":provider,"prompt":draft}))?,"events_response":load_session_events(id)?,"session_response":get_json(&format!("/sessions/{id}"))?});
@@ -171,7 +171,9 @@ pub(super) fn apply_action(state: &mut TuiState, result: ActionResult) {
                 state.ui.execution_uncertain |= state.activity_status.starts_with("running");
                 append_cancel_response(state, &result.response);
                 apply_continuity_status(state, &result.response["session"]);
-                state.ui.notice = Some("Session canceled. The provider process may still be running; inspect workspace before starting more work.".into());
+                if result.response["session"]["continuity"]["last_stop"].is_null() {
+                    state.ui.notice = Some("Session canceled. The provider process may still be running; inspect workspace before starting more work.".into());
+                }
             } else {
                 append_complete_response(state, &result.response);
             }

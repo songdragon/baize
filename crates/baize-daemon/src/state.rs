@@ -16,6 +16,7 @@ pub struct AppState {
     pub store: Arc<Mutex<EventStore>>,
     pub events: broadcast::Sender<BaizeEvent>,
     pub executor: Arc<dyn AgentExecutor>,
+    pub(crate) executions: crate::executions::ExecutionRegistry,
 }
 
 pub trait AgentExecutor: Send + Sync {
@@ -24,12 +25,29 @@ pub trait AgentExecutor: Send + Sync {
         request: AgentPromptRequest,
         event_sink: Option<&mut AgentEventSink<'_>>,
     ) -> Result<AgentRunResult>;
+
+    fn run_prompt_controlled(
+        &self,
+        request: AgentPromptRequest,
+        event_sink: Option<&mut AgentEventSink<'_>>,
+        _control: &baize_adapters::AgentControl,
+    ) -> Result<AgentRunResult> {
+        self.run_prompt(request, event_sink)
+    }
 }
 
 #[derive(Clone)]
 struct RealAgentExecutor;
 
 impl AgentExecutor for RealAgentExecutor {
+    fn run_prompt_controlled(
+        &self,
+        request: AgentPromptRequest,
+        event_sink: Option<&mut AgentEventSink<'_>>,
+        control: &baize_adapters::AgentControl,
+    ) -> Result<AgentRunResult> {
+        baize_adapters::run_agent_prompt_controlled(request, event_sink, control)
+    }
     fn run_prompt(
         &self,
         request: AgentPromptRequest,
@@ -173,8 +191,12 @@ impl AppState {
             store: Arc::new(Mutex::new(store)),
             events,
             executor,
+            executions: Default::default(),
         };
         state.recover_in_flight_sessions();
+        if let Err(error) = crate::native_permissions::expire(&state, None) {
+            tracing::warn!("recover native approvals: {error:#}");
+        }
         state
     }
 
@@ -258,6 +280,10 @@ impl AppState {
             }
             if let Some(attempt) = session.continuity.active_turn.as_mut() {
                 attempt.uncertain = true;
+            }
+            if let Some(stop) = session.continuity.last_stop.as_mut() {
+                stop.status = baize_core::ExecutionStopStatus::Unconfirmed;
+                stop.detail = "Daemon restarted; native execution stop is unconfirmed.".into();
             }
             if !matches!(session.status, TaskSessionStatus::Canceled) {
                 session.status = TaskSessionStatus::Failed;

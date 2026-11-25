@@ -82,6 +82,7 @@ pub async fn create_permission(
         status: PermissionStatus::Pending,
         created_at: Utc::now(),
         resolved_at: None,
+        native: None,
     };
     if let Err(error) = with_store(&state, |store| store.upsert_permission(&permission)) {
         return internal_error(error.to_string());
@@ -128,6 +129,18 @@ fn resolve_permission(
         Ok(None) => return crate::helpers::not_found("permission not found"),
         Err(error) => return internal_error(error.to_string()),
     };
+    if permission.native.is_some() {
+        return match crate::native_permissions::resolve(&state, &id, status) {
+            Ok((permission, event)) => {
+                let _ = state.events.send(event);
+                ok_json(serde_json::json!({"permission":permission}))
+            }
+            Err(error) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error":error.to_string(),"native_decision_sent":false})),
+            ),
+        };
+    }
     permission.status = status;
     permission.resolved_at = Some(Utc::now());
     if let Err(error) = with_store(&state, |store| store.upsert_permission(&permission)) {

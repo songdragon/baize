@@ -539,7 +539,15 @@ async fn runtime_status_reports_execution_policy_snapshot() {
     .await;
 
     assert_eq!(status["runtime"]["command_policy"], "deny");
-    assert_eq!(status["runtime"]["capabilities"]["session_continuity"], 2);
+    assert_eq!(status["runtime"]["capabilities"]["session_continuity"], 3);
+    assert_eq!(
+        status["runtime"]["capabilities"]["native_approvals"]["codex"],
+        1
+    );
+    assert_eq!(
+        status["runtime"]["capabilities"]["native_approvals"]["antigravity"],
+        0
+    );
     assert_eq!(status["runtime"]["execution_mode"], "read_only");
     assert_eq!(status["runtime"]["checkpoint_policy"], "off");
     assert_eq!(status["runtime"]["routing"]["sticky_window_minutes"], 45);

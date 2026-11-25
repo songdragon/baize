@@ -257,6 +257,7 @@ pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTa
     if !state.ui.execution_uncertain {
         state.ui.recovery_drafts.remove(&completion.session_id);
     }
+    apply_execution_stop(state, &continuity);
 }
 
 pub(super) fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStarted) {
@@ -353,7 +354,11 @@ pub(super) fn apply_prompt_stream_event(state: &mut TuiState, event: &Value) {
     if !mark_event_seen(state, event) {
         return;
     }
+    if apply_native_permission_event(state, event) {
+        return;
+    }
     render_agent_event(state, event);
+    apply_execution_stop_event(state, event);
 }
 
 pub(super) fn raw_stream_event_detail(payload: &Value) -> Option<String> {
