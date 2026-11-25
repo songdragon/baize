@@ -122,7 +122,7 @@ All domain types derive `Serialize` and `Deserialize`. Storage uses JSON-in-SQLi
 
 - Built on ratatui + crossterm.
 - Workbench design and shortcuts: `doc/tui-design.md`; `Ctrl-K` commands, `Ctrl-O` session search, `F1` help, `F5` reconcile/refresh, `F6` focus, `F7` inspector tab, `F8` inspector visibility. `Esc` dismisses; `Ctrl-Q`/`Ctrl-C` always opens exit confirmation, even when idle. Only Enter confirms; repeated exit shortcuts never bypass confirmation. Closing the client does not cancel provider execution.
-- Additional key bindings: `Ctrl-R` (refresh providers), `Ctrl-L` (load latest session), `Ctrl-N` (new session), `Ctrl-X` (cancel session), `Ctrl-H` (handoff preview), `Ctrl-Y` (accept handoff), `Ctrl-P` (refresh permissions), `Ctrl-A` (approve), `Ctrl-D` (deny), `Tab` (switch provider).
+- Additional key bindings: `Ctrl-R` (refresh providers), `Ctrl-L` (load latest session), `Ctrl-N` (new session), `Ctrl-X` (review stopping the current execution while keeping the conversation), `Ctrl-H` (handoff preview), `Ctrl-Y` (accept handoff), `Ctrl-P` (refresh permissions), `Ctrl-A` (approve once), `Ctrl-D` (deny), `Tab` (switch provider).
 
 ### CLI Conventions
 
@@ -160,7 +160,7 @@ All dependency versions are pinned in `[workspace.dependencies]`. Add new deps t
 See `doc/tui-design.md` and `doc/mvp-implementation-plan.md` for implementation status. Do not reintroduce obsolete MVP TODOs for features already shipped.
 
 - TUI drafts persist locally by workspace/session. Unsent drafts restore automatically; submitted, uncertain and legacy inputs require explicit recovery through Ctrl-K. Cache conflicts preserve disk data and show a save error; concurrent draft merging is not implemented.
-- Canceling a Baize session does not guarantee provider process termination. Unconfirmed results require reconciliation before continuing.
+- Stopping the current execution preserves the Baize conversation. Only native completion evidence confirms a stop; CLI-only process-group cleanup does not confirm background native execution. Unconfirmed results require exact-turn reconciliation after checking the provider and workspace. The legacy session-cancel API still ends the session.
 - Continuity uses explicit `/remember` / `/forget` requirements and confirmed per-native-session receipts. Previews and failures do not acknowledge delivery. Uncertain execution requires workspace/provider review before `/reconcile <exact-turn-id>`; `/reset-provider` never silently retries. See `doc/reliable-agent-continuity.md`.
 - Provider Desktop execution, shared configuration mapping and full native capability equivalence remain unverified/unimplemented as documented.
 - Provider validation must use evidence from the actual entry point; unit tests must not require local provider availability or spend model quota.

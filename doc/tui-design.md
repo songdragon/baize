@@ -32,7 +32,7 @@
 | 阅读历史 | PgUp / PgDn / 鼠标滚轮 | 对话回看不应被新输出强制拉到底部；检查面板可独立滚动 |
 | 查找操作 | Ctrl-K / F1 | 搜索命令／显示帮助，避免只靠记忆快捷键 |
 | 完成 | Ctrl-E | 用户检查产物后标记完成 |
-| 取消 | Ctrl-X → Enter / Esc | 先显示目标会话及 provider 可能继续的提示；Enter 确认、Esc 保留会话与任务，目标改变或有后台请求时阻止提交 |
+| 停止当前执行 | Ctrl-X → Enter / Esc | 确认后请求停止当前回合，保留主对话与部分修改；区分停止中、已确认停止和未确认，确认停止后才可在原会话继续或交接 |
 | 退出 | Ctrl-Q / Ctrl-C / 菜单 Quit → Enter | 所有状态都先确认，连续按退出键也不会直接关闭；Esc 留在客户端；daemon 与执行继续存活 |
 | 图片 | Ctrl-V、/image path、/unimage | 使用已有附件能力，显示文件名，允许清除 |
 
@@ -52,6 +52,7 @@
 - 请求响应必须与原 session 对应，迟到响应不得绑定到新会话。
 - Git 变更和上下文是最近一次读取的快照，明确刷新入口。上下文预览使用占位请求，不声称包含未发送草稿。
 - 不把 provider health、CLI 存在或未知 quota 画成已验证的原生 Desktop 能力。
+- Providers 显示 daemon 报告的实际入口及原生审批支持。Codex 使用 app-server stdio 接收单次命令/文件审批与中断完成证据；Antigravity print 不支持审批控制往返，停止本地 CLI 后仍可能保持未确认。审批事件实时更新面板但不抢走输入焦点，命令、目录及作用范围可滚动审阅，过期请求不能再次批准。详见 [执行控制](execution-control.md)。
 - 终端 raw mode、鼠标捕获、paste mode、备用屏在错误或 panic 时恢复。
 
 ## 验收场景

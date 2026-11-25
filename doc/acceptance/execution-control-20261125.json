@@ -1,0 +1,128 @@
+{
+  "date": "2026-11-25",
+  "runtime_source_commit": "9705353ce811014b202172928405566d7d0bc450",
+  "base_commit": "57fa83accf49988942cfa857fe65874c0a89d07e",
+  "issues": [
+    12,
+    13
+  ],
+  "passed": true,
+  "platform": "macOS arm64",
+  "provider_versions": {
+    "codex": "0.171.0",
+    "antigravity": "1.5.16"
+  },
+  "source_note": "Runtime sources and Cargo inputs match this commit; the only later Rust change is a cfg(test) recovery regression.",
+  "artifacts": {
+    "daemon_sha256": "42eb5e835d9cdf263637830a23590dbcb6c2e229db93d1ebdb0d43b59c0002a6",
+    "baize_sha256": "27b2e26add02f70cdc0e97ba9adf44cbeeb263e1e093730cc47b6b6e11232f6b"
+  },
+  "native_control": {
+    "evidence_directory": "target/audit/execution-control/real-20261125-02",
+    "provider_prompts_submitted": 5,
+    "execution_policy": "ask",
+    "passed": true,
+    "checks": {
+      "approve_single_scoped_decision": true,
+      "deny_single_scoped_decision": true,
+      "denied_operation_never_executed": true,
+      "long_single_scoped_decision": true,
+      "native_interruption_confirmed": true,
+      "conversation_survives_stop": true,
+      "native_tool_process_terminated": true,
+      "returning_codex_resumes_original_native_id": true,
+      "handoff_dialogue_reaches_returning_codex": true,
+      "canceled_and_denied_tasks_not_replayed": true,
+      "partial_changes_preserved": true,
+      "sentinel_preserved": true,
+      "worker_fixture_preserved": true,
+      "dialogue_token_not_written_to_files": true
+    },
+    "runner_sha256": "5e667a66763e6fd4944c21b1fdc7cb34eedc0dfff15956af4aff38c515b2f22b",
+    "raw_result_sha256": "102aa3e95518c5da6257691d5820b45c0ee1a805da594b321e0a067519f97611"
+  },
+  "coding_continuity_regression": {
+    "evidence_directory": "target/audit/execution-control/continuity-20261125-01",
+    "provider_prompts_submitted": 3,
+    "execution_policy": "allow_project",
+    "passed": true,
+    "checks": {
+      "b_records_dialogue_only_handoff_password": true,
+      "b_independently_satisfies_updated_constraints": true,
+      "native_references_survive_restart": true,
+      "same_baize_session": true,
+      "exact_a_b_a_sequence": true,
+      "resumed_original_codex_reference": true,
+      "b_requirement_reaches_returning_a": true,
+      "dialogue_only_password_reaches_returning_a": true,
+      "external_workspace_change_visible": true,
+      "sentinel_preserved": true,
+      "password_never_written_to_workspace": true,
+      "all_three_turns_have_native_ids": true
+    },
+    "runner_sha256": "d1f0ca9921fac51b6a955836e7d3182e20712b3900a952ffa24dfe6cad1a264e",
+    "raw_result_sha256": "22c794b417f1dd7c503fc7a8136d6e445876efaee3e0b4bdea27999cf010f821",
+    "fixture_tests_passed": [
+      8,
+      9,
+      10
+    ],
+    "external_fixture_consumed_by_final_tests": true
+  },
+  "antigravity_approval_compatibility": {
+    "exit_code": 2,
+    "control_response_supported": false,
+    "provider_prompts_submitted": 0,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "thinking_tokens": 0,
+      "cache_read_tokens": 0,
+      "total_tokens": 0
+    },
+    "native_error": "stream input message event \"control_response\" is not supported yet",
+    "tested_cli_version": "1.5.16",
+    "evidence_directory": "target/audit/execution-control/antigravity-stdin-compat"
+  },
+  "pty": {
+    "passed": true,
+    "checks": [
+      "Unicode multiline paste checkpoint",
+      "SIGKILL and restart recovery",
+      "reverse focus",
+      "permission review",
+      "cancel review without confirmation",
+      "saved-draft quit dialog",
+      "repeated exit shortcut protection",
+      "Esc resumes",
+      "terminal mode restoration",
+      "explicit legacy recovery without automatic composer fill"
+    ],
+    "cancel_dialog_observed": true,
+    "provider_prompts_submitted": 0,
+    "evidence_directory": "target/audit/execution-control/release-pty",
+    "binary_sha256": "27b2e26add02f70cdc0e97ba9adf44cbeeb263e1e093730cc47b6b6e11232f6b"
+  },
+  "automation": {
+    "workspace_tests_passed": 473,
+    "all_targets_tests_passed": 481,
+    "python_acceptance_runner_tests_passed": 2,
+    "fmt_check": "passed",
+    "clippy_warnings_denied": "passed",
+    "release_cli_build": "passed",
+    "release_acceptance_daemon_build": "passed"
+  },
+  "development_iteration": {
+    "evidence_directory": "target/audit/execution-control/real-20261125-01",
+    "provider_prompts_submitted": 5,
+    "used_as_final_evidence": false
+  },
+  "total_provider_prompts_submitted_this_task": 13,
+  "scope": "Isolated workspaces/data/ports; no production daemon restart or global provider config changes. Raw provider data stays in ignored local target/audit; this summary contains no credentials.",
+  "limitations": [
+    "Antigravity print/stream stdin rejects approval control responses; approval bridge remains unavailable.",
+    "Only supported Codex command and ordinary file approvals are bridged; broader/root/session-wide/unsupported requests are not auto-granted.",
+    "Native provider Desktop execution, ACP lifecycle, and non-macOS end-to-end behavior were not validated.",
+    "Requires matching daemon/client continuity protocol 3; prior Codex entrypoint identity requires explicit provider-reference reset."
+  ]
+}

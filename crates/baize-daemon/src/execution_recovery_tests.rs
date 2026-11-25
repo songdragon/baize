@@ -1,6 +1,77 @@
 use super::*;
 
 #[tokio::test]
+async fn an_unconfirmed_turn_stop_requires_exact_review_before_handoff_in_the_same_conversation() {
+    let (mut state, app, _data, project, _) = environment();
+    let (_, id) = setup_workspace_and_session(&app, &project).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    state.executor = Arc::new(NativeExecutor {
+        executed: Arc::new(AtomicBool::new(false)),
+        calls: calls.clone(),
+        confirmed_stop: false,
+    });
+    let app = router(state);
+    let request_app = app.clone();
+    let request_id = id.clone();
+    let work = tokio::spawn(async move {
+        api(
+            &request_app,
+            Method::POST,
+            &format!("/sessions/{request_id}/prompt"),
+            json!({"prompt":"unconfirmed stop needs review"}),
+        )
+        .await
+    });
+    waiting(&app, &id).await;
+    api(
+        &app,
+        Method::POST,
+        &format!("/sessions/{id}/execution/cancel"),
+        json!({}),
+    )
+    .await;
+    let outcome = work.await.unwrap();
+    assert_eq!(outcome.0, StatusCode::CONFLICT);
+    assert_eq!(outcome.1["session_status"], "Running");
+    assert_eq!(
+        outcome.1["continuity"]["last_stop"]["status"],
+        "unconfirmed"
+    );
+    let handoff = api(
+        &app,
+        Method::POST,
+        &format!("/sessions/{id}/handoff"),
+        json!({"to_provider_id":"antigravity"}),
+    )
+    .await
+    .1;
+    let accept = format!(
+        "/sessions/{id}/handoff/{}/accept",
+        handoff["handoff"]["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        api(&app, Method::POST, &accept, json!({})).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        prompt(&app, &id, "codex", "/reconcile evt_wrong").await["not_submitted"],
+        true
+    );
+    let attempt = outcome.1["continuity"]["active_turn"]["id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        prompt(&app, &id, "codex", &format!("/reconcile {attempt}")).await["local_command"],
+        true
+    );
+    assert_eq!(
+        api(&app, Method::POST, &accept, json!({})).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn a_persisted_stop_request_blocks_approval_before_the_worker_receives_its_signal() {
     let (mut state, app, _data, project, _) = environment();
     let (_, id) = setup_workspace_and_session(&app, &project).await;
