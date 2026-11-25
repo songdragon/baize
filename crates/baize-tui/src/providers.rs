@@ -211,7 +211,7 @@ pub(super) fn parse_runtime_policy(response: &Value) -> Result<RuntimePolicyView
         .ok_or_else(|| response_error("runtime", response))?;
     let routing = runtime.get("routing").unwrap_or(&Value::Null);
     Ok(RuntimePolicyView {
-        native_control: json!({"approvals":runtime["capabilities"]["native_approvals"],"entrypoints":runtime["execution_entrypoints"]}),
+        native_control: json!({"approvals":runtime["capabilities"]["native_approvals"],"entrypoints":runtime["execution_entrypoints"],"project_config":runtime["capabilities"]["project_config"]}),
         command_policy: runtime
             .get("command_policy")
             .and_then(Value::as_str)

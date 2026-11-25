@@ -2,7 +2,7 @@
 
 This guide covers the local daemon, HTTP/SSE APIs and terminal workbench. UI behavior and reliability checks are documented in [tui-design.md](tui-design.md).
 
-Baize's product goal is one persistent development session across execution-agent switches, using workspace state plus relevant recent dialogue. The commands below exercise the current CLI implementation. Provider Desktop execution and shared agent-configuration mapping are not implemented; Baize's own future Desktop UI is a separate concern. See [the vision](vision.md), [requirements](spec.md), and [MVP validation priorities](mvp-implementation-plan.md).
+Baize's product goal is one persistent development session across execution-agent switches, using workspace state plus relevant recent dialogue. Project instruction/skill reuse and reviewed MCP mapping are described in [shared project configuration](shared-project-config.md). Provider Desktop execution and global configuration synchronization are not implemented; Baize's own future Desktop UI is a separate concern. See [the vision](vision.md), [requirements](spec.md), and [MVP validation priorities](mvp-implementation-plan.md).
 
 A Baize session is the user-facing conversation, while provider-native session IDs are execution references underneath it. Existing resume/context-pack support is a baseline; do not interpret these examples as proof that all cross-provider context and native tools are preserved.
 
@@ -32,7 +32,7 @@ BAIZE_DATA_DIR=.baize/data cargo run -p baize-cli -- daemon
 
 Baize currently wires prompt execution through:
 
-- Codex: `codex exec --json <prompt>`
+- Codex controlled daemon execution: `codex app-server --listen stdio://` (direct smoke diagnostics retain the CLI path)
 - OpenCode: `opencode run --format json <prompt>`
 - Antigravity: `/Users/songdragon/.local/bin/agy --print <prompt> --output-format stream-json`
 

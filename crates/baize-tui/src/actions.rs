@@ -10,6 +10,7 @@ pub(crate) enum Action {
     Complete,
     Details,
     Requirements,
+    ProjectConfig,
     Sessions,
 }
 
@@ -27,8 +28,25 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
         state.ui.notice = Some("Wait for the current background operation".into());
         return;
     }
-    if !matches!(action, Action::Sessions | Action::Approve | Action::Deny)
-        && state.session_id.is_none()
+    if action == Action::ProjectConfig && state.workspace_id.is_none() {
+        state.ui.notice = Some("Load a workspace before reviewing project configuration".into());
+        return;
+    }
+    if action == Action::ProjectConfig
+        && !state.runtime_policy.as_ref().is_some_and(|policy| {
+            policy.native_control["project_config"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        })
+    {
+        state.ui.notice=Some("Restart the daemon with the current binary to enable project configuration review; no configuration was changed".into());
+        return;
+    }
+    if !matches!(
+        action,
+        Action::Sessions | Action::Approve | Action::Deny | Action::ProjectConfig
+    ) && state.session_id.is_none()
     {
         state.ui.notice = Some("Start or open a session first".into());
         return;
@@ -95,6 +113,10 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
                 get_json(&format!("/sessions/{id}/diff"))?
             }
             Action::Requirements => get_json(&format!("/sessions/{id}/requirements"))?,
+            Action::ProjectConfig => get_json(&format!(
+                "/workspaces/{}/project-config",
+                workspace_id.as_deref().unwrap_or_default()
+            ))?,
             Action::Sessions => {
                 let sessions =
                     load_workspace_sessions(workspace_id.as_deref().unwrap_or_default())?;
@@ -112,14 +134,16 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
 }
 
 pub(super) fn apply_action(state: &mut TuiState, result: ActionResult) {
-    if result.action == Action::Sessions && result.workspace_id != state.workspace_id {
+    if matches!(result.action, Action::Sessions | Action::ProjectConfig)
+        && result.workspace_id != state.workspace_id
+    {
         state.ui.notice =
             Some("Ignored a response for a different workspace; refresh to reconcile".into());
         return;
     }
     if !matches!(
         result.action,
-        Action::Approve | Action::Deny | Action::Sessions
+        Action::Approve | Action::Deny | Action::Sessions | Action::ProjectConfig
     ) && result.session_id != state.session_id
     {
         state.ui.notice =
@@ -127,6 +151,13 @@ pub(super) fn apply_action(state: &mut TuiState, result: ActionResult) {
         return;
     }
     match result.action {
+        Action::ProjectConfig => {
+            state.ui.context = result.response;
+            state.ui.panel = Panel::Context;
+            state.ui.focus = Focus::Inspector;
+            state.ui.inspector_scroll = 0;
+            state.detail_mode = true;
+        }
         Action::PreviewHandoff => {
             let handoff = &result.response["handoff"];
             state.pending_handoff_id = handoff["id"].as_str().map(str::to_string);

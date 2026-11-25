@@ -7,6 +7,7 @@ pub(crate) enum CommandId {
     Latest,
     Refresh,
     Details,
+    ProjectConfig,
     Process,
     Handoff,
     Accept,
@@ -34,6 +35,11 @@ pub(super) const COMMANDS: &[(CommandId, &str, &str)] = &[
         "Ctrl-R",
     ),
     (CommandId::Details, "Refresh changes and context", "F5"),
+    (
+        CommandId::ProjectConfig,
+        "Review shared project configuration",
+        "",
+    ),
     (CommandId::Process, "Fold / expand latest process", "F9"),
     (
         CommandId::Handoff,
@@ -116,6 +122,7 @@ pub(super) fn run_command(
             start_ui_task_if_idle(state, ui, "Refreshing connection", start_initial_load_task);
         }
         CommandId::Details => request_action(state, ui, Action::Details),
+        CommandId::ProjectConfig => request_action(state, ui, Action::ProjectConfig),
         CommandId::Process => {
             process_key(state, KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
         }
