@@ -70,6 +70,30 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn old_daemons_are_rejected_before_dispatch_and_keep_the_draft() {
+        let mut state = TuiState {
+            workspace_id: Some("ws_fixture".into()),
+            input: "keep draft".into(),
+            runtime_policy: Some(default_runtime_policy()),
+            ..Default::default()
+        };
+        let mut task = None;
+        request_action(&mut state, &mut task, Action::ProjectConfig);
+        assert!(task.is_none());
+        assert_eq!(state.input, "keep draft");
+        assert!(state
+            .ui
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains("Restart the daemon"));
+        let supported =
+            parse_runtime_policy(&json!({"runtime":{"capabilities":{"project_config":1}}}))
+                .unwrap();
+        assert_eq!(supported.native_control["project_config"], 1);
+    }
+
+    #[test]
     fn renders_configuration_as_a_review_without_claiming_execution() {
         let mut state = TuiState {
             workspace_id: Some("ws_fixture".into()),

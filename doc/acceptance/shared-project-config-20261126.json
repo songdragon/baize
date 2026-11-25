@@ -1,0 +1,91 @@
+{
+  "date": "2026-11-26",
+  "issue": 15,
+  "runtime_source_commit": "ba57aa88da1c2a166696a9dbdf9c5e8954a51459",
+  "base_commit": "f586c3b3951394e73efb4ff3ff4799480372ca96",
+  "passed": true,
+  "platform": "macOS arm64",
+  "provider_versions": {
+    "codex": "codex-cli 0.171.0",
+    "antigravity": "1.5.17"
+  },
+  "provider_prompts_submitted": 3,
+  "execution_policy": "allow_project",
+  "checks": {
+    "reviewed_plan_applies_exact_mapping": true,
+    "native_codex_config_and_skill_discovery": true,
+    "codex-1_shared_rule_observed": true,
+    "codex-1_shared_skill_observed": true,
+    "codex-1_actual_mcp_nonce_observed": true,
+    "codex-1_native_mcp_event_recorded": true,
+    "antigravity-2_shared_rule_observed": true,
+    "antigravity-2_shared_skill_observed": true,
+    "antigravity-2_actual_mcp_nonce_observed": true,
+    "antigravity-2_native_mcp_event_recorded": true,
+    "codex-3_shared_rule_observed": true,
+    "codex-3_shared_skill_observed": true,
+    "codex-3_actual_mcp_nonce_observed": true,
+    "codex-3_native_mcp_event_recorded": true,
+    "returning_codex_resumes_original_native_id": true,
+    "workspace_and_canonical_sources_unchanged": true,
+    "backup_discoverable_after_roundtrip": true,
+    "checked_restore_removes_only_generated_codex_config": true,
+    "global_provider_configuration_unchanged": true
+  },
+  "independent_final_reply_checks": {
+    "1_final_reply_starts_with_shared_rule": true,
+    "2_final_reply_starts_with_shared_rule": true,
+    "3_final_reply_starts_with_shared_rule": true
+  },
+  "audited_mcp_calls": 3,
+  "native_session_resumed": true,
+  "automation": {
+    "workspace_tests_passed": 497,
+    "all_targets_tests_passed": 505,
+    "python_tests_passed": 4,
+    "fmt_check": "passed",
+    "clippy_warnings_denied": "passed",
+    "release_cli_build": "passed",
+    "release_acceptance_daemon_build": "passed"
+  },
+  "native_preflight": {
+    "provider_prompts_submitted": 0,
+    "untrusted_standalone_project_mcp_loaded": false,
+    "untrusted_project_skill_discovered": true,
+    "existing_repository_worktree_mcp_loaded": true,
+    "global_trust_modified": false
+  },
+  "evidence_directory": "target/audit/shared-config/real-20261126-01",
+  "daemon_sha256": "41efe431665bd03af2ba4288dac819de2a276aa40a456d59d9c6951f941e1f29",
+  "cli_sha256": "940a585f4bec213fe83902471cc52b1b6f4ee14a67e065d265f35d3d48ec650e",
+  "runner_sha256": "ea5c5401a9aa7b9a91c71e4a52d68b4d5fa6c9dd65f31e85a9b0a80f08d41268",
+  "raw_result_sha256": "e91c3c1946656499b918923f7a269d4f6dcdf9c0b39cad902e44b757493b90e6",
+  "source_note": "Native daemon sources match ba57aa8; later Rust changes add only a TUI capability gate for old daemons and its regression. The final release CLI and all current tests include that gate.",
+  "scope": "Dedicated worktree/data/port; global provider config file hashes unchanged; production daemon not restarted. Raw data stays in ignored local target/audit.",
+  "limitations": [
+    "Project-root inventory only; native/global/managed configuration and trust remain authoritative.",
+    "File mapping is not live runtime verification; actual validation is recorded separately.",
+    "Only the documented common MCP subset is mapped. Unsupported auth/transports and tool-policy broadening block replacement.",
+    "Source removal preserves Codex-only entries; no automatic destructive pruning or global synchronization.",
+    "Real roundtrip validated on macOS arm64 with the recorded versions."
+  ],
+  "pty": {
+    "passed": true,
+    "checks": [
+      "Unicode multiline paste checkpoint",
+      "SIGKILL and restart recovery",
+      "reverse focus",
+      "permission review",
+      "cancel review without confirmation",
+      "saved-draft quit dialog",
+      "repeated exit shortcut protection",
+      "Esc resumes",
+      "terminal mode restoration",
+      "explicit legacy recovery without automatic composer fill"
+    ],
+    "cancel_dialog_observed": true,
+    "provider_prompts_submitted": 0,
+    "evidence_directory": "target/audit/shared-config/release-pty-20261126",
+    "raw_result_sha256": "42149e0d502bd910e43ad1c127c023943679e9441bb08462e9c5850f627ba7cf"
+  }
+}

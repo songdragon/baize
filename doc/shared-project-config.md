@@ -18,7 +18,7 @@ Codex 原生信任是独立前置条件：未受信任的项目可能忽略 `.co
 
 ## 审阅、应用与恢复
 
-先使用同版本 daemon/TUI；CLI 会核对 `runtime.capabilities.project_config >= 1`，不支持时在改配置前退出。
+先使用同版本 daemon/TUI；CLI 和 TUI 会核对 `runtime.capabilities.project_config >= 1`，不支持时明确要求重启 daemon，不发送配置请求。
 
 ```sh
 baize project-config --path /path/to/project plan
@@ -96,6 +96,10 @@ python3 scripts/shared_config_acceptance.py --allow-real-providers \
 ```
 
 脚本先用官方 config/read 与 skills/list 做不提交 turn 的原生预检，再要求 Codex → Antigravity → Codex 各遵守共同指令、使用同份 skill 并调用只读 MCP。MCP 现场生成的 nonce 不在 prompt 或工作区文件中，实际调用日志和原生工具事件共同核验；返回 Codex 还须恢复原 native ID。最后检查备份可发现、恢复受保护且源文件未被修改。
+
+2026-11-26 的最终原生验收为 `target/audit/shared-config/real-20261126-01/`：3 轮真实调用、19 项检查全部通过，实际 MCP 调用恰为 3 次；逐条复核最终回复均以共同项目指令规定的标记开头。3 个模型回合期间工作区与 canonical 源未被改动；最后的恢复只移除生成的 Codex 配置。用户全局 provider 配置摘要前后一致，生产 daemon 未重启。
+
+最终自动化为 497 项 workspace、505 项 all-targets、4 项 Python 测试通过，fmt、clippy `-D warnings`、release 构建通过。最终 CLI 的 10 项 PTY 交互回归通过且没有提交模型请求。原生 daemon 对应实现提交 `ba57aa8`；后续 Rust 改动只补 TUI 的旧 daemon 兼容保护与回归，不改变已验收的原生执行路径。摘要见 [验收记录](acceptance/shared-project-config-20261126.json)，原始记录保存在本地忽略的 target/audit。
 
 ## 依据
 

@@ -32,6 +32,17 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
         state.ui.notice = Some("Load a workspace before reviewing project configuration".into());
         return;
     }
+    if action == Action::ProjectConfig
+        && !state.runtime_policy.as_ref().is_some_and(|policy| {
+            policy.native_control["project_config"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        })
+    {
+        state.ui.notice=Some("Restart the daemon with the current binary to enable project configuration review; no configuration was changed".into());
+        return;
+    }
     if !matches!(
         action,
         Action::Sessions | Action::Approve | Action::Deny | Action::ProjectConfig
