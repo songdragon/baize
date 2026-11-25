@@ -180,6 +180,7 @@ pub struct AgentErrorDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentErrorKind {
     Authentication,
+    PermissionDenied,
     Timeout,
     RateLimit,
     QuotaExceeded,
@@ -816,7 +817,9 @@ pub fn classify_agent_error(text: &str, source: AgentErrorSource) -> Option<Agen
         return None;
     }
     let lower = message.to_ascii_lowercase();
-    let kind = if lower.contains("timed out") || lower.contains("timeout") {
+    let kind = if lower.contains("permission denied") || lower.contains("auto-denied") {
+        AgentErrorKind::PermissionDenied
+    } else if lower.contains("timed out") || lower.contains("timeout") {
         AgentErrorKind::Timeout
     } else if lower.contains("unauthorized")
         || lower.contains("not authenticated")
@@ -917,8 +920,20 @@ fn agent_result_from_command_run(
     let stdout = String::from_utf8_lossy(&run.output.stdout);
     let raw_stderr = String::from_utf8_lossy(&run.output.stderr).to_string();
     let stream_completed = stream_reports_success(&stdout);
-    let success = run.output.status.success() || (run.timed_out && stream_completed);
-    let stderr = if run.timed_out && !stream_completed {
+    let terminal_error = if provider_id.0 == "antigravity" {
+        stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|raw| antigravity_stream::terminal_error(&raw))
+            .next_back()
+    } else {
+        None
+    };
+    let success = terminal_error.is_none()
+        && (run.output.status.success() || (run.timed_out && stream_completed));
+    let stderr = if let Some(error) = terminal_error {
+        format!("{raw_stderr}\n{error}")
+    } else if run.timed_out && !stream_completed {
         timeout_stderr(command, run.timeout, &raw_stderr)
     } else {
         raw_stderr
@@ -2317,6 +2332,69 @@ mod tests {
         assert!(!stream_reports_success(
             r#"{"type":"result","status":"failed"}"#
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn antigravity_terminal_errors_do_not_change_other_provider_outcomes() {
+        use std::os::unix::process::ExitStatusExt;
+        for provider in ["codex", "opencode", "antigravity"] {
+            let raw=serde_json::json!({"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command"}]}}).to_string();
+            let run = CommandRunOutput {
+                output: Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: raw.as_bytes().to_vec(),
+                    stderr: vec![],
+                },
+                timed_out: false,
+                timeout: Duration::from_secs(1),
+                events: vec![],
+            };
+            let parsed = agent_result_from_command_run(ProviderId(provider.into()), provider, run);
+            assert_eq!(parsed.success, provider != "antigravity", "{provider}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exit_zero_with_headless_denial_or_failed_terminal_is_not_a_successful_turn() {
+        use std::os::unix::process::ExitStatusExt;
+        for result in [
+            serde_json::json!({"status":"SUCCESS","response":"","denied_actions":[{"action":"command"}]}),
+            serde_json::json!({"status":"ERROR","error":"provider failure"}),
+        ] {
+            let denied = result["denied_actions"].is_array();
+            let raw = serde_json::json!({"event":"result","result":result}).to_string();
+            let run = CommandRunOutput {
+                output: Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: raw.as_bytes().to_vec(),
+                    stderr: vec![],
+                },
+                timed_out: false,
+                timeout: Duration::from_secs(1),
+                events: vec![],
+            };
+            let parsed =
+                agent_result_from_command_run(ProviderId("antigravity".into()), "agy", run);
+            assert!(!parsed.success);
+            assert_eq!(parsed.exit_code, Some(0));
+            if denied {
+                assert_eq!(
+                    parsed.error.as_ref().unwrap().kind,
+                    AgentErrorKind::PermissionDenied
+                );
+                let encoded = serde_json::to_string(&parsed).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<AgentRunResult>(&encoded)
+                        .unwrap()
+                        .error
+                        .unwrap()
+                        .kind,
+                    AgentErrorKind::PermissionDenied
+                );
+            }
+        }
     }
 
     #[test]

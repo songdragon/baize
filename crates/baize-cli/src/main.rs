@@ -236,6 +236,7 @@ fn ask_output(options: AskOptions) -> Result<String> {
         host: config.daemon.host,
         port: config.daemon.port,
     };
+    require_continuity_runtime(&client.get_json("/runtime/status")?)?;
     let workspace = client.post_json(
         "/workspaces",
         json!({
@@ -278,6 +279,12 @@ fn ask_output(options: AskOptions) -> Result<String> {
     ))
 }
 
+fn require_continuity_runtime(value: &Value) -> Result<()> {
+    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=2,
+        "Daemon requires continuity protocol 2. Restart it with the current Baize binary; no prompt was sent");
+    Ok(())
+}
+
 fn ask_summary(prompt_response: &Value, diff_response: &Value) -> Value {
     json!({
         "session_id": prompt_response.get("session_id").and_then(Value::as_str),
@@ -291,6 +298,10 @@ fn ask_summary(prompt_response: &Value, diff_response: &Value) -> Value {
 }
 
 fn assistant_text(response: &Value) -> String {
+    if response["local_command"] == true {
+        return response["message"].as_str().unwrap_or_default().to_string();
+    }
+
     response
         .get("events")
         .and_then(Value::as_array)
@@ -650,5 +661,30 @@ mod tests {
 
         assert_eq!(status["root"], expected_root.display().to_string());
         assert_eq!(status["dirty"], false);
+    }
+    #[test]
+    fn local_requirement_commands_are_displayed_without_inventing_provider_output() {
+        let summary = ask_summary(
+            &json!({"local_command":true,"message":"Saved requirement language","session_id":"task_1","turn_status":"completed"}),
+            &json!({"diff":{"changed_files":[]}}),
+        );
+        assert_eq!(summary["assistant_text"], "Saved requirement language");
+        assert!(summary["provider_id"].is_null());
+        assert_eq!(
+            assistant_text(&json!({"local_command":true,"error":"invalid requirement"})),
+            ""
+        );
+    }
+    #[test]
+    fn ask_rejects_old_daemons_before_creating_or_sending_a_session() {
+        assert!(require_continuity_runtime(
+            &json!({"runtime":{"capabilities":{"session_continuity":1}}})
+        )
+        .is_err());
+        assert!(require_continuity_runtime(&json!({"runtime":{}})).is_err());
+        assert!(require_continuity_runtime(
+            &json!({"runtime":{"capabilities":{"session_continuity":2}}})
+        )
+        .is_ok());
     }
 }

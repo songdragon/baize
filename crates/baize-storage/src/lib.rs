@@ -185,6 +185,15 @@ impl EventStore {
         Ok(())
     }
 
+    /// Commit a context receipt or requirement change with its evidence atomically.
+    pub fn save_session_event(&self, session: &TaskSession, event: &BaizeEvent) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        self.upsert_task_session(session)?;
+        self.append_event(event)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn append_event(&self, event: &BaizeEvent) -> Result<()> {
         self.conn.execute(
             r#"
@@ -272,7 +281,7 @@ impl EventStore {
         let limit = limit.unwrap_or(100);
         let offset = offset.unwrap_or(0);
         let mut stmt = self.conn.prepare(
-            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where session_id = ?1 order by timestamp limit ?2 offset ?3",
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where session_id = ?1 order by timestamp, rowid limit ?2 offset ?3",
         )?;
         let rows = stmt.query_map(params![&session_id.0, limit, offset], event_from_row)?;
         collect_events(rows)
@@ -282,7 +291,7 @@ impl EventStore {
         let limit = limit.unwrap_or(100);
         let offset = offset.unwrap_or(0);
         let mut stmt = self.conn.prepare(
-            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events order by timestamp limit ?1 offset ?2",
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events order by timestamp, rowid limit ?1 offset ?2",
         )?;
         let rows = stmt.query_map(params![limit, offset], event_from_row)?;
         collect_events(rows)
@@ -297,7 +306,7 @@ impl EventStore {
         let limit = limit.unwrap_or(100);
         let offset = offset.unwrap_or(0);
         let mut stmt = self.conn.prepare(
-            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where workspace_id = ?1 order by timestamp limit ?2 offset ?3",
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where workspace_id = ?1 order by timestamp, rowid limit ?2 offset ?3",
         )?;
         let rows = stmt.query_map(params![&workspace_id.0, limit, offset], event_from_row)?;
         collect_events(rows)
@@ -312,7 +321,7 @@ impl EventStore {
         let limit = limit.unwrap_or(100);
         let offset = offset.unwrap_or(0);
         let mut stmt = self.conn.prepare(
-            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where provider_id = ?1 order by timestamp limit ?2 offset ?3",
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where provider_id = ?1 order by timestamp, rowid limit ?2 offset ?3",
         )?;
         let rows = stmt.query_map(params![&provider_id.0, limit, offset], event_from_row)?;
         collect_events(rows)
@@ -327,7 +336,7 @@ impl EventStore {
         let limit = limit.unwrap_or(100);
         let offset = offset.unwrap_or(0);
         let mut stmt = self.conn.prepare(
-            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where event_type = ?1 order by timestamp limit ?2 offset ?3",
+            "select id, event_type, timestamp, workspace_id, session_id, provider_id, payload from events where event_type = ?1 order by timestamp, rowid limit ?2 offset ?3",
         )?;
         let rows = stmt.query_map(params![event_type, limit, offset], event_from_row)?;
         collect_events(rows)
@@ -1470,6 +1479,7 @@ mod tests {
             objective: "test objective".to_string(),
             active_provider_id: None,
             provider_native_session_ids: Default::default(),
+            continuity: Default::default(),
             status: TaskSessionStatus::Running,
             created_at: now,
             updated_at: now,
@@ -1550,6 +1560,7 @@ mod tests {
             objective: "running".to_string(),
             active_provider_id: Some(ProviderId("codex".to_string())),
             provider_native_session_ids: Default::default(),
+            continuity: Default::default(),
             status: TaskSessionStatus::Running,
             created_at: now,
             updated_at: now,
@@ -1560,6 +1571,7 @@ mod tests {
             objective: "failed".to_string(),
             active_provider_id: Some(ProviderId("gemini".to_string())),
             provider_native_session_ids: Default::default(),
+            continuity: Default::default(),
             status: TaskSessionStatus::Failed,
             created_at: now,
             updated_at: now,
@@ -1847,6 +1859,7 @@ mod tests {
             objective: "first in A".to_string(),
             active_provider_id: Some(ProviderId("codex".to_string())),
             provider_native_session_ids: Default::default(),
+            continuity: Default::default(),
             status: TaskSessionStatus::Running,
             created_at: now,
             updated_at: now,
@@ -1857,6 +1870,7 @@ mod tests {
             objective: "second in A".to_string(),
             active_provider_id: Some(ProviderId("gemini".to_string())),
             provider_native_session_ids: Default::default(),
+            continuity: Default::default(),
             status: TaskSessionStatus::Running,
             created_at: now,
             updated_at: now,
@@ -1867,6 +1881,7 @@ mod tests {
             objective: "first in B".to_string(),
             active_provider_id: Some(ProviderId("opencode".to_string())),
             provider_native_session_ids: Default::default(),
+            continuity: Default::default(),
             status: TaskSessionStatus::Running,
             created_at: now,
             updated_at: now,
@@ -1893,5 +1908,48 @@ mod tests {
             .get_latest_session_for_workspace(&WorkspaceId::new())
             .expect("query");
         assert!(latest_empty.is_none());
+    }
+    #[test]
+    fn session_receipt_and_evidence_commit_atomically_and_rollback_on_duplicate_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("receipts.db");
+        let store = EventStore::open(&path).unwrap();
+        let now = chrono::Utc::now();
+        let mut session = TaskSession {
+            id: TaskSessionId::new(),
+            workspace_id: WorkspaceId::new(),
+            objective: "original".into(),
+            active_provider_id: None,
+            provider_native_session_ids: Default::default(),
+            continuity: Default::default(),
+            status: TaskSessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut event = BaizeEvent::new(
+            "session.requirement.changed",
+            serde_json::json!({"source":"user"}),
+        );
+        event.session_id = Some(session.id.clone());
+        store.save_session_event(&session, &event).unwrap();
+        session.objective = "must roll back".into();
+        assert!(store.save_session_event(&session, &event).is_err());
+        drop(store);
+        let reopened = EventStore::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .get_task_session(&session.id)
+                .unwrap()
+                .unwrap()
+                .objective,
+            "original"
+        );
+        assert_eq!(
+            reopened
+                .list_events_for_session(&session.id, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

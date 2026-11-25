@@ -32,6 +32,29 @@ fn apply_agent_event(state: &mut TuiState, event: &Value) {
     let kind = event["event_type"].as_str().unwrap_or("");
     let payload = &event["payload"];
     match kind {
+        "session.requirement.changed"
+        | "session.execution.reconciled"
+        | "session.provider.reset" => {
+            if let Some(message) = payload["message"].as_str() {
+                if state
+                    .ui
+                    .output
+                    .active
+                    .is_none_or(|index| state.ui.output.turns[index].outcome.is_some())
+                {
+                    push_transcript_gap(state);
+                    if let Some(prompt) = payload["prompt"].as_str() {
+                        state.push_message(format!("> {prompt}"));
+                    }
+                    begin_output_turn(state, "Baize", event_time(event));
+                }
+                let index = ensure_output_turn(state, event);
+                state.ui.output.turns[index].provider = "Baize".into();
+                record_output_item(state, event, OutputRole::Answer, message, true);
+                finish_output_turn(state, "completed", event_time(event));
+            }
+            return;
+        }
         "session.agent.started" => {
             if state
                 .ui

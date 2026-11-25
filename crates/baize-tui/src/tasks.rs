@@ -18,6 +18,24 @@ pub(super) fn poll_prompt_task(state: &mut TuiState, prompt_task: &mut Option<Pr
                     state.ui.notice = None;
                 }
             }
+            Ok(PromptTaskMessage::Rejected { response, session }) => {
+                finish_output_turn(state, "not_submitted", None);
+                state.activity_status = "blocked".into();
+                state.ui.execution_uncertain = false;
+                restore_unsubmitted_prompt(state);
+                state.ui.notice = Some(format!(
+                    "Prompt not submitted: {}. Your draft is kept.",
+                    response["error"].as_str().unwrap_or("rejected")
+                ));
+                if let Some(provider) = session["active_provider_id"].as_str() {
+                    state.active_provider = Some(provider.into());
+                }
+                state.ui.context =
+                    json!({"context":response["context"],"continuity":session["continuity"]});
+                apply_continuity_status(state, &session);
+                *prompt_task = None;
+                break;
+            }
             Ok(PromptTaskMessage::NotSubmitted(error)) => {
                 finish_output_turn(state, "not_submitted", None);
                 state.activity_status = "blocked".into();
@@ -207,11 +225,18 @@ pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTa
         append_route_history(state, &completion.routes_response);
     }
     state.ui.execution_uncertain = false;
+    apply_continuity_status(state, &completion.prompt_response);
     state.ui.session_status = completion.prompt_response["session_status"]
         .as_str()
         .unwrap_or("Running")
         .to_string();
-    state.ui.context = json!({"context":completion.prompt_response["context"]});
+    let continuity = completion
+        .prompt_response
+        .get("continuity")
+        .or_else(|| completion.prompt_response["session"].get("continuity"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    state.ui.context = json!({"context":completion.prompt_response["context"],"continuity":continuity,"preview_only":false,"outcome":completion.prompt_response["turn_status"]});
     state.ui.diff = completion.diff_response["diff"].clone();
     if let Some(session) = state
         .recent_sessions
@@ -223,8 +248,15 @@ pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTa
     }
     append_session_diff(state, &completion.diff_response);
     state.streaming_assistant_open = false;
-    state.activity_status = prompt_activity_after_response(&completion.prompt_response).to_string();
-    state.ui.recovery_drafts.remove(&completion.session_id);
+    state.activity_status = if state.ui.execution_uncertain {
+        "execution unconfirmed"
+    } else {
+        prompt_activity_after_response(&completion.prompt_response)
+    }
+    .to_string();
+    if !state.ui.execution_uncertain {
+        state.ui.recovery_drafts.remove(&completion.session_id);
+    }
 }
 
 pub(super) fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStarted) {
@@ -305,6 +337,12 @@ pub(super) fn apply_prompt_completion_context(
     state.session_id = Some(completion.session_id.clone());
     if let Some(provider) = &completion.active_provider {
         state.active_provider = Some(provider.clone());
+    }
+    if completion.prompt_response["local_command"] == true {
+        if let Some(provider) = completion.prompt_response["session"]["active_provider_id"].as_str()
+        {
+            state.active_provider = Some(provider.into());
+        }
     }
     if let Some(reason) = &completion.route_reason {
         state.route_reason = Some(reason.clone());

@@ -311,18 +311,36 @@ pub(super) fn handle_key(
                     .modifiers
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
         {
+            let input_command = state.input.trim().to_string();
+            if handle_input_command(state, &input_command) {
+                state.input.clear();
+                state.ui.cursor = 0;
+                return Ok(false);
+            }
+            if state.input.trim() == "/requirements" {
+                if ui.is_some() {
+                    state.ui.notice = Some("An operation is running. Your draft is kept.".into());
+                    return Ok(false);
+                }
+                request_action(state, ui, Action::Requirements);
+                if ui.is_some() {
+                    state.input.clear();
+                    state.ui.cursor = 0;
+                }
+                return Ok(false);
+            }
             if prompt.is_some() || ui.is_some() {
                 state.ui.notice = Some("An operation is running. Your draft is kept.".into());
                 return Ok(false);
             }
-            if state.ui.execution_uncertain {
+            if state.ui.execution_uncertain && !can_reconcile(state) {
                 state.ui.notice = Some(
                     "Execution is unconfirmed. F5 reconciles history before another submission."
                         .into(),
                 );
                 return Ok(false);
             }
-            if state.ui.session_status == "Canceled" {
+            if state.ui.session_status == "Canceled" && !can_reconcile(state) {
                 state.ui.notice = Some(
                     "This session is canceled. Inspect workspace, then start a new conversation."
                         .into(),

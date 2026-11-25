@@ -8,6 +8,8 @@ pub struct WorkspaceStatus {
     pub root: PathBuf,
     pub git_root: Option<PathBuf>,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub head: Option<String>,
     pub dirty: bool,
     pub changed_files: Vec<String>,
 }
@@ -43,9 +45,10 @@ pub fn inspect(path: impl AsRef<Path>) -> Result<WorkspaceStatus> {
         .collect::<Vec<_>>();
 
     Ok(WorkspaceStatus {
-        root,
+        root: root.clone(),
         git_root,
         branch,
+        head: git_output(&root, &["rev-parse", "HEAD"]).ok(),
         dirty: !changed_files.is_empty(),
         changed_files,
     })
@@ -58,7 +61,8 @@ pub fn diff_hunks(path: impl AsRef<Path>) -> Result<Vec<DiffHunk>> {
             path.as_ref().display()
         )
     })?;
-    let raw = git_output(&root, &["diff", "--no-ext-diff", "--unified=3"])?;
+    let raw = git_output(&root, &["diff", "--no-ext-diff", "--unified=3", "HEAD"])
+        .or_else(|_| git_output(&root, &["diff", "--no-ext-diff", "--unified=3", "--cached"]))?;
     Ok(parse_diff_hunks(&raw))
 }
 
@@ -267,5 +271,30 @@ index 1111111..2222222 100644
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    #[test]
+    fn workspace_evidence_reports_head_and_staged_changes_and_external_modifications() {
+        let temp = tempfile::tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q"]);
+        std::fs::write(temp.path().join("tracked.txt"), "before\n").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-qm", "initial"]);
+        let before = inspect(temp.path()).unwrap();
+        assert!(before.head.is_some());
+        std::fs::write(temp.path().join("tracked.txt"), "after staged\n").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        std::fs::write(temp.path().join("external.txt"), "external").unwrap();
+        let after = inspect(temp.path()).unwrap();
+        assert_eq!(after.head, before.head);
+        assert!(after
+            .changed_files
+            .iter()
+            .any(|file| file == "external.txt"));
+        assert!(diff_hunks(temp.path())
+            .unwrap()
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .any(|line| line == "+after staged"));
+        assert!(inspect(temp.path().join("missing")).is_err());
     }
 }

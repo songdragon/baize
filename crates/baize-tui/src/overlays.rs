@@ -126,6 +126,13 @@ pub(super) fn render_overlay(
             lines.push(Line::raw(
                 "Ctrl-V image · /image path · /unimage clears attachments",
             ));
+            lines.push(Line::raw("/remember <key> <text> saves/replaces a user requirement; /forget <key> revokes it"));
+            lines.push(Line::raw(
+                "/requirements lists sources; F5 previews the selected target and current draft",
+            ));
+            lines.push(Line::raw(
+                "/reset-provider <provider> clears an invalid native reference without replaying",
+            ));
             lines.push(Line::raw(""));
             for (_, label, key) in COMMANDS {
                 lines.push(Line::raw(format!("{key:<9} {label}")));

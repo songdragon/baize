@@ -10,8 +10,14 @@ pub(super) fn begin_prompt_submission(state: &mut TuiState) -> Option<PendingPro
         return None;
     }
 
+    let local_command = is_continuity_command(&prompt);
+    if local_command && state.session_id.is_none() {
+        state.ui.notice =
+            Some("Start or open a conversation before managing its requirements.".into());
+        return None;
+    }
     let provider_id = state.selected_provider().to_string();
-    if let Some(health) = selected_provider_unavailable(state) {
+    if let Some(health) = selected_provider_unavailable(state).filter(|_| !local_command) {
         let detail = provider_unavailable_detail(state, &provider_id, health);
         state.activity_status = "blocked".to_string();
         state.push_message(format!(

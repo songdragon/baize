@@ -61,6 +61,7 @@ pub(crate) struct UiState {
     pub viewport_height: usize,
     pub terminal_size: (u16, u16),
     pub execution_uncertain: bool,
+    pub uncertain_turn_id: Option<String>,
     pub focus: Focus,
     pub panel: Panel,
     pub overlay: Option<Overlay>,
@@ -91,6 +92,7 @@ impl Default for UiState {
             viewport_height: 16,
             terminal_size: (112, 36),
             execution_uncertain: false,
+            uncertain_turn_id: None,
             focus: Focus::Composer,
             panel: Panel::Overview,
             overlay: None,
@@ -201,10 +203,24 @@ pub(super) fn replay_session(state: &mut TuiState, events: &Value) -> Result<()>
                 state.ui.execution_uncertain = false;
                 terminal_result = true;
                 render_agent_event(state, event);
+                if payload.get("active_turn").is_some() {
+                    apply_continuity_status(
+                        state,
+                        &json!({"continuity":{"active_turn":payload["active_turn"]}}),
+                    );
+                }
                 state.push_message(status_event_line(
                     event["event_type"].as_str().unwrap_or("status"),
                     payload,
                 ));
+            }
+            "session.execution.reconciled" => {
+                state.ui.execution_uncertain = false;
+                state.ui.uncertain_turn_id = None;
+                render_agent_event(state, event);
+            }
+            "session.requirement.changed" | "session.provider.reset" => {
+                render_agent_event(state, event)
             }
             "session.agent.output"
             | "session.agent.tool_call"

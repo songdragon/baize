@@ -1,5 +1,33 @@
 use super::*;
 
+pub(super) fn terminal_error(raw: &Value) -> Option<String> {
+    if raw["event"] != "result" {
+        return None;
+    }
+    let result = &raw["result"];
+    if result["denied_actions"]
+        .as_array()
+        .is_some_and(|actions| !actions.is_empty())
+    {
+        return Some(format!(
+            "Provider permission denied in headless mode: {}",
+            result["denied_actions"]
+        ));
+    }
+    if result["status"]
+        .as_str()
+        .is_some_and(|status| status.eq_ignore_ascii_case("success"))
+    {
+        return None;
+    }
+    Some(
+        result["error"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Antigravity result [{}]", result["status"])),
+    )
+}
+
 // Antigravity's documented NDJSON uses `event`, not Codex/OpenCode's `type`.
 // Source: https://antigravity.google/docs/cli/headless.md
 pub(super) fn parse_event(raw: Value) -> AgentExecutionEvent {
@@ -58,7 +86,7 @@ pub(super) fn parse_event(raw: Value) -> AgentExecutionEvent {
         "result" => {
             let result = &raw["result"];
             let status = result["status"].as_str().unwrap_or("unknown");
-            if status.eq_ignore_ascii_case("success") {
+            if status.eq_ignore_ascii_case("success") && terminal_error(&raw).is_none() {
                 (
                     AgentExecutionEventKind::Output,
                     result["response"].as_str().map(str::to_owned),
@@ -66,15 +94,17 @@ pub(super) fn parse_event(raw: Value) -> AgentExecutionEvent {
                     None,
                 )
             } else {
-                let error = result
-                    .get("error")
-                    .map(|error| {
-                        error
-                            .as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| error.to_string())
-                    })
-                    .unwrap_or_else(|| format!("result [{status}]"));
+                let error = terminal_error(&raw).unwrap_or_else(|| {
+                    result
+                        .get("error")
+                        .map(|error| {
+                            error
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| error.to_string())
+                        })
+                        .unwrap_or_else(|| format!("result [{status}]"))
+                });
                 (
                     AgentExecutionEventKind::Diagnostic,
                     Some(error),
@@ -111,6 +141,19 @@ pub(super) fn parse_event(raw: Value) -> AgentExecutionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn headless_denial_overrides_terminal_success_and_remains_a_diagnostic() {
+        let raw = serde_json::json!({"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}});
+        assert!(terminal_error(&raw).unwrap().contains("permission denied"));
+        let event = parse_event(raw);
+        assert!(matches!(event.kind, AgentExecutionEventKind::Diagnostic));
+        assert!(event.text.unwrap().contains("command"));
+        assert!(terminal_error(&serde_json::json!({"event":"result","result":{"status":"SUCCESS","response":"done","denied_actions":[]}})).is_none());
+        assert!(terminal_error(
+            &serde_json::json!({"event":"result","result":{"status":"ERROR","error":"failed"}})
+        )
+        .is_some());
+    }
     #[test]
     fn parses_documented_step_updates_tools_and_terminal_result() {
         let delta=streaming::parse_stream_json_line(r#"{"event":"step_update","step_update":{"conversation_id":"c","step_index":3,"state":"ACTIVE","step_type":"agent_response","text_delta":"hello "}}"#).unwrap();

@@ -2,7 +2,7 @@
 
 2026-11-22 UI 更新：原 TUI shell 已重做为持续会话工作台。下文保留早期实现记录；当前交互与产品边界以 [tui-design.md](tui-design.md) 为准，UI 框架候选见 [ui-research.md](ui-research.md)。
 
-Status: CLI foundation implemented and actively hardening; continuous-session product acceptance remains open. Product alignment updated 2026-11-21.
+Status: CLI foundation implemented and actively hardening. A bounded Codex → Antigravity → Codex CLI continuity acceptance passed on 2026-11-25; shared configuration and provider Desktop acceptance remain open. See [reliable agent continuity](reliable-agent-continuity.md) for implementation, tests and limits.
 
 ## Scope
 

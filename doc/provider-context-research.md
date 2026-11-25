@@ -121,8 +121,10 @@ Modeled capabilities:
 
 ## Baize Defaults
 
-- Same provider with captured native session id and no cross-provider delta:
-  send the raw prompt and pass the native session id.
+- Updated 2026-11-25: a captured native session id alone is not a delivery receipt.
+  Verified native references resume with missing dialogue plus fresh workspace and
+  active/revoked requirements. Legacy references without verified coverage receive
+  a full context pack. See [continuity behavior](reliable-agent-continuity.md).
 - Same provider without native session id:
   send a full Baize context pack.
 - Switching provider, or returning to a stale provider after another provider

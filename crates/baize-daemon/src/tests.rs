@@ -539,6 +539,7 @@ async fn runtime_status_reports_execution_policy_snapshot() {
     .await;
 
     assert_eq!(status["runtime"]["command_policy"], "deny");
+    assert_eq!(status["runtime"]["capabilities"]["session_continuity"], 2);
     assert_eq!(status["runtime"]["execution_mode"], "read_only");
     assert_eq!(status["runtime"]["checkpoint_policy"], "off");
     assert_eq!(status["runtime"]["routing"]["sticky_window_minutes"], 45);
@@ -998,7 +999,9 @@ async fn prompt_reuses_saved_native_provider_session_id() {
     let captured = requests.lock().expect("requests");
     assert_eq!(captured.len(), 2);
     assert!(captured[0].session_id.is_none());
-    assert_eq!(captured[1].prompt, "second");
+    assert!(captured[1]
+        .prompt
+        .contains("<current_user_request>\nsecond"));
     assert_eq!(
         captured[1].session_id.as_deref(),
         Some("codex_native_session_1")
@@ -1069,9 +1072,7 @@ async fn prompt_includes_prior_session_messages_without_native_resume() {
     assert!(captured[0].prompt.contains("<current_user_request>\nhello"));
     assert_eq!(captured[1].provider_id.0, "antigravity");
     assert!(captured[1].session_id.is_none());
-    assert!(captured[1]
-        .prompt
-        .contains("<recent_conversation>\nuser: hello\nassistant: ready to help"));
+    assert!(captured[1].prompt.contains("user: hello"));
     assert!(captured[1]
         .prompt
         .contains("<current_user_request>\nwhat did I just say?"));
@@ -1228,7 +1229,7 @@ async fn context_preview_returns_strategy_and_safe_prompt_preview() {
     assert!(preview["prompt_preview"]
         .as_str()
         .expect("preview")
-        .contains("<current_user_request> continue"));
+        .contains("<current_user_request>\ncontinue"));
 }
 
 #[tokio::test]
@@ -2556,6 +2557,33 @@ async fn failed_session_recovers_on_successful_prompt() {
     .await;
     assert_eq!(session_after_fail["session"]["status"], "Failed");
 
+    let rejected = json_response_with_status(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"prompt":"do not replay"}).to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::CONFLICT);
+    let turn_id = session_after_fail["session"]["continuity"]["active_turn"]["id"]
+        .as_str()
+        .unwrap();
+    let reconciliation = json_response(
+        app.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"prompt":format!("/reconcile {turn_id}")}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(reconciliation["local_command"], true);
     let second = json_response(
         app.clone(),
         Request::builder()
@@ -2592,6 +2620,7 @@ fn app_state_recovers_in_flight_sessions_on_startup() {
         objective: "recover this".to_string(),
         active_provider_id: Some(ProviderId("codex".to_string())),
         provider_native_session_ids: Default::default(),
+        continuity: Default::default(),
         status: TaskSessionStatus::Running,
         created_at: now,
         updated_at: now,
@@ -2602,6 +2631,7 @@ fn app_state_recovers_in_flight_sessions_on_startup() {
         objective: "leave canceled".to_string(),
         active_provider_id: Some(ProviderId("gemini".to_string())),
         provider_native_session_ids: Default::default(),
+        continuity: Default::default(),
         status: TaskSessionStatus::Canceled,
         created_at: now,
         updated_at: now,
@@ -2832,6 +2862,7 @@ fn session_was_canceled_detects_stored_canceled_state() {
         objective: "cancel before provider result".to_string(),
         active_provider_id: Some(ProviderId("codex".to_string())),
         provider_native_session_ids: Default::default(),
+        continuity: Default::default(),
         status: TaskSessionStatus::Canceled,
         created_at: now,
         updated_at: now,
@@ -3643,6 +3674,7 @@ fn failure_threshold_skips_sticky_provider() {
             objective: "continue".to_string(),
             active_provider_id: Some(ProviderId("codex".to_string())),
             provider_native_session_ids: Default::default(),
+            continuity: Default::default(),
             status: TaskSessionStatus::Completed,
             created_at: now,
             updated_at: now,
@@ -4056,3 +4088,6 @@ async fn context_preview_includes_latest_snapshot_after_more_than_500_stream_eve
         .unwrap()
         .contains("LATEST_STREAM_SNAPSHOT"));
 }
+
+#[path = "continuity_tests.rs"]
+mod continuity;

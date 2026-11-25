@@ -154,29 +154,7 @@ pub(super) fn inspector_lines(state: &TuiState, panel: Panel) -> Vec<Line<'stati
         }
         Panel::Context => {
             heading(&mut lines, "TARGET CONTEXT");
-            field(&mut lines, "Target", state.selected_provider());
-            if state.ui.context.is_null() {
-                lines.push(Line::raw("F5 to preview context for the selected provider"));
-            } else {
-                lines.push(Line::styled(
-                    "Preview uses a placeholder request, not your unsent draft.",
-                    muted_style(),
-                ));
-                if let Some(context) = state.ui.context.get("context") {
-                    for line in serde_json::to_string_pretty(context)
-                        .unwrap_or_default()
-                        .lines()
-                    {
-                        lines.push(Line::raw(line.to_string()));
-                    }
-                }
-                heading(&mut lines, "PROMPT PREVIEW");
-                if let Some(preview) = state.ui.context["prompt_preview"].as_str() {
-                    for line in preview.lines() {
-                        lines.push(Line::raw(line.to_string()));
-                    }
-                }
-            }
+            lines.extend(continuity_context_lines(state));
         }
         Panel::Handoff => {
             heading(&mut lines, "REVIEW HANDOFF");
