@@ -51,4 +51,4 @@ Antigravity 阶段（`28e79dc`）：审阅前基线 422 项，本阶段新增 15
 
 本机日志：Antigravity 阶段为 `/tmp/baize-continuity-review-final-{tests,all-targets,fmt,clippy,release}.log`；ZCode 阶段为 `/tmp/baize-zcode-review-final-{tests,all-targets,fmt,clippy,release}.log`。原生应用的代码审阅使用模型；它们与自动化测试中不调用 provider 的约束分别记录。
 
-此次修复后的 Codex → Antigravity → Codex 真实模型流程未重跑；已有真实验收属于 `25a2dd9`，见 [连续会话说明](reliable-agent-continuity.md)。旧 daemon 未停止或替换。
+两轮审阅修复合并后，已于 2026-11-25 在 main 合并提交 `3aad6b7` 重跑 Codex → Antigravity → Codex：3 次真实调用、12 项检查全部通过，三阶段 fixture 测试为 7 / 8 / 9 项；原始证据为 `target/audit/continuity/real-20261125-05/`。源提交、版本、原生引用和摘要见 [验收结果](acceptance/continuity-20261125.json)，说明见 [连续会话文档](reliable-agent-continuity.md)。旧 daemon 未停止或替换。

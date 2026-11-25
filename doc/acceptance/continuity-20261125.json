@@ -1,0 +1,50 @@
+{
+  "date": "2026-11-25",
+  "source_commit": "3aad6b7f11e2c75043015706b48d1b6ee8fa6910",
+  "implementation_tip": "3d9f947b0ce58aca569f711dbb0d7076d63501f7",
+  "pull_request": 11,
+  "issue": 10,
+  "passed": true,
+  "provider_versions": {
+    "codex": "0.171.0",
+    "antigravity": "1.5.16"
+  },
+  "provider_prompts_submitted": 3,
+  "checks": {
+    "b_records_dialogue_only_handoff_password": true,
+    "b_independently_satisfies_updated_constraints": true,
+    "native_references_survive_restart": true,
+    "same_baize_session": true,
+    "exact_a_b_a_sequence": true,
+    "resumed_original_codex_reference": true,
+    "b_requirement_reaches_returning_a": true,
+    "dialogue_only_password_reaches_returning_a": true,
+    "external_workspace_change_visible": true,
+    "sentinel_preserved": true,
+    "password_never_written_to_workspace": true,
+    "all_three_turns_have_native_ids": true
+  },
+  "fixture_tests_passed": [
+    7,
+    8,
+    9
+  ],
+  "native_session_ids": [
+    "01a2129f-ae07-7600-a918-5b4005c239c1",
+    "371044a0-6c81-435f-a562-426e157289e4",
+    "01a2129f-ae07-7600-a918-5b4005c239c1"
+  ],
+  "automation": {
+    "workspace_tests_passed": 443,
+    "all_targets_tests_passed": 450,
+    "fmt_check": "passed",
+    "clippy_warnings_denied": "passed",
+    "release_build": "passed"
+  },
+  "execution_policy": "allow_project",
+  "evidence_directory": "target/audit/continuity/real-20261125-05",
+  "daemon_sha256": "64907675d4843af8fc1e3c3fa5b15e96e6ec4d8db8ecf2763737930c4c584d41",
+  "runner_sha256": "d1f0ca9921fac51b6a955836e7d3182e20712b3900a952ffa24dfe6cad1a264e",
+  "raw_result_sha256": "fc5a0a03b2b82537bf41b61566e55dcf4e52170e2b831d9f580a10ac377f1323",
+  "scope": "isolated workspace/data/port; production daemon unchanged"
+}

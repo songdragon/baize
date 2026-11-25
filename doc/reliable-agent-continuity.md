@@ -67,6 +67,21 @@ Antigravity headless 可能因无法询问命令权限而自动拒绝工具，�
 
 自动化使用 fake executor、临时数据库/Git workspace 和 Ratatui TestBackend，不消耗模型额度。覆盖长对话、约束替换/撤销、旧数据导入、原生引用不匹配、pending stream 重组、预算拒绝、回执原子回滚、双客户端、重启、未 dispatch 的租约、失效引用、预览与 handoff 不确认交付，以及 exit 0 权限拒绝。
 
+### 合并后的最终复验（2026-11-25）
+
+[PR #11](https://github.com/songdragon/baize/pull/11) 已合并到 main，合并提交为 `3aad6b7f11e2c75043015706b48d1b6ee8fa6910`，包含 `28e79dc` 和 `3d9f947` 两轮审阅修复。远端在此次复验开始前已经完成合并并关闭 issue #10，本次核对该状态后在合并代码上重跑验收，没有重复创建合并提交。
+
+`target/audit/continuity/real-20261125-05/` 保存这次完整证据；仓库内的 [验收摘要](acceptance/continuity-20261125.json) 记录源提交、原生引用、二进制/脚本摘要和 12 项检查。Codex CLI 0.171.0、Antigravity CLI 1.5.16，共 3 次真实 provider 调用，无失败重试，12 项检查全部通过：
+
+- Codex 首轮实现并通过 7 项 fixture 测试。
+- Antigravity 承接更新的前缀、连续空白和中文错误要求，通过 8 项测试及独立产物校验。接续口令只出现在对话，未写入 workspace。
+- 外部新增 `acceptance_cases.json` 后重启隔离 daemon；切回 Codex 的预览为 CrossProviderDelta，恢复与首轮相同的原生 ID，保留 B 的实现和要求，中文回答复述 B 的对话口令。新 JSON 的 2 个案例实际接入 unittest，最终 9 项测试通过。
+- 三轮都属于同一 Baize session、退出码均为 0 且没有 provider_error；SENTINEL 未变，原生引用跨重启保留。
+
+同一 main 源码的 `cargo test --workspace` 443 项、`cargo test --workspace --all-targets` 450 项通过，fmt check、clippy `-D warnings` 和 release 构建通过。本次未修改执行代码；验收使用独立 workspace/data/端口及既有 allow_project 策略，未替换用户已有 daemon。
+
+### 重现命令与历史记录
+
 真实验收入口需要显式启用：
 
 ```sh
@@ -88,6 +103,6 @@ python3 scripts/continuity_acceptance.py --allow-real-providers \
 
 前一轮 `real-20261125-02` 复核发现 Antigravity 权限拒绝，初始脚本仅检查终态与最终产物，导致假阳性。该轮 `result.json` 已标为无效并保留原始日志，相关误判已补回归测试。含此排查和最终 release 复验，共调用真实模型 9 次；`real-20261125-01` 在本地代理配置处失败，调用次数为 0。
 
-提交 `25a2dd9` 的自动化验证：`cargo test --workspace` 422 项、`cargo test --workspace --all-targets` 429 项全部通过，相对 main 新增 32 项；fmt check、clippy `-D warnings` 和 release 构建通过。后续原生应用审阅的修复、处置依据和新验证结果见 [审阅跟进记录](continuity-review-followup.md)；上述真实 provider 验收未在审阅修复后重跑。
+提交 `25a2dd9` 的自动化验证：`cargo test --workspace` 422 项、`cargo test --workspace --all-targets` 429 项全部通过，相对当时 main 新增 32 项；fmt check、clippy `-D warnings` 和 release 构建通过。后续原生应用审阅的修复、处置依据和新验证结果见 [审阅跟进记录](continuity-review-followup.md)；审阅后的真实复验为本页上方的 `real-20261125-05`，历史 04 不替代本次结果。
 
 发布版 TUI 另通过 10 项 POSIX PTY 交互回归（隔离草稿目录，不发送 provider prompt）。旧 daemon 的提交前拒绝保护也通过真实 CLI 检查，未创建/发送会话。相应结果为 `target/audit/continuity/release-pty/result.json` 与 `target/audit/continuity/upgrade-guard.json`。
