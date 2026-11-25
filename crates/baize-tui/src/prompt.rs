@@ -95,8 +95,8 @@ pub(super) fn run_prompt_submission(
 }
 
 fn require_continuity_runtime(value: &Value) -> Result<()> {
-    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=1,
-        "Daemon does not support reliable continuity. Restart it with the current Baize binary; no prompt was sent");
+    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=2,
+        "Daemon requires continuity protocol 2. Restart it with the current Baize binary; no prompt was sent");
     Ok(())
 }
 
@@ -110,13 +110,17 @@ mod compatibility_tests {
     use super::*;
     #[test]
     fn old_daemon_cannot_receive_local_commands_as_model_prompts() {
+        assert!(require_continuity_runtime(
+            &json!({"runtime":{"capabilities":{"session_continuity":1}}})
+        )
+        .is_err());
         assert!(require_continuity_runtime(&json!({"runtime":{"command_policy":"ask"}})).is_err());
         assert!(require_continuity_runtime(
             &json!({"runtime":{"capabilities":{"session_continuity":0}}})
         )
         .is_err());
         assert!(require_continuity_runtime(
-            &json!({"runtime":{"capabilities":{"session_continuity":1}}})
+            &json!({"runtime":{"capabilities":{"session_continuity":2}}})
         )
         .is_ok());
     }

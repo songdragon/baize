@@ -218,11 +218,32 @@ impl AppState {
                             confirmed_idle = true;
                             session.continuity.active_turn = None
                         }
-                        "session.agent.failed" if event.payload["exit_code"].is_number() => {
+                        "session.agent.failed"
+                            if event.payload["active_turn"]["uncertain"] == true =>
+                        {
+                            if let Ok(attempt) =
+                                serde_json::from_value(event.payload["active_turn"].clone())
+                            {
+                                session.continuity.active_turn = Some(attempt);
+                            }
+                        }
+                        "session.agent.failed"
+                            if event.payload["exit_code"].is_number()
+                                && event.payload["provider_error"]["kind"] != "Timeout" =>
+                        {
                             confirmed_idle = true;
                             session.continuity.active_turn = None
                         }
-                        "session.agent.ignored" | "session.execution.reconciled" => {
+                        "session.agent.ignored"
+                            if event
+                                .payload
+                                .get("active_turn")
+                                .is_some_and(serde_json::Value::is_null) =>
+                        {
+                            confirmed_idle = true;
+                            session.continuity.active_turn = None
+                        }
+                        "session.execution.reconciled" => {
                             confirmed_idle = true;
                             session.continuity.active_turn = None
                         }

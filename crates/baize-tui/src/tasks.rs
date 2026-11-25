@@ -230,7 +230,13 @@ pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTa
         .as_str()
         .unwrap_or("Running")
         .to_string();
-    state.ui.context = json!({"context":completion.prompt_response["context"]});
+    let continuity = completion
+        .prompt_response
+        .get("continuity")
+        .or_else(|| completion.prompt_response["session"].get("continuity"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    state.ui.context = json!({"context":completion.prompt_response["context"],"continuity":continuity,"preview_only":false,"outcome":completion.prompt_response["turn_status"]});
     state.ui.diff = completion.diff_response["diff"].clone();
     if let Some(session) = state
         .recent_sessions
@@ -242,8 +248,15 @@ pub(super) fn apply_prompt_completion(state: &mut TuiState, completion: PromptTa
     }
     append_session_diff(state, &completion.diff_response);
     state.streaming_assistant_open = false;
-    state.activity_status = prompt_activity_after_response(&completion.prompt_response).to_string();
-    state.ui.recovery_drafts.remove(&completion.session_id);
+    state.activity_status = if state.ui.execution_uncertain {
+        "execution unconfirmed"
+    } else {
+        prompt_activity_after_response(&completion.prompt_response)
+    }
+    .to_string();
+    if !state.ui.execution_uncertain {
+        state.ui.recovery_drafts.remove(&completion.session_id);
+    }
 }
 
 pub(super) fn apply_prompt_started(state: &mut TuiState, started: PromptTaskStarted) {

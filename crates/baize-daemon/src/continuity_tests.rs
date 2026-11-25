@@ -376,7 +376,9 @@ async fn restarting_an_interrupted_attempt_requires_exact_explicit_reconciliatio
         .get_task_session(&TaskSessionId(id.clone()))
         .unwrap()
         .unwrap();
-    let mut turn = crate::continuity::TurnGuard::begin(&state, &mut session).unwrap();
+    let mut turn =
+        crate::continuity::TurnGuard::begin(&state, &mut session, &ProviderId("codex".into()))
+            .unwrap();
     turn.dispatched = true;
     let turn_id = turn.id.0.clone();
     drop(turn);
@@ -456,3 +458,6 @@ async fn concurrent_clients_cannot_dispatch_a_second_turn_or_mutate_running_requ
 
 #[path = "handoff_continuity_tests.rs"]
 mod handoff;
+
+#[path = "continuity_review_tests.rs"]
+mod review;

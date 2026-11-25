@@ -31,8 +31,8 @@ pub async fn prompt_session(
     let session_id = TaskSessionId(id);
     let mut session = match with_store(&state, |store| store.get_task_session(&session_id)) {
         Ok(Some(session)) => session,
-        Ok(None) => return not_found("session not found"),
-        Err(error) => return internal_error(error.to_string()),
+        Ok(None) => return not_submitted(not_found("session not found")),
+        Err(error) => return not_submitted(internal_error(error.to_string())),
     };
     if let Some(command) = crate::continuity::parse_command(&request.prompt) {
         if !request.image_paths.is_empty() {
@@ -76,7 +76,7 @@ pub async fn prompt_session(
         return reject_prompt(&error);
     }
 
-    let mut turn = match crate::continuity::TurnGuard::begin(&state, &mut session) {
+    let mut turn = match crate::continuity::TurnGuard::begin(&state, &mut session, &provider_id) {
         Ok(turn) => turn,
         Err(error) => {
             return (
@@ -86,7 +86,7 @@ pub async fn prompt_session(
         }
     };
     if let Err(error) = crate::continuity::import_requirements(&state, &mut session) {
-        return internal_error(error.to_string());
+        return not_submitted(internal_error(error.to_string()));
     }
 
     if let Some(attempt) = session.continuity.active_turn.as_mut() {
@@ -102,16 +102,8 @@ pub async fn prompt_session(
     let prepared_context =
         match prepare_context_pack(&state, &session, &provider_id, &request.prompt) {
             Ok(prepared) => prepared,
-            Err(error) => return internal_error(error.to_string()),
+            Err(error) => return not_submitted(internal_error(error.to_string())),
         };
-    if prepared_context.result.blocked {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(
-                serde_json::json!({"error":"Required context exceeds budget; inspect Context preview before retrying", "context":prepared_context.summary,"not_submitted":true}),
-            ),
-        );
-    }
     let profile = crate::context::provider_context_profile(&provider_id, &state.config);
     let execution_identity =
         crate::context::execution_identity(&profile, &prepared_context.project);
@@ -124,12 +116,20 @@ pub async fn prompt_session(
         return (
             StatusCode::CONFLICT,
             Json(
-                serde_json::json!({"error":format!("Execution entry changed. Review and /reset-provider {} before starting a new native session",provider_id.0),"not_submitted":true}),
+                serde_json::json!({"error":format!("Execution entry changed. Review and /reset-provider {} before starting a new native session",provider_id.0),"context":prepared_context.summary,"not_submitted":true}),
+            ),
+        );
+    }
+    if prepared_context.result.blocked {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(
+                serde_json::json!({"error":"Required context exceeds budget; inspect Context preview before retrying", "context":prepared_context.summary,"not_submitted":true}),
             ),
         );
     }
     if let Err(response) = apply_prompt_provider_target(&state, &mut session, &request) {
-        return response;
+        return not_submitted(response);
     }
     let context_summary = prepared_context.summary.clone();
     let prompt_for_agent = prepared_context.result.prompt.clone();
@@ -167,7 +167,7 @@ pub async fn prompt_session(
                 ),
             )
         }
-        Err(error) => return internal_error(error.to_string()),
+        Err(error) => return not_submitted(internal_error(error.to_string())),
     }
     let _ = state.events.send(started);
     turn.dispatched = true;
@@ -214,39 +214,16 @@ pub async fn prompt_session(
 
     match run {
         Ok(result) => {
-            if session_was_canceled(&state, &session.id) {
-                let mut ignored = baize_core::BaizeEvent::new(
-                    "session.agent.ignored",
-                    serde_json::json!({
-                        "reason": "session canceled before provider result completed",
-                        "provider_id": provider_id.0,
-                    }),
-                );
-                ignored.workspace_id = Some(session.workspace_id.clone());
-                ignored.session_id = Some(session.id.clone());
-                ignored.provider_id = Some(provider_id.clone());
-                state.record_event(ignored);
-                turn.dispatched = false;
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "status": "canceled",
-                        "turn_status": "canceled",
-                        "session_status": "Canceled",
-                        "session_id": session.id.0,
-                        "provider_id": provider_id,
-                        "error": "session was canceled before provider result completed",
-                    })),
-                );
-            }
-            for adapter_event in result.events.iter().skip(streamed_event_count) {
-                record_adapter_event(
-                    &state,
-                    &session.workspace_id,
-                    &session.id,
-                    &provider_id,
-                    adapter_event,
-                );
+            if !session_was_canceled(&state, &session.id) {
+                for adapter_event in result.events.iter().skip(streamed_event_count) {
+                    record_adapter_event(
+                        &state,
+                        &session.workspace_id,
+                        &session.id,
+                        &provider_id,
+                        adapter_event,
+                    );
+                }
             }
 
             let new_status = if result.success {
@@ -327,13 +304,13 @@ pub async fn prompt_session(
                     let _ = state.events.send(final_event);
                 }
                 Ok(false) => {
-                    turn.dispatched = false;
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(
-                            serde_json::json!({"status":"canceled","error":"Session changed before result commit; no context receipt advanced"}),
-                        ),
-                    );
+                    return discarded_turn_response(
+                        &state,
+                        &session.id,
+                        &turn.id,
+                        &provider_id,
+                        "Session changed before result commit; no context receipt advanced",
+                    )
                 }
                 Err(error) => return internal_error(error.to_string()),
             }
@@ -396,13 +373,13 @@ pub async fn prompt_session(
                     let _ = state.events.send(failed);
                 }
                 Ok(false) => {
-                    turn.dispatched = false;
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(
-                            serde_json::json!({"status":"canceled","error":"Session changed; uncertain result retained without a receipt"}),
-                        ),
-                    );
+                    return discarded_turn_response(
+                        &state,
+                        &session.id,
+                        &turn.id,
+                        &provider_id,
+                        "Session changed; uncertain result retained without a receipt",
+                    )
                 }
                 Err(error) => return internal_error(error.to_string()),
             }
@@ -439,4 +416,37 @@ fn reject_prompt(error: &str) -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({"error":error,"not_submitted":true})),
     )
+}
+
+fn not_submitted(
+    mut response: (StatusCode, Json<serde_json::Value>),
+) -> (StatusCode, Json<serde_json::Value>) {
+    response.1 .0["not_submitted"] = serde_json::json!(true);
+    response
+}
+
+fn discarded_turn_response(
+    state: &AppState,
+    id: &TaskSessionId,
+    attempt: &baize_core::EventId,
+    provider: &baize_core::ProviderId,
+    error: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match with_store(state, |store| store.get_task_session(id)) {
+        Ok(Some(session)) => {
+            let uncertain = session
+                .continuity
+                .active_turn
+                .as_ref()
+                .is_some_and(|turn| &turn.id == attempt && turn.uncertain);
+            (
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::json!({"status":"canceled","turn_status":if uncertain {"unconfirmed"} else {"canceled"},"session_status":session_status_label(&session.status),"session_id":id.0,"provider_id":provider,"continuity":session.continuity,"error":error}),
+                ),
+            )
+        }
+        Ok(None) => not_found("session not found after execution"),
+        Err(error) => internal_error(error.to_string()),
+    }
 }

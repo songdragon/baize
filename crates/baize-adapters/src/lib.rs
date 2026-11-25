@@ -920,11 +920,15 @@ fn agent_result_from_command_run(
     let stdout = String::from_utf8_lossy(&run.output.stdout);
     let raw_stderr = String::from_utf8_lossy(&run.output.stderr).to_string();
     let stream_completed = stream_reports_success(&stdout);
-    let terminal_error = stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|raw| antigravity_stream::terminal_error(&raw))
-        .next_back();
+    let terminal_error = if provider_id.0 == "antigravity" {
+        stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|raw| antigravity_stream::terminal_error(&raw))
+            .next_back()
+    } else {
+        None
+    };
     let success = terminal_error.is_none()
         && (run.output.status.success() || (run.timed_out && stream_completed));
     let stderr = if let Some(error) = terminal_error {
@@ -2328,6 +2332,27 @@ mod tests {
         assert!(!stream_reports_success(
             r#"{"type":"result","status":"failed"}"#
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn antigravity_terminal_errors_do_not_change_other_provider_outcomes() {
+        use std::os::unix::process::ExitStatusExt;
+        for provider in ["codex", "opencode", "antigravity"] {
+            let raw=serde_json::json!({"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command"}]}}).to_string();
+            let run = CommandRunOutput {
+                output: Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: raw.as_bytes().to_vec(),
+                    stderr: vec![],
+                },
+                timed_out: false,
+                timeout: Duration::from_secs(1),
+                events: vec![],
+            };
+            let parsed = agent_result_from_command_run(ProviderId(provider.into()), provider, run);
+            assert_eq!(parsed.success, provider != "antigravity", "{provider}");
+        }
     }
 
     #[test]

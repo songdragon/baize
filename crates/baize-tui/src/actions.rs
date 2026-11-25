@@ -9,6 +9,7 @@ pub(crate) enum Action {
     Cancel,
     Complete,
     Details,
+    Requirements,
     Sessions,
 }
 
@@ -93,6 +94,7 @@ pub(super) fn request_action(state: &mut TuiState, task: &mut Option<UiTask>, ac
                 extra = json!({"context_response":post_json(&format!("/sessions/{id}/context-preview"),json!({"provider_id":provider,"prompt":draft}))?,"events_response":load_session_events(id)?,"session_response":get_json(&format!("/sessions/{id}"))?});
                 get_json(&format!("/sessions/{id}/diff"))?
             }
+            Action::Requirements => get_json(&format!("/sessions/{id}/requirements"))?,
             Action::Sessions => {
                 let sessions =
                     load_workspace_sessions(workspace_id.as_deref().unwrap_or_default())?;
@@ -168,6 +170,7 @@ pub(super) fn apply_action(state: &mut TuiState, result: ActionResult) {
             if result.action == Action::Cancel {
                 state.ui.execution_uncertain |= state.activity_status.starts_with("running");
                 append_cancel_response(state, &result.response);
+                apply_continuity_status(state, &result.response["session"]);
                 state.ui.notice = Some("Session canceled. The provider process may still be running; inspect workspace before starting more work.".into());
             } else {
                 append_complete_response(state, &result.response);
@@ -179,6 +182,14 @@ pub(super) fn apply_action(state: &mut TuiState, result: ActionResult) {
             {
                 session.status = state.ui.session_status.clone();
             }
+        }
+        Action::Requirements => {
+            state.ui.context = json!({"continuity":result.response["continuity"]});
+            apply_continuity_status(state, &result.response);
+            state.ui.panel = Panel::Context;
+            state.ui.focus = Focus::Inspector;
+            state.ui.inspector_scroll = 0;
+            state.detail_mode = true;
         }
         Action::Details => {
             state.ui.diff = result.response["diff"].clone();

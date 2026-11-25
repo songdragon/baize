@@ -393,25 +393,30 @@ pub async fn cancel_session(
     AxumPath(id): AxumPath<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let session_id = TaskSessionId(id);
-    let mut session = match with_store(&state, |store| store.get_task_session(&session_id)) {
-        Ok(Some(session)) => session,
-        Ok(None) => return not_found("session not found"),
-        Err(error) => return internal_error(error.to_string()),
-    };
-    session.status = TaskSessionStatus::Canceled;
-    session.updated_at = Utc::now();
-    if let Err(error) = with_store(&state, |store| store.upsert_task_session(&session)) {
-        return internal_error(error.to_string());
+    let canceled = with_store(&state, |store| {
+        let Some(mut session) = store.get_task_session(&session_id)? else {
+            return Ok(None);
+        };
+        session.status = TaskSessionStatus::Canceled;
+        session.updated_at = Utc::now();
+        let mut event = baize_core::BaizeEvent::new(
+            "session.agent.completed",
+            serde_json::json!({"status":"canceled"}),
+        );
+        event.workspace_id = Some(session.workspace_id.clone());
+        event.session_id = Some(session.id.clone());
+        event.provider_id = session.active_provider_id.clone();
+        store.save_session_event(&session, &event)?;
+        Ok(Some((session, event)))
+    });
+    match canceled {
+        Ok(Some((session, event))) => {
+            let _ = state.events.send(event);
+            ok_json(serde_json::json!({"session":session}))
+        }
+        Ok(None) => not_found("session not found"),
+        Err(error) => internal_error(error.to_string()),
     }
-    let mut event = baize_core::BaizeEvent::new(
-        "session.agent.completed",
-        serde_json::json!({ "status": "canceled" }),
-    );
-    event.workspace_id = Some(session.workspace_id.clone());
-    event.session_id = Some(session.id.clone());
-    event.provider_id = session.active_provider_id.clone();
-    state.record_event(event);
-    ok_json(serde_json::json!({ "session": session }))
 }
 
 pub async fn complete_session(

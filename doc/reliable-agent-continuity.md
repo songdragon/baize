@@ -16,6 +16,8 @@
 
 相同 key 表示替换；撤销保留修订号和来源，不删除审计依据。长期要求需要显式保存，Baize 不从 agent 建议中自动推断用户承诺。原始对话仍按用户/assistant、provider 和事件来源承接。原会话目标保留为背景，后续用户修正和当前有效要求优先。
 
+`/requirements` 是只读查询，执行中或结果未确认时也可以查看，不写会话、时间戳或事件。TUI 将结果展示在 Context 面板，保留原 provider 请求和后续草稿。其他要求修改命令仍受运行租约保护。
+
 Tab 选择下一轮执行者，Enter 仍使用原 Baize session。也可 Ctrl-H 准备交接、Ctrl-Y 接受。接受只选择执行者，不发送草稿、不推进回执。Ctrl-H 和 F5 都使用请求时的实际草稿；Context 面板展示来源、有效/撤销要求、预算省略和缺口。实际发送会重新检查当前输入与 workspace。
 
 ## 接续与失败恢复
@@ -36,6 +38,8 @@ Tab 选择下一轮执行者，Enter 仍使用原 Baize session。也可 Ctrl-H 
 
 该命令不终止 provider、不重发 prompt、不推进回执。尚在运行的回合不能这样解除保护。F5 先核对已有结果；缺少确认依据时不会自动把未知当作完成。
 
+取消后的未知执行同样可以按准确 ID 核对；核对后会话仍为 Canceled，随后可以另开会话。取消与结果提交相遇时，已确认结束的结果原子记录为忽略，未知结果保留保护。旧版缺少结束证据的忽略事件在升级恢复时也保持未确认，需要人工检查。
+
 原生引用失效时，检查修改后显式清除该 provider 的引用：
 
 ```text
@@ -52,7 +56,7 @@ Antigravity headless 可能因无法询问命令权限而自动拒绝工具，�
 - `POST /sessions/:id/requirements`：显式用户命令，例如 `{"action":"remember","key":"api","text":"保持公开签名"}`、`{"action":"forget","key":"api"}`。
 - `POST /sessions/:id/context-preview`：`{"provider_id":"codex","prompt":"待提交的请求"}`，与实际发送共用上下文构建路径；不写回执。原 GET 接口保留。
 - `POST /sessions/:id/prompt`：上述 `/remember`、`/forget`、`/requirements`、`/reconcile`、`/reset-provider` 也可作为本地命令使用。
-- 新客户端先核对 daemon 的 `runtime.capabilities.session_continuity`；旧 daemon 不会收到本地命令或普通 prompt。升级后需先重新启动 daemon。
+- 新客户端先核对 daemon 的 `runtime.capabilities.session_continuity >= 2`；能力缺失或版本 1 的旧 daemon 不会收到本地命令或普通 prompt。协议 2 包含取消竞争和未知执行保护修复，升级后需先用同一版本重新启动 daemon。
 - 旧 session 缺少 continuity 字段时使用默认值；旧 handoff 中用户明确提供的约束按来源导入，可撤销且不反复复活。
 - 缺少原生引用或重置引用后使用完整上下文。没有导入私有 transcript、迁移未完成工具进程，或声称 CLI 与 Desktop 能力等价。
 
@@ -71,7 +75,7 @@ python3 scripts/continuity_acceptance.py --allow-real-providers \
 
 它使用独立 workspace/data/端口和现有 `allow_project` 策略，允许 agent 在验收项目内编辑和运行测试，不读取/修改用户 Baize 配置，不操作旧 daemon。该例子不是默认 daemon 配置，也不在 `cargo test` 中执行真实 provider。
 
-最终 release 构建证据：`target/audit/continuity/real-20261125-04/`（此前 `real-20261125-03` 的加强验收也通过）。Codex CLI 0.171.0、Antigravity CLI 1.5.14，共 3 个真实回合、12 项检查通过：
+审阅前提交 `25a2dd9` 的 release 构建证据：`target/audit/continuity/real-20261125-04/`（此前 `real-20261125-03` 的加强验收也通过）。Codex CLI 0.171.0、Antigravity CLI 1.5.14，共 3 个真实回合、12 项检查通过：
 
 1. Codex 创建 `normalize_label` 和测试，记录原生 ID。
 2. 更新保存的前缀与错误信息要求，Antigravity 合并连续空白、补齐类型检查和测试；在交回前独立验证其实现，确认对话口令未写入文件。
@@ -81,6 +85,6 @@ python3 scripts/continuity_acceptance.py --allow-real-providers \
 
 前一轮 `real-20261125-02` 复核发现 Antigravity 权限拒绝，初始脚本仅检查终态与最终产物，导致假阳性。该轮 `result.json` 已标为无效并保留原始日志，相关误判已补回归测试。含此排查和最终 release 复验，共调用真实模型 9 次；`real-20261125-01` 在本地代理配置处失败，调用次数为 0。
 
-最终自动化验证：`cargo test --workspace` 422 项、`cargo test --workspace --all-targets` 429 项全部通过，相对 main 新增 32 项；fmt check、clippy `-D warnings` 和 release 构建通过。
+提交 `25a2dd9` 的自动化验证：`cargo test --workspace` 422 项、`cargo test --workspace --all-targets` 429 项全部通过，相对 main 新增 32 项；fmt check、clippy `-D warnings` 和 release 构建通过。后续原生应用审阅的修复、处置依据和新验证结果见 [审阅跟进记录](continuity-review-followup.md)；上述真实 provider 验收未在审阅修复后重跑。
 
 发布版 TUI 另通过 10 项 POSIX PTY 交互回归（隔离草稿目录，不发送 provider prompt）。旧 daemon 的提交前拒绝保护也通过真实 CLI 检查，未创建/发送会话。相应结果为 `target/audit/continuity/release-pty/result.json` 与 `target/audit/continuity/upgrade-guard.json`。

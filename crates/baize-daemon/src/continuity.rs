@@ -39,7 +39,11 @@ pub(crate) struct TurnGuard {
 }
 
 impl TurnGuard {
-    pub fn begin(state: &AppState, session: &mut TaskSession) -> Result<Self> {
+    pub fn begin(
+        state: &AppState,
+        session: &mut TaskSession,
+        provider_id: &baize_core::ProviderId,
+    ) -> Result<Self> {
         let id = EventId::new();
         with_store(state, |store| {
             let mut latest = store
@@ -54,10 +58,7 @@ impl TurnGuard {
             }
             latest.continuity.active_turn = Some(ExecutionAttempt {
                 id: id.clone(),
-                provider_id: latest
-                    .active_provider_id
-                    .clone()
-                    .context("missing provider")?,
+                provider_id: provider_id.clone(),
                 uncertain: false,
             });
             store.upsert_task_session(&latest)?;
@@ -79,22 +80,63 @@ pub(crate) fn save_turn(
     event: &BaizeEvent,
     attempt_id: &EventId,
 ) -> Result<bool> {
-    with_store(state, |store| {
-        let latest = store
+    let mut discarded = None;
+    let saved = with_store(state, |store| {
+        let mut latest = store
             .get_task_session(&session.id)?
             .context("session not found")?;
-        if matches!(latest.status, baize_core::TaskSessionStatus::Canceled)
-            || latest
+        if latest
+            .continuity
+            .active_turn
+            .as_ref()
+            .is_none_or(|turn| &turn.id != attempt_id)
+        {
+            return Ok(false);
+        }
+        if matches!(latest.status, baize_core::TaskSessionStatus::Canceled) {
+            if !matches!(
+                event.event_type.as_str(),
+                "session.agent.completed" | "session.agent.failed"
+            ) {
+                return Ok(false);
+            }
+            let uncertain = session
                 .continuity
                 .active_turn
                 .as_ref()
-                .is_none_or(|turn| &turn.id != attempt_id)
-        {
+                .is_some_and(|turn| turn.uncertain);
+            if uncertain {
+                if let Some(turn) = latest.continuity.active_turn.as_mut() {
+                    turn.uncertain = true;
+                }
+            } else {
+                latest.continuity.active_turn = None;
+            }
+            latest.updated_at = chrono::Utc::now();
+            let mut terminal = event.clone();
+            terminal.event_type = if uncertain {
+                "session.agent.failed"
+            } else {
+                "session.agent.ignored"
+            }
+            .into();
+            terminal.payload["reason"] = serde_json::json!(if uncertain {
+                "Session canceled; execution remains unconfirmed"
+            } else {
+                "Session canceled before provider result commit"
+            });
+            terminal.payload["active_turn"] = serde_json::to_value(&latest.continuity.active_turn)?;
+            store.save_session_event(&latest, &terminal)?;
+            discarded = Some(terminal);
             return Ok(false);
         }
         store.save_session_event(session, event)?;
         Ok(true)
-    })
+    })?;
+    if let Some(event) = discarded {
+        let _ = state.events.send(event);
+    }
+    Ok(saved)
 }
 
 impl Drop for TurnGuard {
@@ -160,6 +202,12 @@ pub(crate) fn apply_command(
         with_store(state, |store| store.get_task_session(id))?.context("session not found")?;
     let baseline = session.clone();
     import_requirements(state, &mut session)?;
+    if matches!(command, ContinuityCommand::Requirements) {
+        let message = requirements_message(&session);
+        return Ok(
+            serde_json::json!({"status":"completed","turn_status":"completed","session_status":session.status,"session_id":id.0,"session":session,"message":message,"local_command":true,"read_only":true}),
+        );
+    }
     let mut event = BaizeEvent::new(
         "session.requirement.changed",
         serde_json::json!({"prompt":prompt,"command":command}),
@@ -198,21 +246,7 @@ pub(crate) fn apply_command(
             requirement.source_ref = event.id.0.clone();
             format!("Revoked requirement {key}.")
         }
-        ContinuityCommand::Requirements => session
-            .continuity
-            .requirements
-            .iter()
-            .map(|(key, value)| {
-                format!(
-                    "{key} [r{} {}] {} (source {})",
-                    value.revision,
-                    if value.active { "active" } else { "revoked" },
-                    value.text,
-                    value.source_ref
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        ContinuityCommand::Requirements => requirements_message(&session),
         ContinuityCommand::Reconcile { turn_id } => {
             let turn = session
                 .continuity
@@ -247,11 +281,7 @@ pub(crate) fn apply_command(
     }
     event.workspace_id = Some(session.workspace_id.clone());
     event.session_id = Some(session.id.clone());
-    event.payload["message"] = serde_json::json!(if message.is_empty() {
-        "No saved requirements. /remember <key> <text> saves one."
-    } else {
-        &message
-    });
+    event.payload["message"] = serde_json::json!(message);
     event.payload["continuity"] = serde_json::to_value(&session.continuity)?;
     session.updated_at = chrono::Utc::now();
     with_store(state, |store| {
@@ -270,4 +300,25 @@ pub(crate) fn apply_command(
         serde_json::json!({"status":"completed", "turn_status":"completed", "session_status":session.status,
         "session_id":id.0,"session":session,"message":event.payload["message"],"local_command":true}),
     )
+}
+
+fn requirements_message(session: &TaskSession) -> String {
+    if session.continuity.requirements.is_empty() {
+        return "No saved requirements. /remember <key> <text> saves one.".into();
+    }
+    session
+        .continuity
+        .requirements
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{key} [r{} {}] {} (source {})",
+                value.revision,
+                if value.active { "active" } else { "revoked" },
+                value.text,
+                value.source_ref
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

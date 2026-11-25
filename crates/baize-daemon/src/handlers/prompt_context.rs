@@ -169,12 +169,13 @@ pub(super) fn apply_prompt_provider_target(
         .active_provider_id
         .clone()
         .unwrap_or_else(|| ProviderId("codex".to_string()));
-    let Some(requested_provider) = request.provider_id.as_ref() else {
-        return Ok(current_provider);
-    };
-    let requested_provider = ProviderId(requested_provider.clone());
-    if requested_provider == current_provider {
-        return Ok(current_provider);
+    let requested_provider = request
+        .provider_id
+        .as_ref()
+        .map(|id| ProviderId(id.clone()))
+        .unwrap_or(current_provider);
+    if session.active_provider_id.as_ref() == Some(&requested_provider) {
+        return Ok(requested_provider);
     }
     if !baize_adapters::is_prompt_runtime_supported(&requested_provider) {
         return Err(crate::helpers::bad_request(&format!(
@@ -197,7 +198,7 @@ pub(super) fn apply_prompt_provider_target(
         id: RouteDecisionId::new(),
         session_id: session.id.clone(),
         selected_provider_id: requested_provider.clone(),
-        previous_provider_id: Some(current_provider),
+        previous_provider_id: session.active_provider_id.clone(),
         reason: format!(
             "Prompt target provider override. Task hint: {:?}.",
             task_type

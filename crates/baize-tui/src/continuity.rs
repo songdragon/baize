@@ -16,7 +16,11 @@ pub(super) fn can_reconcile(state: &TuiState) -> bool {
 }
 
 pub(super) fn apply_continuity_status(state: &mut TuiState, value: &Value) {
-    let Some(continuity) = value.get("continuity") else {
+    let Some(continuity) = value.get("continuity").or_else(|| {
+        value
+            .get("session")
+            .and_then(|session| session.get("continuity"))
+    }) else {
         return;
     };
     let Some(turn) = continuity.get("active_turn") else {
@@ -51,36 +55,52 @@ pub(super) fn continuity_context_lines(state: &TuiState) -> Vec<Line<'static>> {
         return lines;
     }
     let summary = &value["context"];
-    lines.push(Line::raw(
-        "Snapshot only; sending rebuilds context from the current draft and workspace.",
-    ));
-    if summary["provider_id"]
-        .as_str()
-        .is_some_and(|provider| provider != state.selected_provider())
-    {
-        lines.push(Line::raw(
-            "Selected target changed; F5 rebuilds its preview.",
-        ));
-    }
-    lines.push(Line::raw(format!(
-        "Preview only · {} · {} estimated tokens · {}",
-        summary["provider_id"].as_str().unwrap_or("unknown"),
-        summary["estimated_tokens"],
-        if summary["blocked"] == true {
-            "BLOCKED: required context does not fit"
-        } else {
-            "not delivered"
+    let preview_only = value["preview_only"] != false;
+    if summary.is_object() {
+        if preview_only {
+            lines.push(Line::raw(
+                "Snapshot only; sending rebuilds context from the current draft and workspace.",
+            ));
         }
-    )));
-    if let Some(warnings) = summary["warnings"].as_array() {
-        for warning in warnings {
-            if let Some(text) = warning.as_str() {
-                lines.push(Line::styled(
-                    text.to_string(),
-                    Style::default().fg(Color::Yellow),
-                ));
+        if summary["provider_id"]
+            .as_str()
+            .is_some_and(|provider| provider != state.selected_provider())
+        {
+            lines.push(Line::raw(
+                "Selected target changed; F5 rebuilds its preview.",
+            ));
+        }
+        lines.push(Line::raw(format!(
+            "{} · {} · {} estimated tokens · {}",
+            if preview_only {
+                "Preview only"
+            } else {
+                "Last submitted context"
+            },
+            summary["provider_id"].as_str().unwrap_or("unknown"),
+            summary["estimated_tokens"],
+            if summary["blocked"] == true {
+                "BLOCKED: inspect warnings before sending"
+            } else if preview_only {
+                "not delivered"
+            } else {
+                value["outcome"].as_str().unwrap_or("outcome unconfirmed")
+            }
+        )));
+        if let Some(warnings) = summary["warnings"].as_array() {
+            for warning in warnings {
+                if let Some(text) = warning.as_str() {
+                    lines.push(Line::styled(
+                        text.to_string(),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
             }
         }
+    } else {
+        lines.push(Line::raw(
+            "F5 previews context for the selected provider and current draft.",
+        ));
     }
     if let Some(requirements) = value["continuity"]["requirements"].as_object() {
         for (key, requirement) in requirements {
@@ -94,6 +114,9 @@ pub(super) fn continuity_context_lines(state: &TuiState) -> Vec<Line<'static>> {
                 requirement["revision"],
                 requirement["text"].as_str().unwrap_or("")
             )));
+            if let Some(source) = requirement["source_ref"].as_str() {
+                lines.push(Line::raw(format!("  source: {source}")));
+            }
         }
     }
     if let Some(turn) = value["continuity"]["active_turn"].as_object() {
@@ -130,8 +153,8 @@ pub(super) fn continuity_context_lines(state: &TuiState) -> Vec<Line<'static>> {
             )));
         }
     }
-    lines.push(Line::raw("PROMPT PREVIEW (sensitive lines redacted)"));
     if let Some(preview) = value["prompt_preview"].as_str() {
+        lines.push(Line::raw("PROMPT PREVIEW (sensitive lines redacted)"));
         lines.extend(preview.lines().map(|line| Line::raw(line.to_string())));
     }
     lines
@@ -141,6 +164,167 @@ pub(super) fn continuity_context_lines(state: &TuiState) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn attachments_can_be_detached_before_reconciling_an_unknown_execution() {
+        let mut state = TuiState {
+            session_id: Some("task_1".into()),
+            input: "/unimage".into(),
+            image_paths: vec![PathBuf::from("newer-draft.png")],
+            ..TuiState::default()
+        };
+        state.ui.execution_uncertain = true;
+        state.ui.uncertain_turn_id = Some("evt_unknown".into());
+        let (mut prompt, mut ui) = (None, None);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut prompt,
+            &mut ui,
+        )
+        .unwrap();
+        assert!(state.image_paths.is_empty());
+        assert!(state.input.is_empty());
+        assert!(state.ui.execution_uncertain && prompt.is_none() && ui.is_none());
+    }
+
+    #[test]
+    fn read_only_query_keeps_the_provider_submission_and_pending_execution() {
+        let mut state = TuiState {
+            session_id: Some("task_1".into()),
+            input: "newer input".into(),
+            ..TuiState::default()
+        };
+        state.ui.last_submission = Some(PendingPromptSubmission {
+            prompt: "original provider request".into(),
+            provider_id: "codex".into(),
+            image_paths: vec![],
+            workspace_id: Some("ws_1".into()),
+            session_id: Some("task_1".into()),
+        });
+        apply_action(
+            &mut state,
+            ActionResult {
+                action: Action::Requirements,
+                session_id: Some("task_1".into()),
+                workspace_id: None,
+                response: json!({"continuity":{"active_turn":{"id":"evt_running","uncertain":true},"requirements":{"api":{"text":"keep API","active":true,"revision":1,"source_ref":"evt_user"}}}}),
+                extra: Value::Null,
+            },
+        );
+        assert_eq!(
+            state.ui.last_submission.as_ref().unwrap().prompt,
+            "original provider request"
+        );
+        assert_eq!(state.input, "newer input");
+        assert!(state.ui.execution_uncertain);
+        assert_eq!(state.ui.panel, Panel::Context);
+        let text = continuity_context_lines(&state)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("keep API") && text.contains("source: evt_user"));
+        assert!(!text.contains("unknown · null"));
+    }
+
+    #[test]
+    fn a_requirements_query_cannot_clear_input_when_another_ui_task_is_busy() {
+        let mut state = TuiState {
+            session_id: Some("task_1".into()),
+            input: "/requirements".into(),
+            ..TuiState::default()
+        };
+        let (_sender, receiver) = mpsc::channel();
+        let mut ui = Some(UiTask { receiver });
+        let mut prompt = None;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut prompt,
+            &mut ui,
+        )
+        .unwrap();
+        assert_eq!(state.input, "/requirements");
+        assert!(ui.is_some() && prompt.is_none());
+    }
+
+    #[test]
+    fn cancellation_reflects_a_lease_started_by_another_client() {
+        let mut state = TuiState {
+            session_id: Some("task_1".into()),
+            activity_status: "idle".into(),
+            ..TuiState::default()
+        };
+        apply_action(
+            &mut state,
+            ActionResult {
+                action: Action::Cancel,
+                session_id: Some("task_1".into()),
+                workspace_id: None,
+                response: json!({"session":{"id":"task_1","status":"Canceled","active_provider_id":"codex","continuity":{"active_turn":{"id":"evt_other","uncertain":false}}}}),
+                extra: Value::Null,
+            },
+        );
+        assert!(state.ui.execution_uncertain);
+        let (mut prompt, mut ui) = (None, None);
+        run_command(&mut state, CommandId::New, &mut prompt, &mut ui).unwrap();
+        assert_eq!(state.session_id.as_deref(), Some("task_1"));
+    }
+
+    #[test]
+    fn a_submitted_context_is_distinct_from_an_unsent_preview() {
+        let mut state = TuiState::default();
+        state.ui.context = json!({"context":{"provider_id":"codex","estimated_tokens":10,"blocked":false},"preview_only":false,"outcome":"completed"});
+        let lines = continuity_context_lines(&state)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(lines.contains("Last submitted context") && lines.contains("completed"));
+        assert!(!lines.contains("not delivered") && !lines.contains("Preview only"));
+    }
+
+    #[test]
+    fn local_command_completion_applies_nested_state_and_keeps_requirements_visible() {
+        let mut state = TuiState {
+            session_id: Some("task_1".into()),
+            input: "newer draft".into(),
+            ..TuiState::default()
+        };
+        apply_continuity_status(
+            &mut state,
+            &json!({"continuity":{"active_turn":{"id":"evt_old","uncertain":true}}}),
+        );
+        let continuity = json!({"active_turn":null,"requirements":{"language":{"text":"中文回答","active":true,"revision":2}}});
+        apply_prompt_completion(
+            &mut state,
+            PromptTaskCompletion {
+                workspace_id: Some("ws_1".into()),
+                workspace_display: None,
+                session_id: "task_1".into(),
+                active_provider: Some("codex".into()),
+                route_reason: None,
+                prompt_response: json!({"local_command":true,"turn_status":"completed","session_status":"Running","session":{"active_provider_id":"codex","continuity":continuity}}),
+                events_response: json!({"events":[{"event_type":"session.execution.reconciled","payload":{"message":"Reviewed without replay"}}]}),
+                routes_response: json!({"routes":[]}),
+                diff_response: json!({"diff":{}}),
+            },
+        );
+        assert!(!state.ui.execution_uncertain);
+        assert!(state.ui.uncertain_turn_id.is_none());
+        assert_eq!(
+            state.ui.context["continuity"]["requirements"]["language"]["text"],
+            "中文回答"
+        );
+        assert_eq!(state.input, "newer draft");
+        let text = continuity_context_lines(&state)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("unknown · null"));
+    }
 
     #[test]
     fn capture_real_continuity_session_without_provider_calls() {

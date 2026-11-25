@@ -123,6 +123,12 @@ pub fn build_context_pack_with_estimator(
         .session
         .provider_native_session_ids
         .get(&input.target_provider.0);
+    let entry_changed = input
+        .session
+        .continuity
+        .checkpoints
+        .get(&input.target_provider.0)
+        .is_some_and(|receipt| receipt.execution_identity != identity);
     let checkpoint = input
         .session
         .continuity
@@ -144,7 +150,9 @@ pub fn build_context_pack_with_estimator(
             ContextPackStrategy::FullContextPack
         };
     let mut warnings = Vec::new();
-    if native_id.is_some() && anchor.is_none() {
+    if entry_changed {
+        warnings.push(format!("Execution entry changed. Review and /reset-provider {} before starting a new native session.",input.target_provider.0));
+    } else if native_id.is_some() && anchor.is_none() {
         warnings.push("Native history coverage is unverified; replaying Baize context, not assuming it is already known.".into());
     }
     if input.workspace_status.is_none() {
@@ -330,6 +338,13 @@ pub fn build_context_pack_with_estimator(
     if blocked {
         warnings.push("Required context exceeds the input budget. Increase the provider context budget or start a focused session; no provider call will be made.".into());
     }
+    blocked |= entry_changed
+        || input
+            .session
+            .continuity
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.uncertain);
     ContextPackBuildResult {
         strategy,
         prompt,

@@ -280,8 +280,8 @@ fn ask_output(options: AskOptions) -> Result<String> {
 }
 
 fn require_continuity_runtime(value: &Value) -> Result<()> {
-    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=1,
-        "Daemon does not support reliable continuity. Restart it with the current Baize binary; no prompt was sent");
+    anyhow::ensure!(value["runtime"]["capabilities"]["session_continuity"].as_u64().unwrap_or(0)>=2,
+        "Daemon requires continuity protocol 2. Restart it with the current Baize binary; no prompt was sent");
     Ok(())
 }
 
@@ -677,9 +677,13 @@ mod tests {
     }
     #[test]
     fn ask_rejects_old_daemons_before_creating_or_sending_a_session() {
-        assert!(require_continuity_runtime(&json!({"runtime":{}})).is_err());
         assert!(require_continuity_runtime(
             &json!({"runtime":{"capabilities":{"session_continuity":1}}})
+        )
+        .is_err());
+        assert!(require_continuity_runtime(&json!({"runtime":{}})).is_err());
+        assert!(require_continuity_runtime(
+            &json!({"runtime":{"capabilities":{"session_continuity":2}}})
         )
         .is_ok());
     }
